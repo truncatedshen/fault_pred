@@ -1,0 +1,14 @@
+{
+  "name": "fault-studio-ui-tests",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Optional DOM integration tests; the application itself requires no npm build",
+  "scripts": {
+    "test": "node --test tests/frontend.test.cjs",
+    "check": "node --check src/fault_platform/web/app.js",
+    "browser-check": "node scripts/browser_check.cjs"
+  },
+  "devDependencies": {
+    "jsdom": "26.1.0"
+  }
+}

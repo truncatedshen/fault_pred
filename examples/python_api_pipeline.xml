@@ -1,0 +1,193 @@
+<?xml version='1.0' encoding='utf-8'?>
+<faultPredictionPipeline id="pipeline_6e353060b694" name="设备故障 · 特征与模型验证" version="1.0" graphVersion="26">
+  <metadata>{"description": "合成设备数据演示；模型指标不代表真实工业效果", "seed": 42}</metadata>
+  <nodes>
+    <node id="source" type="data.input" componentVersion="1.0">
+      <position x="60" y="190"/>
+      <parameters>
+        <parameter name="path" encoding="json">"synthetic_equipment.csv"</parameter>
+        <parameter name="encoding" encoding="json">"utf-8-sig"</parameter>
+        <parameter name="separator" encoding="json">","</parameter>
+      </parameters>
+      <ports>
+        <outputPort name="dataset" dataType="Dataset" required="true"/>
+      </ports>
+      <ui>{}</ui>
+    </node>
+    <node id="filter" type="data.filter" componentVersion="1.0">
+      <position x="330" y="190"/>
+      <parameters>
+        <parameter name="column" encoding="json">"temperature"</parameter>
+        <parameter name="operator" encoding="json">"gt"</parameter>
+        <parameter name="value" encoding="json">0</parameter>
+        <parameter name="conditions" encoding="json">[]</parameter>
+        <parameter name="logical_operator" encoding="json">"and"</parameter>
+      </parameters>
+      <ports>
+        <inputPort name="dataset" dataType="Dataset" required="true"/>
+        <outputPort name="dataset" dataType="Dataset" required="true"/>
+      </ports>
+      <ui>{}</ui>
+    </node>
+    <node id="overview" type="visual.overview" componentVersion="1.0">
+      <position x="600" y="30"/>
+      <parameters>
+        <parameter name="time_column" encoding="json">"time"</parameter>
+      </parameters>
+      <ports>
+        <inputPort name="dataset" dataType="Dataset" required="true"/>
+        <outputPort name="overview" dataType="Visualization" required="true"/>
+      </ports>
+      <ui>{}</ui>
+    </node>
+    <node id="stat" type="feature.statistical" componentVersion="1.0">
+      <position x="600" y="225"/>
+      <parameters>
+        <parameter name="columns" encoding="json">["vibration", "temperature", "pressure"]</parameter>
+        <parameter name="group_column" encoding="json">"equipment"</parameter>
+        <parameter name="label_column" encoding="json">"label"</parameter>
+        <parameter name="time_column" encoding="json">null</parameter>
+        <parameter name="window_size" encoding="json">0</parameter>
+        <parameter name="step" encoding="json">0</parameter>
+        <parameter name="label_policy" encoding="json">"strict"</parameter>
+        <parameter name="features" encoding="json">["mean", "std", "rms", "kurtosis", "crest_factor"]</parameter>
+        <parameter name="quantile" encoding="json">0.75</parameter>
+      </parameters>
+      <ports>
+        <inputPort name="dataset" dataType="Dataset" required="true"/>
+        <outputPort name="features" dataType="FeatureDataset" required="true"/>
+        <outputPort name="labels" dataType="LabelVector" required="false"/>
+      </ports>
+      <ui>{}</ui>
+    </node>
+    <node id="fitting" type="feature.fitting" componentVersion="1.0">
+      <position x="600" y="440"/>
+      <parameters>
+        <parameter name="columns" encoding="json">["vibration"]</parameter>
+        <parameter name="group_column" encoding="json">"equipment"</parameter>
+        <parameter name="label_column" encoding="json">"label"</parameter>
+        <parameter name="time_column" encoding="json">"time"</parameter>
+        <parameter name="window_size" encoding="json">0</parameter>
+        <parameter name="step" encoding="json">0</parameter>
+        <parameter name="label_policy" encoding="json">"strict"</parameter>
+        <parameter name="fitting_method" encoding="json">"linear"</parameter>
+        <parameter name="degree" encoding="json">2</parameter>
+      </parameters>
+      <ports>
+        <inputPort name="dataset" dataType="Dataset" required="true"/>
+        <outputPort name="features" dataType="FeatureDataset" required="true"/>
+        <outputPort name="labels" dataType="LabelVector" required="false"/>
+      </ports>
+      <ui>{}</ui>
+    </node>
+    <node id="merge" type="feature.merge" componentVersion="1.0">
+      <position x="885" y="245"/>
+      <parameters/>
+      <ports>
+        <inputPort name="left" dataType="FeatureDataset" required="true"/>
+        <inputPort name="right" dataType="FeatureDataset" required="true"/>
+        <outputPort name="features" dataType="FeatureDataset" required="true"/>
+      </ports>
+      <ui>{}</ui>
+    </node>
+    <node id="forest" type="validation.random_forest" componentVersion="1.0">
+      <position x="1170" y="145"/>
+      <parameters>
+        <parameter name="split_method" encoding="json">"group"</parameter>
+        <parameter name="test_size" encoding="json">0.25</parameter>
+        <parameter name="random_state" encoding="json">42</parameter>
+        <parameter name="n_estimators" encoding="json">100</parameter>
+        <parameter name="max_depth" encoding="json">null</parameter>
+        <parameter name="min_samples_split" encoding="json">2</parameter>
+        <parameter name="min_samples_leaf" encoding="json">1</parameter>
+        <parameter name="class_weight" encoding="json">null</parameter>
+      </parameters>
+      <ports>
+        <inputPort name="features" dataType="FeatureDataset" required="true"/>
+        <inputPort name="labels" dataType="LabelVector" required="true"/>
+        <outputPort name="model" dataType="Model" required="true"/>
+        <outputPort name="prediction" dataType="Prediction" required="true"/>
+        <outputPort name="metrics" dataType="Metrics" required="true"/>
+        <outputPort name="importance" dataType="FeatureImportance" required="true"/>
+      </ports>
+      <ui>{}</ui>
+    </node>
+    <node id="svm" type="validation.svm" componentVersion="1.0">
+      <position x="1170" y="405"/>
+      <parameters>
+        <parameter name="split_method" encoding="json">"group"</parameter>
+        <parameter name="test_size" encoding="json">0.25</parameter>
+        <parameter name="random_state" encoding="json">42</parameter>
+        <parameter name="kernel" encoding="json">"rbf"</parameter>
+        <parameter name="C" encoding="json">1.0</parameter>
+        <parameter name="gamma" encoding="json">"scale"</parameter>
+        <parameter name="class_weight" encoding="json">null</parameter>
+        <parameter name="probability" encoding="json">true</parameter>
+      </parameters>
+      <ports>
+        <inputPort name="features" dataType="FeatureDataset" required="true"/>
+        <inputPort name="labels" dataType="LabelVector" required="true"/>
+        <outputPort name="model" dataType="Model" required="true"/>
+        <outputPort name="prediction" dataType="Prediction" required="true"/>
+        <outputPort name="metrics" dataType="Metrics" required="true"/>
+      </ports>
+      <ui>{}</ui>
+    </node>
+    <node id="compare" type="validation.compare" componentVersion="1.0">
+      <position x="1460" y="245"/>
+      <parameters/>
+      <ports>
+        <inputPort name="first" dataType="Metrics" required="true"/>
+        <inputPort name="second" dataType="Metrics" required="true"/>
+        <inputPort name="third" dataType="Metrics" required="false"/>
+        <outputPort name="comparison" dataType="StatisticsResult" required="true"/>
+      </ports>
+      <ui>{}</ui>
+    </node>
+    <node id="standardize" type="data.standardization" componentVersion="1.0">
+      <position x="330" y="630"/>
+      <parameters>
+        <parameter name="columns" encoding="json">["vibration"]</parameter>
+        <parameter name="method" encoding="json">"zscore"</parameter>
+        <parameter name="with_mean" encoding="json">true</parameter>
+        <parameter name="with_std" encoding="json">true</parameter>
+      </parameters>
+      <ports>
+        <inputPort name="dataset" dataType="Dataset" required="true"/>
+        <outputPort name="dataset" dataType="Dataset" required="true"/>
+      </ports>
+      <ui>{}</ui>
+    </node>
+    <node id="line" type="visual.line" componentVersion="1.0">
+      <position x="620" y="665"/>
+      <parameters>
+        <parameter name="time_column" encoding="json">"time"</parameter>
+        <parameter name="value_columns" encoding="json">["vibration"]</parameter>
+        <parameter name="group" encoding="json">"equipment"</parameter>
+        <parameter name="title" encoding="json">"标准化振动信号 · 探索分支"</parameter>
+      </parameters>
+      <ports>
+        <inputPort name="dataset" dataType="Dataset" required="true"/>
+        <outputPort name="plot" dataType="PlotArtifact" required="true"/>
+      </ports>
+      <ui>{}</ui>
+    </node>
+  </nodes>
+  <connections>
+    <connection sourceNode="source" sourcePort="dataset" targetNode="filter" targetPort="dataset"/>
+    <connection sourceNode="filter" sourcePort="dataset" targetNode="overview" targetPort="dataset"/>
+    <connection sourceNode="filter" sourcePort="dataset" targetNode="stat" targetPort="dataset"/>
+    <connection sourceNode="filter" sourcePort="dataset" targetNode="fitting" targetPort="dataset"/>
+    <connection sourceNode="stat" sourcePort="features" targetNode="merge" targetPort="left"/>
+    <connection sourceNode="fitting" sourcePort="features" targetNode="merge" targetPort="right"/>
+    <connection sourceNode="merge" sourcePort="features" targetNode="forest" targetPort="features"/>
+    <connection sourceNode="stat" sourcePort="labels" targetNode="forest" targetPort="labels"/>
+    <connection sourceNode="merge" sourcePort="features" targetNode="svm" targetPort="features"/>
+    <connection sourceNode="stat" sourcePort="labels" targetNode="svm" targetPort="labels"/>
+    <connection sourceNode="forest" sourcePort="metrics" targetNode="compare" targetPort="first"/>
+    <connection sourceNode="svm" sourcePort="metrics" targetNode="compare" targetPort="second"/>
+    <connection sourceNode="filter" sourcePort="dataset" targetNode="standardize" targetPort="dataset"/>
+    <connection sourceNode="standardize" sourcePort="dataset" targetNode="line" targetPort="dataset"/>
+  </connections>
+  <ui>{}</ui>
+</faultPredictionPipeline>

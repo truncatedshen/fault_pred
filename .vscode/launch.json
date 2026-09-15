@@ -1,0 +1,26 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Fault Studio · Web",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "fault_platform",
+      "args": ["serve", "--port", "8765"],
+      "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "Fault Studio · Demo",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "fault_platform",
+      "args": ["demo", "--xgboost"],
+      "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal"
+    }
+  ]
+}

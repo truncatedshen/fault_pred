@@ -1,0 +1,2754 @@
+[
+  {
+    "component_type": "data.input",
+    "display_name": "数据输入",
+    "category": "data",
+    "description": "Read a local CSV or Parquet file, optionally with a column projection and row limit",
+    "version": "1.0",
+    "subcategory": "",
+    "tags": [
+      "csv",
+      "parquet",
+      "source"
+    ],
+    "input_ports": [],
+    "output_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "path",
+        "type": "string",
+        "default": null,
+        "required": true,
+        "display_name": "",
+        "description": "CSV or Parquet path relative to the server data directory",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "format",
+        "type": "enum",
+        "default": "csv",
+        "required": false,
+        "display_name": "",
+        "description": "Parquet needs the pyarrow extra",
+        "min": null,
+        "max": null,
+        "options": [
+          "csv",
+          "parquet"
+        ],
+        "allow_multiple": false
+      },
+      {
+        "name": "encoding",
+        "type": "string",
+        "default": "utf-8-sig",
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "separator",
+        "type": "string",
+        "default": ",",
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "columns",
+        "type": "column_list",
+        "default": [],
+        "required": false,
+        "display_name": "",
+        "description": "Column names; numeric components default to all numeric columns",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "max_rows",
+        "type": "integer",
+        "default": 0,
+        "required": false,
+        "display_name": "",
+        "description": "0 reads every row; a positive value bounds the read (big-file mode)",
+        "min": 0,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "filters",
+        "type": "list",
+        "default": [],
+        "required": false,
+        "display_name": "",
+        "description": "Parquet predicate pushdown, e.g. [[\"equipment\", \">\", 10]]",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "streaming",
+        "type": "boolean",
+        "default": false,
+        "required": false,
+        "display_name": "",
+        "description": "Keep rows on disk and hand chunked reads to components that support streaming",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "chunk_rows",
+        "type": "integer",
+        "default": 200000,
+        "required": false,
+        "display_name": "",
+        "description": "Rows per chunk when streaming",
+        "min": 100,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.DataInputComponent"
+  },
+  {
+    "component_type": "data.materialize",
+    "display_name": "物化数据",
+    "category": "data",
+    "description": "Load a streamed dataset fully into memory so global operations (sort, dedup, plots) can run",
+    "version": "1.0",
+    "subcategory": "",
+    "tags": [
+      "streaming",
+      "materialize"
+    ],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [],
+    "implementation_class": "fault_platform.components.builtin.MaterializeComponent"
+  },
+  {
+    "component_type": "data.quality",
+    "display_name": "数据质量预检",
+    "category": "data",
+    "description": "Per-group constant/zero columns, flat-window ratio, duplicate rows and mixed-label windows",
+    "version": "1.0",
+    "subcategory": "预检",
+    "tags": [
+      "quality",
+      "预检",
+      "flat",
+      "constant"
+    ],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "report",
+        "data_type": "Visualization",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "columns",
+        "type": "column_list",
+        "default": [],
+        "required": false,
+        "display_name": "",
+        "description": "Column names; numeric components default to all numeric columns",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "group_column",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "Instance/asset id used for per-group checks",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "label_column",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "Counts windows whose label changes inside",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "time_column",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "window_size",
+        "type": "integer",
+        "default": 0,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 0,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "step",
+        "type": "integer",
+        "default": 0,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 0,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "max_groups",
+        "type": "integer",
+        "default": 20,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 1,
+        "max": 200,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "flat_threshold",
+        "type": "float",
+        "default": 0.0,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 0,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.QualityComponent"
+  },
+  {
+    "component_type": "data.filter",
+    "display_name": "条件过滤",
+    "category": "data",
+    "description": "Select rows using a typed predicate",
+    "version": "1.0",
+    "subcategory": "",
+    "tags": [
+      "filter",
+      "清洗"
+    ],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "column",
+        "type": "column",
+        "default": null,
+        "required": true,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "operator",
+        "type": "enum",
+        "default": "gt",
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [
+          "gt",
+          "ge",
+          "lt",
+          "le",
+          "eq",
+          "ne",
+          ">",
+          ">=",
+          "<",
+          "<=",
+          "==",
+          "!=",
+          "in",
+          "between"
+        ],
+        "allow_multiple": false
+      },
+      {
+        "name": "value",
+        "type": "any",
+        "default": 0,
+        "required": true,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "conditions",
+        "type": "list",
+        "default": [],
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "logical_operator",
+        "type": "enum",
+        "default": "and",
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [
+          "and",
+          "or"
+        ],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.FilterComponent"
+  },
+  {
+    "component_type": "data.row_operation",
+    "display_name": "行操作",
+    "category": "data",
+    "description": "Sample, sort, slice, drop or deduplicate rows",
+    "version": "1.0",
+    "subcategory": "",
+    "tags": [],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "operation",
+        "type": "enum",
+        "default": "head",
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [
+          "head",
+          "tail",
+          "range",
+          "sample",
+          "sort",
+          "drop_rows",
+          "remove_duplicates",
+          "drop_missing"
+        ],
+        "allow_multiple": false
+      },
+      {
+        "name": "count",
+        "type": "integer",
+        "default": 10,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 1,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "start",
+        "type": "integer",
+        "default": 0,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 0,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "columns",
+        "type": "column_list",
+        "default": [],
+        "required": false,
+        "display_name": "",
+        "description": "Column names; numeric components default to all numeric columns",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "ascending",
+        "type": "boolean",
+        "default": true,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "indices",
+        "type": "list",
+        "default": [],
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "random_state",
+        "type": "integer",
+        "default": 42,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 0,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.RowOperationComponent"
+  },
+  {
+    "component_type": "data.column_operation",
+    "display_name": "列操作",
+    "category": "data",
+    "description": "Select, drop, rename, reorder, create or cast columns",
+    "version": "1.0",
+    "subcategory": "",
+    "tags": [],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "operation",
+        "type": "enum",
+        "default": "select",
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [
+          "select",
+          "drop",
+          "rename",
+          "reorder",
+          "create",
+          "cast_type"
+        ],
+        "allow_multiple": false
+      },
+      {
+        "name": "columns",
+        "type": "column_list",
+        "default": [],
+        "required": false,
+        "display_name": "",
+        "description": "Column names; numeric components default to all numeric columns",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "mapping",
+        "type": "object",
+        "default": {},
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "name",
+        "type": "string",
+        "default": "",
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "expression_text",
+        "type": "expression",
+        "default": "",
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "dtype",
+        "type": "enum",
+        "default": "float64",
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [
+          "float64",
+          "int64",
+          "string",
+          "bool"
+        ],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.ColumnOperationComponent"
+  },
+  {
+    "component_type": "data.normalization",
+    "display_name": "规范化",
+    "category": "data",
+    "description": "Min-Max, L1, L2 or MaxAbs scaling",
+    "version": "1.0",
+    "subcategory": "",
+    "tags": [],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "columns",
+        "type": "column_list",
+        "default": [],
+        "required": false,
+        "display_name": "",
+        "description": "Column names; numeric components default to all numeric columns",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "method",
+        "type": "enum",
+        "default": "minmax",
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [
+          "minmax",
+          "l1",
+          "l2",
+          "maxabs"
+        ],
+        "allow_multiple": false
+      },
+      {
+        "name": "feature_range",
+        "type": "list",
+        "default": [
+          0,
+          1
+        ],
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.NormalizationComponent"
+  },
+  {
+    "component_type": "data.standardization",
+    "display_name": "标准化",
+    "category": "data",
+    "description": "Z-score or robust scaling; full-data fit is marked exploratory",
+    "version": "1.0",
+    "subcategory": "",
+    "tags": [],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "columns",
+        "type": "column_list",
+        "default": [],
+        "required": false,
+        "display_name": "",
+        "description": "Column names; numeric components default to all numeric columns",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "method",
+        "type": "enum",
+        "default": "zscore",
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [
+          "zscore",
+          "robust"
+        ],
+        "allow_multiple": false
+      },
+      {
+        "name": "with_mean",
+        "type": "boolean",
+        "default": true,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "with_std",
+        "type": "boolean",
+        "default": true,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.StandardizationComponent"
+  },
+  {
+    "component_type": "data.transformation",
+    "display_name": "数值转换",
+    "category": "data",
+    "description": "Log, power and bounded arithmetic expressions",
+    "version": "1.0",
+    "subcategory": "",
+    "tags": [],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "columns",
+        "type": "column_list",
+        "default": [],
+        "required": false,
+        "display_name": "",
+        "description": "Column names; numeric components default to all numeric columns",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "method",
+        "type": "enum",
+        "default": "log1p",
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [
+          "log",
+          "log1p",
+          "sqrt",
+          "power",
+          "box-cox",
+          "yeo-johnson",
+          "expression"
+        ],
+        "allow_multiple": false
+      },
+      {
+        "name": "power",
+        "type": "float",
+        "default": 2,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": -10,
+        "max": 10,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "expression_text",
+        "type": "expression",
+        "default": "x",
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.TransformationComponent"
+  },
+  {
+    "component_type": "explore.central_tendency",
+    "display_name": "集中趋势",
+    "category": "explore",
+    "description": "Mean, median, mode and weighted mean",
+    "version": "1.0",
+    "subcategory": "",
+    "tags": [],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "statistics",
+        "data_type": "StatisticsResult",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "columns",
+        "type": "column_list",
+        "default": [],
+        "required": false,
+        "display_name": "",
+        "description": "Column names; numeric components default to all numeric columns",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "method",
+        "type": "enum",
+        "default": "mean",
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [
+          "mean",
+          "median",
+          "mode",
+          "weighted_mean"
+        ],
+        "allow_multiple": false
+      },
+      {
+        "name": "weight_column",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.CentralTendencyComponent"
+  },
+  {
+    "component_type": "explore.dispersion",
+    "display_name": "离散度量",
+    "category": "explore",
+    "description": "Variance, standard deviation, range, IQR, MAD and CV",
+    "version": "1.0",
+    "subcategory": "",
+    "tags": [],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "statistics",
+        "data_type": "StatisticsResult",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "columns",
+        "type": "column_list",
+        "default": [],
+        "required": false,
+        "display_name": "",
+        "description": "Column names; numeric components default to all numeric columns",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "method",
+        "type": "enum",
+        "default": "std",
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [
+          "std",
+          "variance",
+          "range",
+          "iqr",
+          "mad",
+          "cv"
+        ],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.DispersionComponent"
+  },
+  {
+    "component_type": "explore.correlation",
+    "display_name": "相关性度量",
+    "category": "explore",
+    "description": "Pearson, Spearman or Kendall correlation",
+    "version": "1.0",
+    "subcategory": "",
+    "tags": [],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "matrix",
+        "data_type": "CorrelationMatrix",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "columns",
+        "type": "column_list",
+        "default": [],
+        "required": false,
+        "display_name": "",
+        "description": "Column names; numeric components default to all numeric columns",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "method",
+        "type": "enum",
+        "default": "pearson",
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [
+          "pearson",
+          "spearman",
+          "kendall"
+        ],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.CorrelationComponent"
+  },
+  {
+    "component_type": "visual.scatter",
+    "display_name": "散点图",
+    "category": "visual",
+    "description": "Bounded scatter plot with optional groups",
+    "version": "1.0",
+    "subcategory": "",
+    "tags": [],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "plot",
+        "data_type": "PlotArtifact",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "x",
+        "type": "column",
+        "default": null,
+        "required": true,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "y",
+        "type": "column",
+        "default": null,
+        "required": true,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "group",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "title",
+        "type": "string",
+        "default": "Scatter plot",
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "x_label",
+        "type": "string",
+        "default": "",
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "y_label",
+        "type": "string",
+        "default": "",
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.ScatterPlotComponent"
+  },
+  {
+    "component_type": "visual.line",
+    "display_name": "折线图",
+    "category": "visual",
+    "description": "Time series plot with bounded samples",
+    "version": "1.0",
+    "subcategory": "",
+    "tags": [],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "plot",
+        "data_type": "PlotArtifact",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "time_column",
+        "type": "column",
+        "default": null,
+        "required": true,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "value_columns",
+        "type": "column_list",
+        "default": null,
+        "required": true,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "group",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "title",
+        "type": "string",
+        "default": "Time series",
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.LinePlotComponent"
+  },
+  {
+    "component_type": "visual.overview",
+    "display_name": "数据概览",
+    "category": "visual",
+    "description": "Shape, dtypes, missing rates, summary and time range",
+    "version": "1.0",
+    "subcategory": "",
+    "tags": [],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "overview",
+        "data_type": "Visualization",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "time_column",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.DataOverviewComponent"
+  },
+  {
+    "component_type": "feature.statistical",
+    "display_name": "统计特征",
+    "category": "feature",
+    "description": "Grouped/windowed statistics and aligned window labels",
+    "version": "1.0",
+    "subcategory": "",
+    "tags": [
+      "window",
+      "rms",
+      "时序"
+    ],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "features",
+        "data_type": "FeatureDataset",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "labels",
+        "data_type": "LabelVector",
+        "required": false,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "columns",
+        "type": "column_list",
+        "default": null,
+        "required": true,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "group_column",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "Equipment/run identifier",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "label_column",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "Generates labels aligned with feature windows",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "time_column",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "window_size",
+        "type": "integer",
+        "default": 0,
+        "required": false,
+        "display_name": "",
+        "description": "0 = entire group; otherwise complete windows",
+        "min": 0,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "step",
+        "type": "integer",
+        "default": 0,
+        "required": false,
+        "display_name": "",
+        "description": "0 = non-overlapping windows",
+        "min": 0,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "label_policy",
+        "type": "enum",
+        "default": "strict",
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [
+          "strict",
+          "last",
+          "mode"
+        ],
+        "allow_multiple": false
+      },
+      {
+        "name": "features",
+        "type": "feature_list",
+        "default": [
+          "mean",
+          "std",
+          "rms"
+        ],
+        "required": true,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [
+          "mean",
+          "std",
+          "variance",
+          "min",
+          "max",
+          "median",
+          "rms",
+          "skewness",
+          "kurtosis",
+          "quantile",
+          "range",
+          "iqr",
+          "mad",
+          "peak",
+          "crest_factor"
+        ],
+        "allow_multiple": false
+      },
+      {
+        "name": "quantile",
+        "type": "float",
+        "default": 0.75,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 0,
+        "max": 1,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.StatisticalFeatureComponent"
+  },
+  {
+    "component_type": "feature.fitting",
+    "display_name": "拟合特征",
+    "category": "feature",
+    "description": "Linear, polynomial or exponential trends with residual and R² features",
+    "version": "1.0",
+    "subcategory": "",
+    "tags": [],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "features",
+        "data_type": "FeatureDataset",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "labels",
+        "data_type": "LabelVector",
+        "required": false,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "columns",
+        "type": "column_list",
+        "default": null,
+        "required": true,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "group_column",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "Equipment/run identifier",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "label_column",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "Generates labels aligned with feature windows",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "time_column",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "window_size",
+        "type": "integer",
+        "default": 0,
+        "required": false,
+        "display_name": "",
+        "description": "0 = entire group; otherwise complete windows",
+        "min": 0,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "step",
+        "type": "integer",
+        "default": 0,
+        "required": false,
+        "display_name": "",
+        "description": "0 = non-overlapping windows",
+        "min": 0,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "label_policy",
+        "type": "enum",
+        "default": "strict",
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [
+          "strict",
+          "last",
+          "mode"
+        ],
+        "allow_multiple": false
+      },
+      {
+        "name": "fitting_method",
+        "type": "enum",
+        "default": "linear",
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [
+          "linear",
+          "polynomial",
+          "exponential"
+        ],
+        "allow_multiple": false
+      },
+      {
+        "name": "degree",
+        "type": "integer",
+        "default": 2,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 1,
+        "max": 5,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.FittingFeatureComponent"
+  },
+  {
+    "component_type": "feature.categorical",
+    "display_name": "分类特征",
+    "category": "feature",
+    "description": "Fit a reusable categorical encoder and produce aligned numeric training features",
+    "version": "1.0",
+    "subcategory": "",
+    "tags": [],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "features",
+        "data_type": "FeatureDataset",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "encoder",
+        "data_type": "FeatureTransformer",
+        "required": true,
+        "description": "Fitted mappings and fixed output schema"
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "columns",
+        "type": "column_list",
+        "default": null,
+        "required": true,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "method",
+        "type": "enum",
+        "default": "onehot",
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [
+          "onehot",
+          "ordinal",
+          "frequency",
+          "target",
+          "category_statistics"
+        ],
+        "allow_multiple": false
+      },
+      {
+        "name": "target_column",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "random_state",
+        "type": "integer",
+        "default": 42,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 0,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "handle_unknown",
+        "type": "enum",
+        "default": "ignore",
+        "required": false,
+        "display_name": "",
+        "description": "ignore uses all-zero/-1/zero/global-mean values; error rejects unseen categories",
+        "min": null,
+        "max": null,
+        "options": [
+          "ignore",
+          "error"
+        ],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.CategoricalFeatureComponent"
+  },
+  {
+    "component_type": "feature.categorical_transform",
+    "display_name": "分类特征变换",
+    "category": "feature",
+    "description": "Apply a fitted categorical encoder without learning from inference data",
+    "version": "1.0",
+    "subcategory": "",
+    "tags": [
+      "categorical",
+      "inference",
+      "transform"
+    ],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "encoder",
+        "data_type": "FeatureTransformer",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "features",
+        "data_type": "FeatureDataset",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [],
+    "implementation_class": "fault_platform.components.builtin.CategoricalTransformComponent"
+  },
+  {
+    "component_type": "feature.spectral",
+    "display_name": "频域特征",
+    "category": "feature",
+    "description": "FFT amplitude features per window: dominant frequency, centroid, entropy, band and harmonic ratios",
+    "version": "1.0",
+    "subcategory": "频域",
+    "tags": [
+      "fft",
+      "spectrum",
+      "时序"
+    ],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "features",
+        "data_type": "FeatureDataset",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "labels",
+        "data_type": "LabelVector",
+        "required": false,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "columns",
+        "type": "column_list",
+        "default": null,
+        "required": true,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "group_column",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "Equipment/run identifier",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "label_column",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "Generates labels aligned with feature windows",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "time_column",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "window_size",
+        "type": "integer",
+        "default": 0,
+        "required": false,
+        "display_name": "",
+        "description": "0 = entire group; otherwise complete windows",
+        "min": 0,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "step",
+        "type": "integer",
+        "default": 0,
+        "required": false,
+        "display_name": "",
+        "description": "0 = non-overlapping windows",
+        "min": 0,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "label_policy",
+        "type": "enum",
+        "default": "strict",
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [
+          "strict",
+          "last",
+          "mode"
+        ],
+        "allow_multiple": false
+      },
+      {
+        "name": "sampling_rate",
+        "type": "float",
+        "default": null,
+        "required": true,
+        "display_name": "",
+        "description": "Raw samples per second; required to report physical frequencies",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "features",
+        "type": "feature_list",
+        "default": [
+          "dominant_frequency",
+          "spectral_centroid",
+          "spectral_entropy",
+          "band_energy_ratio"
+        ],
+        "required": true,
+        "display_name": "",
+        "description": "Every value is produced per selected column",
+        "min": null,
+        "max": null,
+        "options": [
+          "dominant_frequency",
+          "dominant_amplitude",
+          "spectral_centroid",
+          "spectral_spread",
+          "spectral_entropy",
+          "spectral_rms",
+          "high_frequency_ratio",
+          "harmonic_ratio",
+          "band_energy_ratio"
+        ],
+        "allow_multiple": false
+      },
+      {
+        "name": "band_edges",
+        "type": "list",
+        "default": [
+          0.25,
+          0.5
+        ],
+        "required": false,
+        "display_name": "",
+        "description": "Band boundaries as fractions of Nyquist; produces band_energy_ratio_i",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "harmonic_tolerance",
+        "type": "float",
+        "default": 0.02,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 0,
+        "max": 0.5,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "flat_policy",
+        "type": "enum",
+        "default": "nan",
+        "required": false,
+        "display_name": "",
+        "description": "Constant (held/quantised) windows: nan keeps row alignment, skip drops the window, error fails",
+        "min": null,
+        "max": null,
+        "options": [
+          "nan",
+          "skip",
+          "error"
+        ],
+        "allow_multiple": false
+      },
+      {
+        "name": "flat_threshold",
+        "type": "float",
+        "default": 0.0,
+        "required": false,
+        "display_name": "",
+        "description": "Peak-to-peak below this counts as a flat window",
+        "min": 0,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.SpectralFeatureComponent"
+  },
+  {
+    "component_type": "feature.score_select",
+    "display_name": "特征评分选择",
+    "category": "feature",
+    "description": "Rank features by variance, correlation pruning, mutual information or model importance",
+    "version": "1.0",
+    "subcategory": "选择",
+    "tags": [
+      "selection",
+      "importance"
+    ],
+    "input_ports": [
+      {
+        "name": "features",
+        "data_type": "FeatureDataset",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "labels",
+        "data_type": "LabelVector",
+        "required": false,
+        "description": ""
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "features",
+        "data_type": "FeatureDataset",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "scores",
+        "data_type": "FeatureImportance",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "method",
+        "type": "enum",
+        "default": "variance",
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [
+          "variance",
+          "correlation",
+          "mutual_information",
+          "model"
+        ],
+        "allow_multiple": false
+      },
+      {
+        "name": "top_k",
+        "type": "integer",
+        "default": 0,
+        "required": false,
+        "display_name": "",
+        "description": "0 keeps every feature above the threshold",
+        "min": 0,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "threshold",
+        "type": "float",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "Defaults: 0 for variance, 0.95 for correlation",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "random_state",
+        "type": "integer",
+        "default": 42,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 0,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.ScoreSelectComponent"
+  },
+  {
+    "component_type": "feature.pca",
+    "display_name": "主成分分析",
+    "category": "feature",
+    "description": "Project features onto principal components and report the explained variance",
+    "version": "1.0",
+    "subcategory": "降维",
+    "tags": [
+      "pca",
+      "降维"
+    ],
+    "input_ports": [
+      {
+        "name": "features",
+        "data_type": "FeatureDataset",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "features",
+        "data_type": "FeatureDataset",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "variance",
+        "data_type": "StatisticsResult",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "n_components",
+        "type": "integer",
+        "default": 2,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 1,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "columns",
+        "type": "column_list",
+        "default": [],
+        "required": false,
+        "display_name": "",
+        "description": "Column names; numeric components default to all numeric columns",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "whiten",
+        "type": "boolean",
+        "default": false,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.PcaComponent"
+  },
+  {
+    "component_type": "validation.random_forest",
+    "display_name": "随机森林",
+    "category": "validation",
+    "description": "Random Forest classification with reproducible holdout evaluation",
+    "version": "1.0",
+    "subcategory": "",
+    "tags": [],
+    "input_ports": [
+      {
+        "name": "features",
+        "data_type": "FeatureDataset",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "labels",
+        "data_type": "LabelVector",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "model",
+        "data_type": "Model",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "prediction",
+        "data_type": "Prediction",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "metrics",
+        "data_type": "Metrics",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "importance",
+        "data_type": "FeatureImportance",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "split_method",
+        "type": "enum",
+        "default": "stratified",
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [
+          "stratified",
+          "group",
+          "temporal"
+        ],
+        "allow_multiple": false
+      },
+      {
+        "name": "test_size",
+        "type": "float",
+        "default": 0.25,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 0.05,
+        "max": 0.5,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "random_state",
+        "type": "integer",
+        "default": 42,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 0,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "n_estimators",
+        "type": "integer",
+        "default": 100,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 1,
+        "max": 2000,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "max_depth",
+        "type": "integer",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 1,
+        "max": 100,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "min_samples_split",
+        "type": "integer",
+        "default": 2,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 2,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "min_samples_leaf",
+        "type": "integer",
+        "default": 1,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 1,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "class_weight",
+        "type": "enum",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [
+          "balanced",
+          "balanced_subsample"
+        ],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.RandomForestComponent"
+  },
+  {
+    "component_type": "validation.svm",
+    "display_name": "支持向量机",
+    "category": "validation",
+    "description": "SVM with standardization fitted on training data only",
+    "version": "1.0",
+    "subcategory": "",
+    "tags": [],
+    "input_ports": [
+      {
+        "name": "features",
+        "data_type": "FeatureDataset",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "labels",
+        "data_type": "LabelVector",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "model",
+        "data_type": "Model",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "prediction",
+        "data_type": "Prediction",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "metrics",
+        "data_type": "Metrics",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "split_method",
+        "type": "enum",
+        "default": "stratified",
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [
+          "stratified",
+          "group",
+          "temporal"
+        ],
+        "allow_multiple": false
+      },
+      {
+        "name": "test_size",
+        "type": "float",
+        "default": 0.25,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 0.05,
+        "max": 0.5,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "random_state",
+        "type": "integer",
+        "default": 42,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 0,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "kernel",
+        "type": "enum",
+        "default": "rbf",
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [
+          "linear",
+          "poly",
+          "rbf",
+          "sigmoid"
+        ],
+        "allow_multiple": false
+      },
+      {
+        "name": "C",
+        "type": "float",
+        "default": 1.0,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 1e-06,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "gamma",
+        "type": "enum",
+        "default": "scale",
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [
+          "scale",
+          "auto"
+        ],
+        "allow_multiple": false
+      },
+      {
+        "name": "class_weight",
+        "type": "enum",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [
+          "balanced"
+        ],
+        "allow_multiple": false
+      },
+      {
+        "name": "probability",
+        "type": "boolean",
+        "default": true,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.SVMComponent"
+  },
+  {
+    "component_type": "validation.xgboost",
+    "display_name": "XGBoost",
+    "category": "validation",
+    "description": "XGBoost classification; optional xgboost dependency",
+    "version": "1.0",
+    "subcategory": "",
+    "tags": [],
+    "input_ports": [
+      {
+        "name": "features",
+        "data_type": "FeatureDataset",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "labels",
+        "data_type": "LabelVector",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "model",
+        "data_type": "Model",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "prediction",
+        "data_type": "Prediction",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "metrics",
+        "data_type": "Metrics",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "importance",
+        "data_type": "FeatureImportance",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "split_method",
+        "type": "enum",
+        "default": "stratified",
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [
+          "stratified",
+          "group",
+          "temporal"
+        ],
+        "allow_multiple": false
+      },
+      {
+        "name": "test_size",
+        "type": "float",
+        "default": 0.25,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 0.05,
+        "max": 0.5,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "random_state",
+        "type": "integer",
+        "default": 42,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 0,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "n_estimators",
+        "type": "integer",
+        "default": 100,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 1,
+        "max": 2000,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "max_depth",
+        "type": "integer",
+        "default": 4,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 1,
+        "max": 32,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "learning_rate",
+        "type": "float",
+        "default": 0.1,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 0.0001,
+        "max": 1,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "subsample",
+        "type": "float",
+        "default": 1.0,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 0.01,
+        "max": 1,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "colsample_bytree",
+        "type": "float",
+        "default": 1.0,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 0.01,
+        "max": 1,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "objective",
+        "type": "enum",
+        "default": "auto",
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [
+          "auto",
+          "binary:logistic",
+          "multi:softprob"
+        ],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.XGBoostComponent"
+  },
+  {
+    "component_type": "data.labels",
+    "display_name": "标签向量",
+    "category": "data",
+    "description": "Extract row-aligned labels for tabular features",
+    "version": "1.0",
+    "subcategory": "",
+    "tags": [],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "labels",
+        "data_type": "LabelVector",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "column",
+        "type": "column",
+        "default": null,
+        "required": true,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.LabelComponent"
+  },
+  {
+    "component_type": "feature.select",
+    "display_name": "选择已有特征",
+    "category": "feature",
+    "description": "Explicit Dataset to FeatureDataset conversion",
+    "version": "1.0",
+    "subcategory": "",
+    "tags": [],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "features",
+        "data_type": "FeatureDataset",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "columns",
+        "type": "column_list",
+        "default": null,
+        "required": true,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.SelectFeatureComponent"
+  },
+  {
+    "component_type": "feature.merge",
+    "display_name": "合并特征",
+    "category": "feature",
+    "description": "Join two feature branches with identical row/window provenance",
+    "version": "1.0",
+    "subcategory": "",
+    "tags": [],
+    "input_ports": [
+      {
+        "name": "left",
+        "data_type": "FeatureDataset",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "right",
+        "data_type": "FeatureDataset",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "features",
+        "data_type": "FeatureDataset",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [],
+    "implementation_class": "fault_platform.components.builtin.MergeFeatureComponent"
+  },
+  {
+    "component_type": "validation.compare",
+    "display_name": "模型对比",
+    "category": "validation",
+    "description": "Compare up to three model metrics on identical holdout rows",
+    "version": "1.0",
+    "subcategory": "",
+    "tags": [],
+    "input_ports": [
+      {
+        "name": "first",
+        "data_type": "Metrics",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "second",
+        "data_type": "Metrics",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "third",
+        "data_type": "Metrics",
+        "required": false,
+        "description": ""
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "comparison",
+        "data_type": "StatisticsResult",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [],
+    "implementation_class": "fault_platform.components.builtin.CompareModelsComponent"
+  }
+]

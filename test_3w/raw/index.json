@@ -1,0 +1,1160 @@
+{
+ "0/WELL-00001_20170201010207.parquet": {
+  "class": 0,
+  "well": "WELL-00001",
+  "rows": 17874,
+  "available": [
+   "ESTADO-DHSV",
+   "ESTADO-M1",
+   "ESTADO-M2",
+   "ESTADO-PXO",
+   "ESTADO-SDV-GL",
+   "ESTADO-SDV-P",
+   "ESTADO-W1",
+   "ESTADO-W2",
+   "ESTADO-XO",
+   "P-ANULAR",
+   "P-JUS-CKGL",
+   "P-MON-CKP",
+   "P-PDG",
+   "P-TPT",
+   "QGL",
+   "T-JUS-CKP",
+   "T-PDG",
+   "T-TPT"
+  ]
+ },
+ "0/WELL-00003_20170514000000.parquet": {
+  "class": 0,
+  "well": "WELL-00003",
+  "rows": 17932,
+  "available": [
+   "ESTADO-PXO",
+   "ESTADO-SDV-P",
+   "ESTADO-W2",
+   "ESTADO-XO",
+   "P-ANULAR",
+   "P-MON-CKP",
+   "P-PDG",
+   "P-TPT",
+   "QGL",
+   "T-TPT"
+  ]
+ },
+ "0/WELL-00005_20170331050014.parquet": {
+  "class": 0,
+  "well": "WELL-00005",
+  "rows": 17914,
+  "available": [
+   "ABER-CKGL",
+   "ABER-CKP",
+   "ESTADO-DHSV",
+   "ESTADO-M1",
+   "ESTADO-M2",
+   "ESTADO-PXO",
+   "ESTADO-SDV-P",
+   "ESTADO-W1",
+   "ESTADO-W2",
+   "ESTADO-XO",
+   "P-ANULAR",
+   "P-JUS-CKGL",
+   "P-MON-CKP",
+   "P-TPT",
+   "T-JUS-CKP",
+   "T-TPT"
+  ]
+ },
+ "0/WELL-00006_20170206210031.parquet": {
+  "class": 0,
+  "well": "WELL-00006",
+  "rows": 17970,
+  "available": [
+   "ESTADO-DHSV",
+   "ESTADO-M1",
+   "ESTADO-M2",
+   "ESTADO-PXO",
+   "ESTADO-SDV-GL",
+   "ESTADO-SDV-P",
+   "ESTADO-W1",
+   "ESTADO-W2",
+   "ESTADO-XO",
+   "P-ANULAR",
+   "P-JUS-CKGL",
+   "P-MON-CKP",
+   "P-PDG",
+   "P-TPT",
+   "QGL",
+   "T-JUS-CKP",
+   "T-PDG",
+   "T-TPT"
+  ]
+ },
+ "0/WELL-00007_20170801170000.parquet": {
+  "class": 0,
+  "well": "WELL-00007",
+  "rows": 7185,
+  "available": [
+   "ABER-CKGL",
+   "ABER-CKP",
+   "ESTADO-DHSV",
+   "ESTADO-M1",
+   "ESTADO-M2",
+   "ESTADO-PXO",
+   "ESTADO-SDV-GL",
+   "ESTADO-SDV-P",
+   "ESTADO-W1",
+   "ESTADO-W2",
+   "ESTADO-XO",
+   "P-JUS-CKGL",
+   "P-MON-CKP",
+   "P-PDG",
+   "P-TPT",
+   "QGL",
+   "T-JUS-CKP",
+   "T-PDG",
+   "T-TPT"
+  ]
+ },
+ "0/WELL-00008_20170610210246.parquet": {
+  "class": 0,
+  "well": "WELL-00008",
+  "rows": 17609,
+  "available": [
+   "P-JUS-CKGL"
+  ]
+ },
+ "0/WELL-00019_20170307235203.parquet": {
+  "class": 0,
+  "well": "WELL-00019",
+  "rows": 139631,
+  "available": [
+   "ABER-CKP",
+   "ESTADO-M1",
+   "ESTADO-M2",
+   "ESTADO-PXO",
+   "ESTADO-SDV-GL",
+   "ESTADO-SDV-P",
+   "ESTADO-W1",
+   "ESTADO-W2",
+   "ESTADO-XO",
+   "P-JUS-CKGL",
+   "P-JUS-CKP",
+   "P-MON-CKP",
+   "P-PDG",
+   "P-TPT",
+   "QGL",
+   "T-MON-CKP",
+   "T-PDG",
+   "T-TPT"
+  ]
+ },
+ "1/WELL-00001_20140124083303.parquet": {
+  "class": 1,
+  "well": "WELL-00001",
+  "rows": 58468,
+  "available": [
+   "ESTADO-DHSV",
+   "ESTADO-M1",
+   "ESTADO-M2",
+   "ESTADO-PXO",
+   "ESTADO-SDV-GL",
+   "ESTADO-SDV-P",
+   "ESTADO-W1",
+   "ESTADO-W2",
+   "ESTADO-XO",
+   "P-ANULAR",
+   "P-JUS-CKGL",
+   "P-MON-CKP",
+   "P-PDG",
+   "P-TPT",
+   "QGL",
+   "T-JUS-CKP",
+   "T-PDG",
+   "T-TPT"
+  ]
+ },
+ "1/WELL-00002_20140126180030.parquet": {
+  "class": 1,
+  "well": "WELL-00002",
+  "rows": 14371,
+  "available": [
+   "P-ANULAR",
+   "P-PDG",
+   "P-TPT",
+   "T-TPT"
+  ]
+ },
+ "1/WELL-00006_20170731170930.parquet": {
+  "class": 1,
+  "well": "WELL-00006",
+  "rows": 95731,
+  "available": [
+   "ESTADO-DHSV",
+   "ESTADO-M1",
+   "ESTADO-M2",
+   "ESTADO-PXO",
+   "ESTADO-SDV-GL",
+   "ESTADO-SDV-P",
+   "ESTADO-W1",
+   "ESTADO-W2",
+   "ESTADO-XO",
+   "P-ANULAR",
+   "P-JUS-CKGL",
+   "P-MON-CKP",
+   "P-PDG",
+   "P-TPT",
+   "QGL",
+   "T-JUS-CKP",
+   "T-PDG",
+   "T-TPT"
+  ]
+ },
+ "1/WELL-00006_20180617190257.parquet": {
+  "class": 1,
+  "well": "WELL-00006",
+  "rows": 53824,
+  "available": [
+   "ESTADO-DHSV",
+   "ESTADO-M1",
+   "ESTADO-M2",
+   "ESTADO-PXO",
+   "ESTADO-SDV-GL",
+   "ESTADO-SDV-P",
+   "ESTADO-W1",
+   "ESTADO-W2",
+   "ESTADO-XO",
+   "P-ANULAR",
+   "P-JUS-CKGL",
+   "P-MON-CKP",
+   "P-PDG",
+   "P-TPT",
+   "QGL",
+   "T-JUS-CKP",
+   "T-PDG",
+   "T-TPT"
+  ]
+ },
+ "2/WELL-00002_20131104004101.parquet": {
+  "class": 2,
+  "well": "WELL-00002",
+  "rows": 9121,
+  "available": [
+   "P-ANULAR",
+   "P-PDG",
+   "P-TPT",
+   "T-TPT"
+  ]
+ },
+ "2/WELL-00003_20141122190000.parquet": {
+  "class": 2,
+  "well": "WELL-00003",
+  "rows": 15690,
+  "available": [
+   "ESTADO-PXO",
+   "ESTADO-W2",
+   "ESTADO-XO",
+   "P-ANULAR",
+   "P-MON-CKP",
+   "P-PDG",
+   "P-TPT",
+   "QGL",
+   "T-TPT"
+  ]
+ },
+ "2/WELL-00003_20170728130240.parquet": {
+  "class": 2,
+  "well": "WELL-00003",
+  "rows": 12180,
+  "available": [
+   "ESTADO-PXO",
+   "ESTADO-SDV-P",
+   "ESTADO-W2",
+   "ESTADO-XO",
+   "P-ANULAR",
+   "P-MON-CKP",
+   "P-PDG",
+   "P-TPT",
+   "QGL",
+   "T-TPT"
+  ]
+ },
+ "2/WELL-00003_20180206171508.parquet": {
+  "class": 2,
+  "well": "WELL-00003",
+  "rows": 7229,
+  "available": [
+   "ESTADO-PXO",
+   "ESTADO-SDV-P",
+   "ESTADO-W2",
+   "ESTADO-XO",
+   "P-ANULAR",
+   "P-MON-CKP",
+   "P-PDG",
+   "P-TPT",
+   "QGL",
+   "T-TPT"
+  ]
+ },
+ "2/WELL-00009_20170313150804.parquet": {
+  "class": 2,
+  "well": "WELL-00009",
+  "rows": 6738,
+  "available": [
+   "ESTADO-DHSV",
+   "ESTADO-M1",
+   "ESTADO-M2",
+   "ESTADO-PXO",
+   "ESTADO-SDV-GL",
+   "ESTADO-SDV-P",
+   "ESTADO-W1",
+   "ESTADO-W2",
+   "ESTADO-XO",
+   "P-ANULAR",
+   "P-JUS-CKGL",
+   "P-MON-CKP",
+   "P-PDG",
+   "P-TPT",
+   "QGL",
+   "T-JUS-CKP",
+   "T-PDG",
+   "T-TPT"
+  ]
+ },
+ "2/WELL-00010_20171218180131.parquet": {
+  "class": 2,
+  "well": "WELL-00010",
+  "rows": 9809,
+  "available": [
+   "ESTADO-SDV-GL",
+   "ESTADO-SDV-P",
+   "P-JUS-CKGL",
+   "P-MON-CKP",
+   "T-PDG",
+   "T-TPT"
+  ]
+ },
+ "2/WELL-00011_20140515083000.parquet": {
+  "class": 2,
+  "well": "WELL-00011",
+  "rows": 27001,
+  "available": [
+   "P-ANULAR",
+   "P-PDG",
+   "P-TPT",
+   "T-PDG",
+   "T-TPT"
+  ]
+ },
+ "2/WELL-00011_20140530083203.parquet": {
+  "class": 2,
+  "well": "WELL-00011",
+  "rows": 3672,
+  "available": [
+   "P-ANULAR",
+   "P-PDG",
+   "P-TPT",
+   "T-PDG",
+   "T-TPT"
+  ]
+ },
+ "2/WELL-00011_20140606213810.parquet": {
+  "class": 2,
+  "well": "WELL-00011",
+  "rows": 14617,
+  "available": [
+   "P-ANULAR",
+   "P-PDG",
+   "P-TPT",
+   "T-PDG",
+   "T-TPT"
+  ]
+ },
+ "2/WELL-00011_20140720110102.parquet": {
+  "class": 2,
+  "well": "WELL-00011",
+  "rows": 11951,
+  "available": [
+   "P-ANULAR",
+   "P-PDG",
+   "P-TPT",
+   "T-PDG",
+   "T-TPT"
+  ]
+ },
+ "2/WELL-00011_20140726165720.parquet": {
+  "class": 2,
+  "well": "WELL-00011",
+  "rows": 3625,
+  "available": [
+   "P-ANULAR",
+   "P-PDG",
+   "P-TPT",
+   "T-PDG",
+   "T-TPT"
+  ]
+ },
+ "2/WELL-00011_20140823230118.parquet": {
+  "class": 2,
+  "well": "WELL-00011",
+  "rows": 17923,
+  "available": [
+   "P-ANULAR",
+   "P-PDG",
+   "P-TPT",
+   "T-PDG",
+   "T-TPT"
+  ]
+ },
+ "2/WELL-00011_20140916050300.parquet": {
+  "class": 2,
+  "well": "WELL-00011",
+  "rows": 5614,
+  "available": [
+   "P-ANULAR",
+   "P-PDG",
+   "P-TPT",
+   "T-PDG",
+   "T-TPT"
+  ]
+ },
+ "2/WELL-00011_20140921183228.parquet": {
+  "class": 2,
+  "well": "WELL-00011",
+  "rows": 4407,
+  "available": [
+   "P-ANULAR",
+   "P-PDG",
+   "P-TPT",
+   "T-PDG",
+   "T-TPT"
+  ]
+ },
+ "2/WELL-00011_20140928090056.parquet": {
+  "class": 2,
+  "well": "WELL-00011",
+  "rows": 5593,
+  "available": [
+   "P-ANULAR",
+   "P-PDG",
+   "P-TPT",
+   "T-PDG",
+   "T-TPT"
+  ]
+ },
+ "2/WELL-00011_20140929153332.parquet": {
+  "class": 2,
+  "well": "WELL-00011",
+  "rows": 4318,
+  "available": [
+   "P-ANULAR",
+   "P-PDG",
+   "P-TPT",
+   "T-PDG",
+   "T-TPT"
+  ]
+ },
+ "2/WELL-00011_20140929210121.parquet": {
+  "class": 2,
+  "well": "WELL-00011",
+  "rows": 4632,
+  "available": [
+   "P-ANULAR",
+   "P-PDG",
+   "P-TPT",
+   "T-PDG",
+   "T-TPT"
+  ]
+ },
+ "3/WELL-00001_20170320120025.parquet": {
+  "class": 3,
+  "well": "WELL-00001",
+  "rows": 17976,
+  "available": [
+   "ESTADO-DHSV",
+   "ESTADO-M1",
+   "ESTADO-M2",
+   "ESTADO-PXO",
+   "ESTADO-SDV-GL",
+   "ESTADO-SDV-P",
+   "ESTADO-W1",
+   "ESTADO-W2",
+   "ESTADO-XO",
+   "P-ANULAR",
+   "P-JUS-CKGL",
+   "P-MON-CKP",
+   "P-PDG",
+   "P-TPT",
+   "QGL",
+   "T-JUS-CKP",
+   "T-PDG",
+   "T-TPT"
+  ]
+ },
+ "3/WELL-00014_20170917140000.parquet": {
+  "class": 3,
+  "well": "WELL-00014",
+  "rows": 17776,
+  "available": [
+   "ABER-CKGL",
+   "ABER-CKP",
+   "ESTADO-SDV-GL",
+   "ESTADO-SDV-P",
+   "ESTADO-W1",
+   "P-ANULAR",
+   "P-JUS-CKGL",
+   "P-MON-CKP",
+   "P-PDG",
+   "P-TPT",
+   "QGL",
+   "T-JUS-CKP",
+   "T-PDG",
+   "T-TPT"
+  ]
+ },
+ "3/WELL-00014_20170917190000.parquet": {
+  "class": 3,
+  "well": "WELL-00014",
+  "rows": 17962,
+  "available": [
+   "ABER-CKGL",
+   "ABER-CKP",
+   "ESTADO-SDV-GL",
+   "ESTADO-SDV-P",
+   "ESTADO-W1",
+   "P-ANULAR",
+   "P-JUS-CKGL",
+   "P-MON-CKP",
+   "P-PDG",
+   "P-TPT",
+   "QGL",
+   "T-JUS-CKP",
+   "T-PDG",
+   "T-TPT"
+  ]
+ },
+ "4/WELL-00001_20170316110203.parquet": {
+  "class": 4,
+  "well": "WELL-00001",
+  "rows": 7078,
+  "available": [
+   "ESTADO-DHSV",
+   "ESTADO-M1",
+   "ESTADO-M2",
+   "ESTADO-PXO",
+   "ESTADO-SDV-GL",
+   "ESTADO-SDV-P",
+   "ESTADO-W1",
+   "ESTADO-W2",
+   "ESTADO-XO",
+   "P-ANULAR",
+   "P-JUS-CKGL",
+   "P-MON-CKP",
+   "P-PDG",
+   "P-TPT",
+   "QGL",
+   "T-JUS-CKP",
+   "T-PDG",
+   "T-TPT"
+  ]
+ },
+ "4/WELL-00001_20170316130000.parquet": {
+  "class": 4,
+  "well": "WELL-00001",
+  "rows": 7149,
+  "available": [
+   "ESTADO-DHSV",
+   "ESTADO-M1",
+   "ESTADO-M2",
+   "ESTADO-PXO",
+   "ESTADO-SDV-GL",
+   "ESTADO-SDV-P",
+   "ESTADO-W1",
+   "ESTADO-W2",
+   "ESTADO-XO",
+   "P-ANULAR",
+   "P-JUS-CKGL",
+   "P-MON-CKP",
+   "P-PDG",
+   "P-TPT",
+   "QGL",
+   "T-JUS-CKP",
+   "T-PDG",
+   "T-TPT"
+  ]
+ },
+ "4/WELL-00004_20140804190012.parquet": {
+  "class": 4,
+  "well": "WELL-00004",
+  "rows": 7189,
+  "available": [
+   "ABER-CKGL",
+   "ABER-CKP",
+   "ESTADO-DHSV",
+   "ESTADO-M1",
+   "ESTADO-M2",
+   "ESTADO-PXO",
+   "ESTADO-W1",
+   "ESTADO-W2",
+   "ESTADO-XO",
+   "P-ANULAR",
+   "P-MON-CKP",
+   "P-PDG",
+   "P-TPT",
+   "T-JUS-CKP",
+   "T-PDG",
+   "T-TPT"
+  ]
+ },
+ "4/WELL-00005_20170616010033.parquet": {
+  "class": 4,
+  "well": "WELL-00005",
+  "rows": 7168,
+  "available": [
+   "ABER-CKGL",
+   "ABER-CKP",
+   "ESTADO-DHSV",
+   "ESTADO-M1",
+   "ESTADO-M2",
+   "ESTADO-PXO",
+   "ESTADO-SDV-P",
+   "ESTADO-W1",
+   "ESTADO-W2",
+   "ESTADO-XO",
+   "P-ANULAR",
+   "P-JUS-CKGL",
+   "P-MON-CKP",
+   "P-TPT",
+   "T-JUS-CKP",
+   "T-TPT"
+  ]
+ },
+ "4/WELL-00007_20170517200012.parquet": {
+  "class": 4,
+  "well": "WELL-00007",
+  "rows": 7189,
+  "available": [
+   "ABER-CKGL",
+   "ABER-CKP",
+   "ESTADO-DHSV",
+   "ESTADO-M1",
+   "ESTADO-M2",
+   "ESTADO-PXO",
+   "ESTADO-SDV-GL",
+   "ESTADO-SDV-P",
+   "ESTADO-W1",
+   "ESTADO-W2",
+   "ESTADO-XO",
+   "P-JUS-CKGL",
+   "P-MON-CKP",
+   "P-PDG",
+   "P-TPT",
+   "QGL",
+   "T-JUS-CKP",
+   "T-PDG",
+   "T-TPT"
+  ]
+ },
+ "5/WELL-00015_20170620122925.parquet": {
+  "class": 5,
+  "well": "WELL-00015",
+  "rows": 21268,
+  "available": [
+   "ABER-CKGL",
+   "ABER-CKP",
+   "ESTADO-DHSV",
+   "ESTADO-M1",
+   "ESTADO-M2",
+   "ESTADO-PXO",
+   "ESTADO-SDV-GL",
+   "ESTADO-SDV-P",
+   "ESTADO-W1",
+   "ESTADO-W2",
+   "ESTADO-XO",
+   "P-ANULAR",
+   "P-JUS-CKGL",
+   "P-MON-CKP",
+   "P-PDG",
+   "P-TPT",
+   "QGL",
+   "T-JUS-CKP",
+   "T-PDG",
+   "T-TPT"
+  ]
+ },
+ "5/WELL-00016_20180405005319.parquet": {
+  "class": 5,
+  "well": "WELL-00016",
+  "rows": 3937,
+  "available": [
+   "ABER-CKGL",
+   "ABER-CKP",
+   "ESTADO-DHSV",
+   "ESTADO-M1",
+   "ESTADO-M2",
+   "ESTADO-PXO",
+   "ESTADO-SDV-GL",
+   "ESTADO-W1",
+   "ESTADO-W2",
+   "ESTADO-XO",
+   "P-ANULAR",
+   "P-JUS-CKGL",
+   "P-MON-CKP",
+   "P-PDG",
+   "P-TPT",
+   "QGL",
+   "T-JUS-CKP",
+   "T-PDG",
+   "T-TPT"
+  ]
+ },
+ "5/WELL-00020_20140314144539.parquet": {
+  "class": 5,
+  "well": "WELL-00020",
+  "rows": 146856,
+  "available": [
+   "ESTADO-DHSV",
+   "ESTADO-M1",
+   "ESTADO-M2",
+   "ESTADO-PXO",
+   "ESTADO-SDV-GL",
+   "ESTADO-SDV-P",
+   "ESTADO-W1",
+   "ESTADO-W2",
+   "ESTADO-XO",
+   "P-ANULAR",
+   "P-JUS-CKGL",
+   "P-MON-CKP",
+   "P-PDG",
+   "P-TPT",
+   "QGL",
+   "T-JUS-CKP",
+   "T-PDG",
+   "T-TPT"
+  ]
+ },
+ "6/WELL-00002_20140212160333.parquet": {
+  "class": 6,
+  "well": "WELL-00002",
+  "rows": 24370,
+  "available": [
+   "P-ANULAR",
+   "P-PDG",
+   "P-TPT",
+   "T-TPT"
+  ]
+ },
+ "6/WELL-00002_20140301141700.parquet": {
+  "class": 6,
+  "well": "WELL-00002",
+  "rows": 11478,
+  "available": [
+   "P-ANULAR",
+   "P-PDG",
+   "P-TPT",
+   "T-TPT"
+  ]
+ },
+ "6/WELL-00002_20140325160304.parquet": {
+  "class": 6,
+  "well": "WELL-00002",
+  "rows": 12021,
+  "available": [
+   "P-ANULAR",
+   "P-PDG",
+   "P-TPT",
+   "T-TPT"
+  ]
+ },
+ "6/WELL-00004_20171031171509.parquet": {
+  "class": 6,
+  "well": "WELL-00004",
+  "rows": 3586,
+  "available": [
+   "ABER-CKGL",
+   "ABER-CKP",
+   "ESTADO-DHSV",
+   "ESTADO-M1",
+   "ESTADO-M2",
+   "ESTADO-PXO",
+   "ESTADO-SDV-P",
+   "ESTADO-W1",
+   "ESTADO-W2",
+   "ESTADO-XO",
+   "P-ANULAR",
+   "P-MON-CKP",
+   "P-PDG",
+   "P-TPT",
+   "T-JUS-CKP",
+   "T-PDG",
+   "T-TPT"
+  ]
+ },
+ "6/WELL-00004_20171031181500.parquet": {
+  "class": 6,
+  "well": "WELL-00004",
+  "rows": 2004,
+  "available": [
+   "ABER-CKGL",
+   "ABER-CKP",
+   "ESTADO-DHSV",
+   "ESTADO-M1",
+   "ESTADO-M2",
+   "ESTADO-PXO",
+   "ESTADO-SDV-P",
+   "ESTADO-W1",
+   "ESTADO-W2",
+   "ESTADO-XO",
+   "P-ANULAR",
+   "P-MON-CKP",
+   "P-PDG",
+   "P-TPT",
+   "T-JUS-CKP",
+   "T-PDG",
+   "T-TPT"
+  ]
+ },
+ "6/WELL-00004_20171031184839.parquet": {
+  "class": 6,
+  "well": "WELL-00004",
+  "rows": 2418,
+  "available": [
+   "ABER-CKGL",
+   "ABER-CKP",
+   "ESTADO-DHSV",
+   "ESTADO-M1",
+   "ESTADO-M2",
+   "ESTADO-PXO",
+   "ESTADO-SDV-P",
+   "ESTADO-W1",
+   "ESTADO-W2",
+   "ESTADO-XO",
+   "P-ANULAR",
+   "P-MON-CKP",
+   "P-PDG",
+   "P-TPT",
+   "T-JUS-CKP",
+   "T-PDG",
+   "T-TPT"
+  ]
+ },
+ "7/WELL-00001_20170226130146.parquet": {
+  "class": 7,
+  "well": "WELL-00001",
+  "rows": 73033,
+  "available": [
+   "ESTADO-DHSV",
+   "ESTADO-M1",
+   "ESTADO-M2",
+   "ESTADO-PXO",
+   "ESTADO-SDV-GL",
+   "ESTADO-SDV-P",
+   "ESTADO-W1",
+   "ESTADO-W2",
+   "ESTADO-XO",
+   "P-ANULAR",
+   "P-JUS-CKGL",
+   "P-MON-CKP",
+   "P-PDG",
+   "P-TPT",
+   "QGL",
+   "T-JUS-CKP",
+   "T-PDG",
+   "T-TPT"
+  ]
+ },
+ "7/WELL-00021_20180611011218.parquet": {
+  "class": 7,
+  "well": "WELL-00021",
+  "rows": 42974,
+  "available": [
+   "ESTADO-SDV-GL",
+   "ESTADO-SDV-P",
+   "P-ANULAR",
+   "P-JUS-CKGL",
+   "P-MON-CKP",
+   "P-PDG",
+   "P-TPT",
+   "QGL",
+   "T-JUS-CKP",
+   "T-PDG",
+   "T-TPT"
+  ]
+ },
+ "7/WELL-00022_20180802233838.parquet": {
+  "class": 7,
+  "well": "WELL-00022",
+  "rows": 300083,
+  "available": [
+   "ABER-CKGL",
+   "ABER-CKP",
+   "ESTADO-DHSV",
+   "ESTADO-M1",
+   "ESTADO-M2",
+   "ESTADO-PXO",
+   "ESTADO-SDV-P",
+   "ESTADO-W1",
+   "ESTADO-W2",
+   "ESTADO-XO",
+   "P-ANULAR",
+   "P-JUS-CKGL",
+   "P-MON-CKP",
+   "P-PDG",
+   "P-TPT",
+   "T-JUS-CKP",
+   "T-PDG",
+   "T-TPT"
+  ]
+ },
+ "7/WELL-00023_20180826212652.parquet": {
+  "class": 7,
+  "well": "WELL-00023",
+  "rows": 556389,
+  "available": [
+   "ESTADO-SDV-P",
+   "P-JUS-CKGL",
+   "P-MON-CKP"
+  ]
+ },
+ "8/WELL-00019_20120601165020.parquet": {
+  "class": 8,
+  "well": "WELL-00019",
+  "rows": 239537,
+  "available": [
+   "ABER-CKP",
+   "ESTADO-M1",
+   "ESTADO-M2",
+   "ESTADO-PXO",
+   "ESTADO-SDV-GL",
+   "ESTADO-SDV-P",
+   "ESTADO-W1",
+   "ESTADO-W2",
+   "ESTADO-XO",
+   "P-JUS-CKGL",
+   "P-JUS-CKP",
+   "P-MON-CKP",
+   "P-PDG",
+   "P-TPT",
+   "QGL",
+   "T-MON-CKP",
+   "T-PDG",
+   "T-TPT"
+  ]
+ },
+ "8/WELL-00019_20141117190526.parquet": {
+  "class": 8,
+  "well": "WELL-00019",
+  "rows": 311004,
+  "available": [
+   "ABER-CKP",
+   "ESTADO-M1",
+   "ESTADO-M2",
+   "ESTADO-PXO",
+   "ESTADO-SDV-GL",
+   "ESTADO-SDV-P",
+   "ESTADO-W1",
+   "ESTADO-W2",
+   "ESTADO-XO",
+   "P-JUS-CKGL",
+   "P-JUS-CKP",
+   "P-MON-CKP",
+   "P-PDG",
+   "P-TPT",
+   "QGL",
+   "T-MON-CKP",
+   "T-PDG",
+   "T-TPT"
+  ]
+ },
+ "8/WELL-00019_20150614025713.parquet": {
+  "class": 8,
+  "well": "WELL-00019",
+  "rows": 163999,
+  "available": [
+   "ABER-CKP",
+   "ESTADO-M1",
+   "ESTADO-M2",
+   "ESTADO-PXO",
+   "ESTADO-SDV-GL",
+   "ESTADO-SDV-P",
+   "ESTADO-W1",
+   "ESTADO-W2",
+   "ESTADO-XO",
+   "P-JUS-CKGL",
+   "P-JUS-CKP",
+   "P-MON-CKP",
+   "P-PDG",
+   "P-TPT",
+   "QGL",
+   "T-MON-CKP",
+   "T-PDG",
+   "T-TPT"
+  ]
+ },
+ "8/WELL-00025_20200629194141.parquet": {
+  "class": 8,
+  "well": "WELL-00025",
+  "rows": 718592,
+  "available": [
+   "ABER-CKP",
+   "ESTADO-DHSV",
+   "ESTADO-M1",
+   "ESTADO-M2",
+   "ESTADO-PXO",
+   "ESTADO-SDV-GL",
+   "ESTADO-SDV-P",
+   "ESTADO-W1",
+   "ESTADO-W2",
+   "ESTADO-XO",
+   "P-ANULAR",
+   "P-JUS-CKP",
+   "P-MON-CKP",
+   "P-PDG",
+   "P-TPT",
+   "QGL",
+   "T-MON-CKP",
+   "T-PDG",
+   "T-TPT"
+  ]
+ },
+ "8/WELL-00026_20160601130000.parquet": {
+  "class": 8,
+  "well": "WELL-00026",
+  "rows": 183601,
+  "available": [
+   "ABER-CKP",
+   "ESTADO-DHSV",
+   "ESTADO-M1",
+   "ESTADO-M2",
+   "ESTADO-PXO",
+   "ESTADO-SDV-GL",
+   "ESTADO-SDV-P",
+   "ESTADO-W1",
+   "ESTADO-W2",
+   "ESTADO-XO",
+   "P-ANULAR",
+   "P-JUS-CKGL",
+   "P-JUS-CKP",
+   "P-MON-CKP",
+   "P-PDG",
+   "QGL",
+   "T-MON-CKP",
+   "T-PDG"
+  ]
+ },
+ "8/WELL-00027_20230918170106.parquet": {
+  "class": 8,
+  "well": "WELL-00027",
+  "rows": 676820,
+  "available": [
+   "ESTADO-M1",
+   "ESTADO-M2",
+   "ESTADO-PXO",
+   "ESTADO-SDV-GL",
+   "ESTADO-SDV-P",
+   "ESTADO-W1",
+   "ESTADO-W2",
+   "ESTADO-XO",
+   "P-JUS-CKGL",
+   "P-MON-CKP",
+   "P-TPT",
+   "QGL",
+   "T-MON-CKP",
+   "T-TPT"
+  ]
+ },
+ "9/WELL-00014_20160304155906.parquet": {
+  "class": 9,
+  "well": "WELL-00014",
+  "rows": 67344,
+  "available": [
+   "ABER-CKGL",
+   "ABER-CKP",
+   "ESTADO-SDV-GL",
+   "ESTADO-SDV-P",
+   "ESTADO-W1",
+   "P-ANULAR",
+   "P-JUS-CKGL",
+   "P-MON-CKP",
+   "P-PDG",
+   "P-TPT",
+   "QGL",
+   "T-JUS-CKP",
+   "T-PDG",
+   "T-TPT"
+  ]
+ },
+ "9/WELL-00014_20160306070000.parquet": {
+  "class": 9,
+  "well": "WELL-00014",
+  "rows": 33769,
+  "available": [
+   "ABER-CKGL",
+   "ABER-CKP",
+   "ESTADO-SDV-GL",
+   "ESTADO-SDV-P",
+   "ESTADO-W1",
+   "P-ANULAR",
+   "P-JUS-CKGL",
+   "P-MON-CKP",
+   "P-PDG",
+   "P-TPT",
+   "QGL",
+   "T-JUS-CKP",
+   "T-PDG",
+   "T-TPT"
+  ]
+ },
+ "9/WELL-00014_20170214190000.parquet": {
+  "class": 9,
+  "well": "WELL-00014",
+  "rows": 18001,
+  "available": [
+   "ABER-CKGL",
+   "ABER-CKP",
+   "ESTADO-SDV-GL",
+   "ESTADO-SDV-P",
+   "ESTADO-W1",
+   "P-ANULAR",
+   "P-JUS-CKGL",
+   "P-MON-CKP",
+   "P-PDG",
+   "P-TPT",
+   "QGL",
+   "T-JUS-CKP",
+   "T-PDG",
+   "T-TPT"
+  ]
+ },
+ "9/WELL-00033_20190925190420.parquet": {
+  "class": 9,
+  "well": "WELL-00033",
+  "rows": 39106,
+  "available": [
+   "P-JUS-CKGL",
+   "P-MON-CKP",
+   "QGL"
+  ]
+ },
+ "9/WELL-00034_20190825004401.parquet": {
+  "class": 9,
+  "well": "WELL-00034",
+  "rows": 15306,
+  "available": [
+   "P-JUS-CKGL",
+   "P-MON-CKP",
+   "P-TPT",
+   "QGL"
+  ]
+ },
+ "9/WELL-00035_20190819093245.parquet": {
+  "class": 9,
+  "well": "WELL-00035",
+  "rows": 50070,
+  "available": [
+   "P-JUS-CKGL",
+   "P-MON-CKP",
+   "P-TPT",
+   "QGL"
+  ]
+ }
+}

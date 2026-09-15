@@ -1,0 +1,5 @@
+/* Live-sync banner shown when another client (Agent / another tab) edits the open pipeline. */
+.remote-banner{display:flex;align-items:center;gap:10px;padding:8px 16px;background:#fff8e9;border-bottom:1px solid #f0deb5;color:#93692c;font-size:11px;flex-shrink:0}
+.remote-banner span{flex:1;line-height:1.6}
+.remote-banner button{border:1px solid #e3cf9f;background:#fffdf6;color:#8a6533;padding:5px 10px}
+.remote-banner button.primary{background:#c99b48;border-color:#c99b48;color:#fff}

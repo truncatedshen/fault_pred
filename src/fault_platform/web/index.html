@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fault Studio · 故障预测组件平台</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/remote.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-symbol">ƒ</span><div>FAULT STUDIO<small>故障预测组件平台</small></div></div>
+    <div class="project"><input id="pipeline-name" aria-label="方案名称" value="未命名方案"><span id="graph-count">0 个节点 · 0 条连接</span></div>
+    <div class="top-actions"><span class="connection-indicator">本地运行环境</span><button id="example">加载示例</button><button id="run" class="primary">▶ 运行方案</button><button id="cancel" class="danger hidden">停止</button></div>
+  </header>
+  <nav class="toolbar" aria-label="画布操作">
+    <div class="toolgroup"><button id="new">＋ 新建</button><select id="pipeline-list" aria-label="切换方案"><option>当前方案</option></select><button id="import">导入 XML</button><button id="export">导出 XML</button><button id="save">保存</button></div>
+    <div class="toolgroup"><button id="undo" title="Ctrl+Z">↶ 撤销</button><button id="redo" title="Ctrl+Y">↷ 重做</button><button id="copy">复制</button><button id="delete">删除</button></div>
+    <div class="toolgroup"><button id="layout">自动布局</button><button id="fit">适应画布</button><button id="validate">✓ 校验</button><button id="checkpoint">检查点</button><select id="checkpoint-list" aria-label="恢复检查点"><option value="">恢复检查点…</option></select></div>
+  </nav>
+  <div id="remote-banner" class="remote-banner hidden" role="status">
+    <span id="remote-text"></span>
+    <button id="remote-reload" class="primary">重新加载</button>
+    <button id="remote-keep">保留我的修改</button>
+  </div>
+  <main class="workspace">
+    <aside class="library">
+      <div class="panel-heading"><h2>组件库</h2><span id="catalog-count" class="count"></span></div>
+      <label class="search"><span>⌕</span><input id="search" placeholder="搜索组件…" aria-label="搜索组件"></label>
+      <div class="library-tabs"><button id="all-components" class="active">全部组件</button><button id="favorites">收藏</button></div>
+      <div id="component-library" class="catalog"></div>
+      <div class="data-box"><div><strong>数据文件</strong><button id="upload">＋ 上传 CSV</button></div><select id="data-files" aria-label="已上传数据文件"><option value="">选择数据源…</option></select><small>选择文件可添加数据输入节点</small></div>
+    </aside>
+    <section class="center">
+      <div class="canvas-heading"><div><span class="eyebrow">PIPELINE DESIGNER</span><h1>构建你的故障预测流程</h1></div><span id="pipeline-status" class="status-chip">CREATED</span></div>
+      <div id="canvas" tabindex="0" aria-label="流程画布">
+        <div id="canvas-world"><svg id="connections" aria-label="节点连接"></svg><div id="nodes"></div></div>
+        <div class="canvas-help">拖入组件 · 点击输出端口再点击输入端口连线 · Shift 多选 · 空白处拖动平移</div>
+        <div class="zoom-controls"><button id="zoom-out" aria-label="缩小">−</button><span id="zoom-label">100%</span><button id="zoom-in" aria-label="放大">＋</button></div>
+        <div id="empty-canvas"><span class="empty-icon">⌘</span><h3>让数据连接成洞见</h3><p>从左侧拖入组件，或加载示例开始探索</p><button id="empty-example" class="primary">打开设备故障示例 ↗</button></div>
+      </div>
+      <section class="results">
+        <div class="result-tabs"><button data-tab="result" class="active">运行结果</button><button data-tab="history">执行日志</button><button data-tab="xml">XML 方案</button><span id="result-caption">选择节点查看数据与结果</span></div>
+        <div id="result-content"><div class="empty-result"><span>◈</span>运行方案后，在这里查看节点输出、统计和模型指标。</div></div>
+      </section>
+    </section>
+    <aside class="inspector">
+      <div class="panel-heading"><h2>节点配置</h2><span class="eyebrow">INSPECTOR</span></div>
+      <div id="inspector-content"><div class="inspector-empty"><span>⌖</span><h3>选择一个组件</h3><p>查看端口信息并配置运行参数。</p></div></div>
+    </aside>
+  </main>
+  <footer><span><i class="online-dot"></i>Runtime ready <span id="footer-version">v0.1.0</span></span><span id="footer-message">组件 → 连接 → 校验 → 执行</span><span>Component · Graph · Workspace</span></footer>
+  <div id="toast" role="status"></div>
+  <input type="file" id="xml-file" accept=".xml" hidden>
+  <input type="file" id="csv-file" accept=".csv" hidden>
+  <script type="module" src="/static/app.js"></script>
+</body>
+</html>

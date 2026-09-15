@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+  <xs:simpleType name="identifier">
+    <xs:restriction base="xs:string"><xs:pattern value="[A-Za-z_][A-Za-z0-9_.-]{0,99}"/></xs:restriction>
+  </xs:simpleType>
+  <xs:complexType name="port">
+    <xs:attribute name="name" type="xs:string" use="required"/>
+    <xs:attribute name="dataType" type="xs:string" use="required"/>
+    <xs:attribute name="required" type="xs:boolean" use="required"/>
+  </xs:complexType>
+  <xs:element name="faultPredictionPipeline">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element name="metadata" type="xs:string"/>
+        <xs:element name="nodes">
+          <xs:complexType><xs:sequence>
+            <xs:element name="node" minOccurs="0" maxOccurs="unbounded">
+              <xs:complexType><xs:sequence>
+                <xs:element name="position">
+                  <xs:complexType>
+                    <xs:attribute name="x" type="xs:double" use="required"/>
+                    <xs:attribute name="y" type="xs:double" use="required"/>
+                  </xs:complexType>
+                </xs:element>
+                <xs:element name="parameters">
+                  <xs:complexType><xs:sequence>
+                    <xs:element name="parameter" minOccurs="0" maxOccurs="unbounded">
+                      <xs:complexType><xs:simpleContent><xs:extension base="xs:string">
+                        <xs:attribute name="name" type="xs:string" use="required"/>
+                        <xs:attribute name="encoding" type="xs:string" fixed="json" use="required"/>
+                      </xs:extension></xs:simpleContent></xs:complexType>
+                    </xs:element>
+                  </xs:sequence></xs:complexType>
+                </xs:element>
+                <xs:element name="ports">
+                  <xs:complexType><xs:sequence>
+                    <xs:element name="inputPort" type="port" minOccurs="0" maxOccurs="unbounded"/>
+                    <xs:element name="outputPort" type="port" minOccurs="0" maxOccurs="unbounded"/>
+                  </xs:sequence></xs:complexType>
+                </xs:element>
+                <xs:element name="ui" type="xs:string"/>
+              </xs:sequence>
+                <xs:attribute name="id" type="identifier" use="required"/>
+                <xs:attribute name="type" type="xs:string" use="required"/>
+                <xs:attribute name="componentVersion" type="xs:string" use="required"/>
+              </xs:complexType>
+            </xs:element>
+          </xs:sequence></xs:complexType>
+        </xs:element>
+        <xs:element name="connections">
+          <xs:complexType><xs:sequence>
+            <xs:element name="connection" minOccurs="0" maxOccurs="unbounded">
+              <xs:complexType>
+                <xs:attribute name="sourceNode" type="identifier" use="required"/>
+                <xs:attribute name="sourcePort" type="xs:string" use="required"/>
+                <xs:attribute name="targetNode" type="identifier" use="required"/>
+                <xs:attribute name="targetPort" type="xs:string" use="required"/>
+              </xs:complexType>
+            </xs:element>
+          </xs:sequence></xs:complexType>
+        </xs:element>
+        <xs:element name="ui" type="xs:string"/>
+      </xs:sequence>
+      <xs:attribute name="id" type="identifier" use="required"/>
+      <xs:attribute name="name" type="xs:string" use="required"/>
+      <xs:attribute name="version" type="xs:string" fixed="1.0" use="required"/>
+      <xs:attribute name="graphVersion" type="xs:positiveInteger" use="required"/>
+    </xs:complexType>
+    <xs:unique name="uniqueNode"><xs:selector xpath="nodes/node"/><xs:field xpath="@id"/></xs:unique>
+    <xs:keyref name="sourceRef" refer="uniqueNode"><xs:selector xpath="connections/connection"/><xs:field xpath="@sourceNode"/></xs:keyref>
+    <xs:keyref name="targetRef" refer="uniqueNode"><xs:selector xpath="connections/connection"/><xs:field xpath="@targetNode"/></xs:keyref>
+  </xs:element>
+</xs:schema>
