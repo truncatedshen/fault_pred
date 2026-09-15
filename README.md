@@ -226,6 +226,7 @@ Windows 也可以直接运行 `.\setup.ps1`。Linux / macOS 把 `.venv\Scripts\p
 | `feature.imputation` | 特征缺失处理 | features : FeatureDataset → features : FeatureDataset |
 | `feature.score_select` | 特征评分选择 | features : FeatureDataset, labels（可选）→ features : FeatureDataset, scores : FeatureImportance |
 | `feature.pca` | 主成分分析 | features : FeatureDataset → features : FeatureDataset, variance : StatisticsResult |
+窗口族（`feature.statistical` / `feature.fitting` / `feature.spectral` / `feature.entropy`）共享同一套窗口与预测参数：按行 `window_size`/`step`，或按时间 `window_span`/`step_span`（如 `7d`/`1d`）；`label_policy=horizon` 配合 `prediction_horizon`/`prediction_gap` 就能从"检测"切到"预测"。用法见 §4.4，参数细节见 §5。
 
 ### 算法验证 Algorithm Validation
 
@@ -275,7 +276,37 @@ data.input → data.filter → ┬─ feature.statistical ─┐
 
 数据概览、统计、相关性、散点图、折线图是终端分支：接上就能看，不要把它们接到模型输入。示例把「标准化 → 折线图」放在探索分支，建模使用原始窗口特征，避免全量缩放造成的数据泄漏。
 
-### 4.4 建模注意事项
+### 4.4 预测方案（用历史窗口预测未来故障）
+
+检测回答"现在坏没坏"，预测回答"接下来会不会坏"。区别全在窗口与标签：窗口按**时间**切，标签取自窗口**之后**的视野。
+
+```
+data.input → feature.statistical(window_span="7d", step_span="1d",
+                                 prediction_horizon="2d", prediction_gap="1h",
+                                 label_policy="horizon")
+                                    ├→ validation.random_forest(split_method="temporal")
+                                    └→ visual.overview（看特征表长什么样）
+```
+
+```jsonc
+{"component_type": "feature.statistical", "parameters": {
+  "columns": ["…测点…"], "group_column": "instance", "asset_column": "asset",
+  "label_column": "fault", "time_column": "time_s",
+  "window_span": "7d", "step_span": "1d",   // 用最近 7 天，每天一个样本
+  "prediction_horizon": "2d",               // 往后看 2 天
+  "prediction_gap": "1h",                   // 先隔 1 小时，避免贴着故障起始
+  "label_policy": "horizon",                // 标签来自未来视野
+  "current_fault_policy": "drop",           // 已经坏了的窗口交给检测任务
+  "normal_label": "0"}}
+```
+
+必须向用户交代的四件事：**窗口与视野**（`window_span`/`step_span`/`prediction_horizon`/`prediction_gap`）；**丢了多少窗口、为什么**（`attrs` 的 `horizon_dropped_current_fault` 与 `horizon_dropped_unknown_future`）；**正类比例**；**切分方式**（时间窗口通常重叠，用 `temporal` 或 `group`/`asset`，`stratified` 会被拒绝）。
+
+实测参考（3W 真实数据：489,456 行 / 28 个实例，窗口 `180s`、步长 `60s`、视野 `1h`）：得到 **3370 个窗口、正类 26.9%**，丢弃 4380 个"自身已故障"与 331 个"视野超出数据"的窗口，特征提取 1.0 秒。注意**特征行数只由窗口与步长决定，与输入行数无关**。
+
+边界：时间列按**秒**解释（数值列）或时间戳；流式输入不支持预测模式（按块看不到未来），要么关掉 `streaming`，要么插 `data.materialize`。
+
+### 4.5 建模注意事项
 
 | 主题 | 说明 |
 | --- | --- |
@@ -591,7 +622,7 @@ npm run browser-check                                   # Chrome headless 真实
 
 ## 13. 当前边界与后续计划
 
-首版面向本机单用户开发，已验证：CSV / Parquet 数据源（含列裁剪、行数上限、谓词下推）、**分块流式特征提取**、图形化 DAG 编辑、以引用为主的 Workspace 与可落盘的缓存、检查点、XML 往返、MCP 控制、分类模型验证。
+首版面向本机单用户开发，已验证：CSV / Parquet 数据源（含列裁剪、行数上限、谓词下推）、**分块流式特征提取**、**按时间切窗与未来视野标签（故障预测）**、图形化 DAG 编辑、以引用为主的 Workspace 与可落盘的缓存、检查点、XML 往返、MCP 控制、分类模型验证。
 
 尚未包含：
 
@@ -600,7 +631,7 @@ npm run browser-check                                   # Chrome headless 真实
 - 增量/流式摄取、数据库或时序库数据源（当前是文件型 CSV / Parquet）
 - RUL、生存分析与回归任务（当前是分类验证）
 - 远程多用户、鉴权、分布式队列与生产部署
-- 把「当前故障识别」自动变成「未来故障预测」：真实任务需要你定义预测标签与预测视界
+- 预测已支持"用历史时间窗口预测未来视野内是否故障"（`window_span` + `label_policy=horizon`，见 §4.4）；**还没有**的是按故障类型分别设视野（例如"2 天内会不会发生水合物"），以及把"视野内没有任何故障样本"这类退化情形做成显式警告（现在由 agent 自己看正类比例）
 
 规划中的扩展：按行数上限的分组缓冲（把超大单组也切成流式）、小波 / STFT / 变点特征、交叉验证与超参数搜索、参数面板基于上游列元数据的自动补全。
 

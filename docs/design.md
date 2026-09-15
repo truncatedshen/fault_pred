@@ -39,7 +39,7 @@
 - 不做 AutoML、深度网络、RUL/生存分析（首版为分类验证）。
 - 不做多用户、鉴权、分布式队列；服务只监听 `127.0.0.1`，面向本机单用户。
 - 不把大规模 DataFrame/模型权重放进 XML 或 LLM 上下文。
-- 不自动把"当前故障识别"转成"未来故障预测"；预测标签与视界必须由使用者定义。
+- **不替你决定预测目标**：平台支持"用历史时间窗口预测未来视野内是否故障"（`window_span` + `label_policy=horizon`，见 §5.4），但视界、间隔带与"哪一类故障算命中"必须由使用者显式声明——机器不会替你猜业务定义。
 
 ### 1.4 核心设计原则
 
@@ -440,6 +440,32 @@ ComponentRegistry ────────────────────�
 `registry.register` 会拒绝：重复 `component_type`、端口名重复、参数名重复。因此"组件定义错误"在**注册阶段**即暴露，而不是等到运行。
 
 ---
+
+### 5.4 窗口、标签与预测语义
+
+窗口族（`feature.statistical` / `feature.fitting` / `feature.spectral` / `feature.entropy`）只有一套语义，定义在 `fault_core.features` 里，三条实现共用：`window_arguments` 校验并解析参数、`prepared_windows` 产出统一的窗口流、`window_shape` 描述装配形状、`window_attrs` 写元数据与丢弃计数。这条"只定义一次"是刻意的：`window_span` 最初只加进统计/拟合一条实现，另外两个组件直接 `TypeError`——同一种能力写三遍，代价就是这样。
+
+**窗口有两个轴。** 按行（`window_size` / `step`）适合固定采样率的短窗；按时间（`window_span` / `step_span`，如 `7d`/`1d`）适合"用最近 7 天"这类说法，也天然处理采样不规则或带缺口的数据——每个窗口的行数可以不同，`attrs["window_span_seconds"]` 记录跨度、`window_size` 记 0。两者互斥，同时给出会报错而不是猜。
+
+**特征行数 = 窗口数，与输入行数无关**：每组约"组内时长 ÷ 步长"行，尾部不足一个窗口的丢弃。真实 3W 数据（489,456 行 / 28 个实例）实测：
+
+| 窗口 / 步长 | 特征行数 |
+| --- | --- |
+| `180s` / `30s` | 16,154 |
+| `180s` / `60s` | 8,081 |
+| `180s` / `180s` | 2,700 |
+| `180s` / `600s` | 818 |
+| `1h` / `1h` | 114 |
+
+**标签有两种来源。** `strict` / `mode` / `last` 从窗口内部的标签聚合；`horizon` 从**未来视野**取：窗口 `[t, t+span)` 是手上的证据，正类条件是 `(t+span+gap, t+span+gap+horizon]` 内出现过非 `normal_label` 的样本。因此"检测"与"预测"共用同一张图、同一套组件，只差一个参数——这也让标签语义、来源覆盖与泄漏检查（`source_rows` / `windows_share_rows`）对两种任务同时成立。
+
+四道刻意的取舍：**间隔带 `prediction_gap`** 把视野整体推后，避免贴着故障起始的窗口因边界贴合而变得过易；**看不见未来不标 0**——视野超出数据末尾的窗口丢弃并计数（"没看到故障"不等于"没有故障"）；**窗口自身已故障的样本另行处理**——`current_fault_policy=drop`（默认）把它们留给检测任务，也可选 `positive`/`negative`；**丢弃必须计数**——`attrs["horizon_dropped_current_fault"]`、`attrs["horizon_dropped_unknown_future"]` 与 warnings 让"样本为什么变少"可被追问。真实 3W 数据配 `180s`/`60s`/`1h` 得到 3,370 个窗口、正类 26.9%，同时丢弃 4,380 + 331 个窗口。
+
+**流式不支持预测模式。** 按块消费看不到未来，所以 `window_span` 与 `label_policy=horizon` 在流式路径上直接报错（提示关掉 `streaming` 或插 `data.materialize`），而不是给一份标签错了的结果——这条与 `data.quality` 的处理保持一致。
+
+**发现性也是接口的一部分。** 组件能力要能被 Agent 的检索入口找到：四个窗口生产者的 `description` / `tags` / `search_keywords` 都写明了时间窗口与预测（含 `预测`、`故障预警`、`prediction`、`horizon`、`early warning`、`prognostics`），`tags=["prediction"]` 能筛出全部四个；`retrieve_components(intent="预测未来是否故障")` 也把它们排在前面。这条由 `tests/test_catalogue_scale.py::test_prediction_capability_is_discoverable` 守住——能力做出来但检索不到，对 Agent 等于不存在。
+
+已知缺口：`attrs` 里有丢弃计数，但没有**正类比例**统计，而预测任务里这个数字直接决定"accuracy 能不能看"。目前由 skill 要求 agent 自己从 `labels` 数，后续可以并入 `attrs` 并在"视野内没有任何故障样本"时给出警告。
 
 ## 6. 图模型与校验
 
