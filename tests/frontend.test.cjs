@@ -41,9 +41,9 @@ before(async () => {
   window.CSS = {escape: value => value};
   Object.defineProperty(window, "crypto", {value: webcrypto});
   window.eval(fs.readFileSync("src/fault_platform/web/app.js", "utf8") +
-    "\nwindow.testApp={state,api,init,openGraph,addNode,commit,activeNode,applyParameters,portClick,copySelection,removeSelection,undo,showResult,runPipeline,fitCanvas,autoLayout,renderInspector,renderCatalog};");
+    "\nwindow.testApp={state,api,init,openGraph,addNode,commit,activeNode,applyParameters,portClick,copySelection,removeSelection,undo,showResult,orthogonalRoute,edgePathD,claimLane,runPipeline,fitCanvas,autoLayout,renderInspector,renderCatalog,toggleGroup,toggleAllGroups,setPanelSize,panelCeiling,persistLayout,updateSplitterPositions,resetLayout,DEFAULT_LAYOUT,PANEL_LIMITS};");
   app = window.testApp;
-  await until(() => app.state.graph && window.document.querySelectorAll(".component-item").length === 29,
+  await until(() => app.state.graph && window.document.querySelectorAll(".component-item").length === 56,
     "UI failed to initialize");
 }, {timeout:15000});
 after(() => {
@@ -52,7 +52,7 @@ after(() => {
 });
 
 test("registry renders catalog and typed parameter forms", async () => {
-  assert.equal(window.document.querySelector("#catalog-count").textContent, "29");
+  assert.equal(window.document.querySelector("#catalog-count").textContent, "56");
   await app.addNode("data.input", {x:20,y:20}, {path:"anything.csv"});
   assert.equal(app.activeNode().type, "data.input");
   assert.equal(window.document.querySelector("#parameter-0").value, "anything.csv");
@@ -110,4 +110,135 @@ test("malicious XML node label is rendered as text", async () => {
   await app.commit(candidate);
   assert.equal(window.document.querySelector("#nodes img"), null);
   assert.equal(window.pwned, undefined);
+});
+
+test("component library folds into a directory and stays searchable", async () => {
+  const document = window.document;
+  const library = document.querySelector("#component-library");
+  const collapsedCount = () => library.querySelectorAll(".group-body.collapsed").length;
+  // 56 个组件超过自动折叠阈值：默认给目录，但组件节点仍全部留在 DOM 中（拖拽与计数依赖它们）。
+  assert.equal(library.querySelectorAll(".component-item").length, 56);
+  assert.ok(collapsedCount() > 0, "a large catalog should start with collapsed subgroups");
+
+  const selector = '.subcategory-title[data-group="sub:feature/频域 Frequency"]';
+  library.querySelector(selector).click();
+  const header = library.querySelector(selector);
+  assert.equal(header.getAttribute("aria-expanded"), "true");
+  assert.equal(header.nextElementSibling.classList.contains("collapsed"), false);
+  assert.match(window.localStorage.getItem("fault-library-expanded") || "", /频域 Frequency/);
+
+  const search = document.querySelector("#search");
+  search.value = "频域";
+  search.dispatchEvent(new window.Event("input", {bubbles: true}));
+  assert.equal(collapsedCount(), 0, "searching must expand the groups that match");
+  assert.ok([...library.querySelectorAll(".component-item")].some((item) => item.dataset.type === "feature.spectral"));
+  search.value = "";
+  search.dispatchEvent(new window.Event("input", {bubbles: true}));
+
+  document.querySelector("#toggle-groups").click();
+  assert.equal(library.querySelectorAll(".group-body:not(.collapsed)").length, 0);
+  document.querySelector("#toggle-groups").click();
+  assert.equal(collapsedCount(), 0);
+});
+
+test("panel splitters resize the layout within limits and persist", async () => {
+  const style = window.document.documentElement.style;
+  app.setPanelSize("library", 320);
+  assert.equal(style.getPropertyValue("--library-width"), "320px");
+  app.setPanelSize("library", 9999);
+  // 上限取"面板硬上限"与"视口 34%"中的较小者，保证画布仍留有空间。
+  assert.equal(app.state.layout.library, app.panelCeiling("library"));
+  assert.ok(app.state.layout.library <= app.PANEL_LIMITS.library[1]);
+  app.setPanelSize("library", 10);
+  assert.equal(app.state.layout.library, app.PANEL_LIMITS.library[0]);
+
+  app.setPanelSize("library", 300);
+  app.persistLayout();
+  assert.match(window.localStorage.getItem("fault-layout") || "", /"library":300/);
+  const handle = window.document.querySelector("#library-splitter");
+  handle.dispatchEvent(new window.KeyboardEvent("keydown", {key: "ArrowRight", bubbles: true}));
+  assert.equal(app.state.layout.library, 316, "ArrowRight widens the left panel");
+  handle.dispatchEvent(new window.KeyboardEvent("keydown", {key: "ArrowLeft", bubbles: true}));
+  assert.equal(app.state.layout.library, 300);
+
+  app.setPanelSize("inspector", 240);
+  assert.equal(style.getPropertyValue("--inspector-width"), "240px");
+  app.setPanelSize("results", 300);
+  assert.equal(style.getPropertyValue("--results-height"), "300px");
+
+  window.document.querySelector("#reset-layout").click();
+  assert.equal(app.state.layout.library, app.DEFAULT_LAYOUT.library);
+  assert.equal(app.state.layout.inspector, app.DEFAULT_LAYOUT.inspector);
+  assert.equal(app.state.layout.results, app.DEFAULT_LAYOUT.results);
+
+  // 拖拽方向：左栏的分隔条在面板右沿（向右拖=变宽），
+  // 右栏与底部面板的分隔条贴的是朝内的那条边（向左拖=右栏变宽，向上拖=结果面板变高）。
+  const drag = (selector, from, to) => {
+    const handle = window.document.querySelector(selector);
+    const send = (type, point) => handle.dispatchEvent(new window.MouseEvent(type,
+      {clientX: point.x, clientY: point.y, bubbles: true, cancelable: true}));
+    send("pointerdown", from);
+    send("pointermove", to);
+    send("pointerup", to);
+  };
+  drag("#library-splitter", {x: 200, y: 300}, {x: 240, y: 300});
+  assert.equal(app.state.layout.library, app.DEFAULT_LAYOUT.library + 40, "向右拖放宽左侧组件库");
+  drag("#inspector-splitter", {x: 900, y: 300}, {x: 860, y: 300});
+  assert.equal(app.state.layout.inspector, app.DEFAULT_LAYOUT.inspector + 40, "向左拖放宽右侧配置面板");
+  drag("#results-splitter", {x: 600, y: 500}, {x: 600, y: 460});
+  assert.equal(app.state.layout.results, app.DEFAULT_LAYOUT.results + 40, "向上拖抬高底部结果面板");
+});
+
+test("connections are routed as rounded orthogonal polylines", async () => {
+  await app.openGraph((await app.api("create_example")).graph);
+  const paths = [...window.document.querySelectorAll("#connections path[data-edge]")];
+  assert.ok(paths.length >= 10, `expected the example edges to be drawn, got ${paths.length}`);
+  let rounded = 0;
+  for (const path of paths) {
+    const d = path.getAttribute("d");
+    // 贝塞尔会写成 C 命令；正交折线只允许 M / L / Q（Q 就是折角圆角）。
+    assert.ok(!/[CcSsAa]/.test(d), `edge path must not contain curve commands: ${d}`);
+    if (/Q/.test(d)) rounded += 1;
+  }
+  assert.ok(rounded >= 1, "至少要有连线带圆角折点（同一行的两个端口可以是一条直线）");
+  assert.equal(window.document.querySelectorAll("#connections path.edge-hit").length, paths.length,
+    "every edge needs a transparent click hit path");
+  const route = app.orthogonalRoute({x:100, y:100}, {x:500, y:260}, 0);
+
+  const d = app.edgePathD(route);
+  assert.equal((d.match(/Q/g) || []).length, 2, "一条常规 Z 形路由有且只有两个圆角");
+  assert.ok(!/[CcSsAa]/.test(d), `edge path must stay polygonal: ${d}`);
+  // 两个端口正好在同一行时，正确的画法就是一条直线（Simulink 也是这样）
+  const straight = app.edgePathD(app.orthogonalRoute({x:100, y:100}, {x:400, y:100}, 0));
+  assert.ok(!/Q/.test(straight), `same row ports must stay a straight line: ${straight}`);
+  assert.deepEqual(route[0], {x:100, y:100}, "route starts exactly on the output port");
+  assert.deepEqual(route[route.length - 1], {x:500, y:260}, "route ends exactly on the input port");
+  for (let i = 1; i < route.length; i++) {
+    const dx = Math.abs(route[i].x - route[i - 1].x), dy = Math.abs(route[i].y - route[i - 1].y);
+    assert.ok(dx < 1e-9 || dy < 1e-9, `segment ${i} is neither horizontal nor vertical`);
+  }
+  // 回边（目标被拖到左边）同样必须正交，并且要绕行而不是横穿端口行
+  const back = app.orthogonalRoute({x:600, y:100}, {x:200, y:300}, 0);
+  assert.equal(back[0].x, 600);
+  assert.equal(back[back.length - 1].x, 200);
+  for (let i = 1; i < back.length; i++) {
+    const dx = Math.abs(back[i].x - back[i - 1].x), dy = Math.abs(back[i].y - back[i - 1].y);
+    assert.ok(dx < 1e-9 || dy < 1e-9, `feedback segment ${i} is diagonal`);
+  }
+  // 同一条竖直通道上并行的两条线必须错开，不能重叠成一条
+  const occupied = [];
+  const first = app.claimLane(occupied, {x:100, y:100}, {x:500, y:400});
+  const second = app.claimLane(occupied, {x:100, y:100}, {x:500, y:400});
+  assert.notEqual(first, second, "parallel edges in one channel must be spread apart");
+});
+
+test("input ports advertise the compatible types they accept", async () => {
+  await app.openGraph((await app.api("create_example")).graph);
+  // 概览既吃原始表也吃特征表：端口提示与检查器都要写清楚，否则用户不知道能挂哪。
+  const port = window.document.querySelector('.node[data-id="overview"] .port.input[data-port="dataset"]');
+  assert.match(port.getAttribute("title"), /Dataset \| FeatureDataset/);
+  app.state.selected = new Set(["overview"]);
+  await app.renderInspector();
+  const inspector = window.document.querySelector("#inspector-content").textContent;
+  assert.match(inspector, /dataset : Dataset \| FeatureDataset/);
 });

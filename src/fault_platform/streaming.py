@@ -4,6 +4,15 @@ The runtime treats a ``StreamedDataset`` as a ``Dataset``; components that can w
 incrementally consume it through :meth:`chunks`, everything else must be fed a
 materialised frame (``data.materialize``). Chunks carry a global row index so the
 provenance recorded by streaming feature extraction matches a full read exactly.
+
+中文说明：这是"懒加载数据集"——文件留在磁盘上，只有真正需要时逐块读取。
+运行时会把它当作普通 ``Dataset`` 传递，能流式处理的组件（窗口特征、数据概览、
+``data.materialize``）调用 :meth:`chunks`；其余组件会收到明确报错，
+提示先插入 ``data.materialize``。
+
+关键细节：每个分块的索引都是**全局行号**（``RangeIndex(offset, offset+len)``），
+因此流式提取出的窗口覆盖区间与整表读取的结果完全一致——
+这正是训练/测试"是否共享原始行"的检查能在两种模式间通用的原因。
 """
 
 from __future__ import annotations
@@ -29,9 +38,11 @@ class StreamedDataset:
 
     @property
     def shape_hint(self) -> tuple[int | None, int | None]:
+        """尽力给出的 (行数, 列数)；未知的行数为 None（CSV 不预先扫描）。"""
         return self.total_rows, len(self.columns) if self.columns else None
 
     def chunks(self, chunk_rows: int | None = None) -> Iterator[pd.DataFrame]:
+        """按 ``chunk_rows`` 逐块产出 DataFrame（可覆盖默认块大小）。"""
         size = int(chunk_rows or self.chunk_rows)
         if size <= 0:
             raise ValueError("chunk_rows must be positive")
@@ -41,6 +52,7 @@ class StreamedDataset:
             yield from self._csv_chunks(size)
 
     def _csv_chunks(self, size: int) -> Iterator[pd.DataFrame]:
+        """CSV 分块读取：``usecols`` 让列裁剪在解析阶段就生效，省内存也省时间。"""
         reader = pd.read_csv(
             self.path,
             encoding=self.encoding,
@@ -50,11 +62,13 @@ class StreamedDataset:
         )
         offset = 0
         for chunk in reader:
+            # 全局行号：块内行号会从 0 重新开始，那样窗口覆盖就无法与整表读取对齐了。
             chunk.index = pd.RangeIndex(offset, offset + len(chunk))  # global row identity
             offset += len(chunk)
             yield chunk
 
     def _parquet_chunks(self, size: int) -> Iterator[pd.DataFrame]:
+        """Parquet 行组级分块读取；``columns`` 直接下推到读取层。"""
         import pyarrow.parquet as pq
 
         table = pq.ParquetFile(self.path)
@@ -66,6 +80,7 @@ class StreamedDataset:
             yield chunk
 
     def describe(self) -> dict[str, Any]:
+        """给 summarize()/MCP 用的描述：只报告路径、格式、块大小与行数，绝不读数据。"""
         return {
             "kind": "streamed",
             "path": str(self.path),
@@ -77,7 +92,11 @@ class StreamedDataset:
         }
 
     def materialize(self) -> pd.DataFrame:
-        """Read every chunk into one frame; memory then grows with the input size."""
+        """把所有分块读成一张表；**此时内存重新随输入规模增长**。
+
+        只应在全局操作（排序、去重、画图）确实需要整表时调用，
+        调用点会带警告，报告里要如实说明这次运行是物化的。
+        """
         parts = list(self.chunks())
         if not parts:
             raise ValueError("Data source produced no rows")

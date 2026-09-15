@@ -106,11 +106,28 @@ Windows 也可以直接运行 `.\setup.ps1`。Linux / macOS 把 `.venv\Scripts\p
 | 撤销 / 重做 | Ctrl+Z / Ctrl+Y（或 Ctrl+Shift+Z） |
 | 全选 / 保存 | Ctrl+A / Ctrl+S |
 | 布局 | 「自动布局」按依赖关系分层重排 |
+| 连线样式 | 正交折线（水平/竖直段 + 折角圆角），两个端口同一高度时就是一条直线 |
 | 收藏与搜索 | 组件库上方搜索框按名称/描述/标签过滤，可只看收藏 |
 
-### 2.4 端口类型与连线规则
+### 2.4 面板与组件库
 
-组件之间只能通过声明了数据类型的端口连接，类型必须完全一致（`Dataset` 与 `FeatureDataset` 是不同类型，不能直接互连）。
+组件数量增长到 56 个（后续还会更多），所以左栏做成了"目录 + 分级折叠"，三栏宽窄也都可调：
+
+| 操作 | 方式 |
+| --- | --- |
+| 折叠分组 | 点击「分类标题」或「子分类标题」即折叠/展开；组件总数超过 24 时子分类默认折叠，先给目录 |
+| 全部折叠 / 展开 | 组件库上方的「▾ 折叠全部 / ▸ 展开全部」按钮 |
+| 搜索与筛选 | 输入关键词或切换分类/收藏/最近时自动展开命中的分组，不会出现"搜到了却看不见" |
+| 记忆状态 | 折叠状态存在浏览器本地（`fault-library-collapsed`），刷新后保持 |
+| 调整左栏宽度 | 拖动组件库右边缘的分隔条（向右拖=变宽）；键盘 `←/→` 微调；双击分隔条或「↺ 恢复布局」复位 |
+| 调整右栏宽度 | 拖动节点配置左边缘的分隔条（向左拖=变宽，键盘 `←/→` 同理） |
+| 调整结果面板高度 | 拖动结果面板上方的分隔条（向上拖=变高，键盘 `↑/↓` 同理）；上限为视口高度的 45% |
+
+宽度同时受视口限制（侧栏不超过视口宽度的 34%），窄窗口下三栏都不会被挤没；面板宽高记录在 `fault-layout`，刷新后保持。
+
+### 2.5 端口类型与连线规则
+
+组件之间只能通过声明了数据类型的端口连接，默认两端类型完全一致才能连。**输入端口可以额外声明兼容类型**：11 个检查类组件（`visual.overview`、`visual.line`、`visual.scatter`、`visual.subplot`、`visual.histogram`、`visual.relationship`、`explore.central_tendency`、`explore.dispersion`、`explore.correlation`、`explore.distribution`、`explore.anomaly`）既接受 `Dataset` 也接受 `FeatureDataset`，所以特征分支可以直接挂概览——中间产物随时可查。数据转换类组件不放宽，仍然只吃原始 `Dataset`。
 
 | 数据类型 | 运行时对象 | 典型来源 |
 | --- | --- | --- |
@@ -124,7 +141,7 @@ Windows 也可以直接运行 `.\setup.ps1`。Linux / macOS 把 `.venv\Scripts\p
 
 其他规则：一个输入端口最多接一条连线；连接不能形成环；图必须是有向无环图（DAG），运行时按拓扑顺序调度。
 
-### 2.5 与 Agent 并行工作（实时同步）
+### 2.6 与 Agent 并行工作（实时同步）
 
 网页通过 `GET /api/events`（Server-Sent Events）订阅当前服务的事件流，因此 Agent（MCP）或其它标签页的动作会立刻反映到你打开的页面上：
 
@@ -141,7 +158,7 @@ Windows 也可以直接运行 `.\setup.ps1`。Linux / macOS 把 `.venv\Scripts\p
 
 ---
 
-## 3. 组件库（29 个）
+## 3. 组件库（56 个）
 
 组件定义由 Registry 统一提供，网页组件库、MCP `list_components` 和 XML 校验读取同一份定义。
 
@@ -151,13 +168,19 @@ Windows 也可以直接运行 `.\setup.ps1`。Linux / macOS 把 `.venv\Scripts\p
 | --- | --- | --- |
 | `data.input` | 数据输入 | 无 → dataset : Dataset |
 | `data.materialize` | 物化数据 | dataset : Dataset → dataset : Dataset |
+| `data.asset_key` | 资产标识 | dataset : Dataset → dataset : Dataset |
 | `data.quality` | 数据质量预检 | dataset : Dataset → report : Visualization |
 | `data.filter` | 条件过滤 | dataset : Dataset → dataset : Dataset |
 | `data.row_operation` | 行操作 | dataset : Dataset → dataset : Dataset |
 | `data.column_operation` | 列操作 | dataset : Dataset → dataset : Dataset |
+| `data.time_resample` | 按时间重采样 | dataset : Dataset → dataset : Dataset |
+| `data.split` | 数据切分 | dataset : Dataset → train / test : Dataset |
+| `data.neighbor_features` | 临近数据纳入 | dataset : Dataset → dataset : Dataset |
+| `data.imputation` | 缺失值填充 | dataset : Dataset → dataset : Dataset |
 | `data.normalization` | 规范化 | dataset : Dataset → dataset : Dataset |
 | `data.standardization` | 标准化 | dataset : Dataset → dataset : Dataset |
 | `data.transformation` | 数值转换 | dataset : Dataset → dataset : Dataset |
+| `data.binarize` | 特征二值化 | dataset : Dataset → dataset : Dataset |
 | `data.labels` | 标签向量 | dataset : Dataset → labels : LabelVector |
 
 ### 数据探索 Data Exploration
@@ -167,6 +190,11 @@ Windows 也可以直接运行 `.\setup.ps1`。Linux / macOS 把 `.venv\Scripts\p
 | `explore.central_tendency` | 集中趋势 | dataset : Dataset → statistics : StatisticsResult |
 | `explore.dispersion` | 离散度量 | dataset : Dataset → statistics : StatisticsResult |
 | `explore.correlation` | 相关性度量 | dataset : Dataset → matrix : CorrelationMatrix |
+| `explore.distribution` | 分布检查 | dataset : Dataset → statistics : StatisticsResult |
+| `explore.periodicity` | 周期性检查 | dataset : Dataset → statistics : StatisticsResult |
+| `explore.concept_drift` | 概念漂移 | reference / current : Dataset → statistics : StatisticsResult |
+| `explore.cross_relation` | 互相关与互协方差 | dataset : Dataset → matrix : CorrelationMatrix |
+| `explore.anomaly` | 异常探索 | dataset : Dataset → prediction : Prediction |
 
 ### 数据可视化 Data Visualization
 
@@ -175,6 +203,11 @@ Windows 也可以直接运行 `.\setup.ps1`。Linux / macOS 把 `.venv\Scripts\p
 | `visual.overview` | 数据概览 | dataset : Dataset → overview : Visualization |
 | `visual.scatter` | 散点图 | dataset : Dataset → plot : PlotArtifact |
 | `visual.line` | 折线图 | dataset : Dataset → plot : PlotArtifact |
+| `visual.subplot` | 子图 | dataset : Dataset → plot : PlotArtifact |
+| `visual.histogram` | 直方图 | dataset : Dataset → plot : PlotArtifact |
+| `visual.compare` | 对比画图 | first / second : Dataset → plot : PlotArtifact |
+| `visual.anomaly` | 异常点可视化 | dataset : Dataset, prediction（可选）→ plot : PlotArtifact |
+| `visual.relationship` | 关系图 | dataset : Dataset → plot : PlotArtifact |
 
 ### 特征提取 Feature Extraction
 
@@ -182,11 +215,15 @@ Windows 也可以直接运行 `.\setup.ps1`。Linux / macOS 把 `.venv\Scripts\p
 | --- | --- | --- |
 | `feature.statistical` | 统计特征 | dataset : Dataset → features : FeatureDataset, labels : LabelVector |
 | `feature.fitting` | 拟合特征 | dataset : Dataset → features : FeatureDataset, labels : LabelVector |
+| `feature.rolling_statistics` | 滚动统计特征 | dataset : Dataset → features : FeatureDataset |
+| `feature.temporal` | 差分与自相关特征 | dataset : Dataset → features : FeatureDataset |
+| `feature.entropy` | 熵特征 | dataset : Dataset → features : FeatureDataset, labels : LabelVector |
 | `feature.spectral` | 频域特征 | dataset : Dataset → features : FeatureDataset, labels : LabelVector |
 | `feature.categorical` | 分类特征 | dataset : Dataset → features : FeatureDataset, encoder : FeatureTransformer |
 | `feature.categorical_transform` | 分类特征变换 | dataset : Dataset, encoder : FeatureTransformer → features : FeatureDataset |
 | `feature.select` | 选择已有特征 | dataset : Dataset → features : FeatureDataset |
 | `feature.merge` | 合并特征 | left / right : FeatureDataset → features : FeatureDataset |
+| `feature.imputation` | 特征缺失处理 | features : FeatureDataset → features : FeatureDataset |
 | `feature.score_select` | 特征评分选择 | features : FeatureDataset, labels（可选）→ features : FeatureDataset, scores : FeatureImportance |
 | `feature.pca` | 主成分分析 | features : FeatureDataset → features : FeatureDataset, variance : StatisticsResult |
 
@@ -197,6 +234,13 @@ Windows 也可以直接运行 `.\setup.ps1`。Linux / macOS 把 `.venv\Scripts\p
 | `validation.random_forest` | 随机森林 | features, labels → model / prediction / metrics / importance |
 | `validation.svm` | 支持向量机 | features, labels → model / prediction / metrics |
 | `validation.xgboost` | XGBoost | features, labels → model / prediction / metrics / importance |
+| `validation.decision_tree` | 决策树 | features, labels → model / prediction / metrics / importance |
+| `validation.reservoir_classifier` | 水库机分类 | features, labels → model / prediction / metrics |
+| `validation.linear_regression` | 线性回归 | features, target → model / prediction / metrics / importance |
+| `validation.arma` | ARMA | dataset → model / prediction / metrics |
+| `validation.knn_detector` | KNN 检测 | dataset → model / prediction / metrics |
+| `validation.isolation_forest_detector` | 隔离森林检测 | dataset → model / prediction / metrics |
+| `validation.persistence_detector` | Persist 检测器 | dataset → model / prediction / metrics |
 | `validation.compare` | 模型对比 | first / second / third : Metrics → comparison : StatisticsResult |
 
 每个组件的完整参数表（类型、默认值、必填、取值范围）见 [docs/components.md](docs/components.md)。
@@ -237,6 +281,7 @@ data.input → data.filter → ┬─ feature.statistical ─┐
 | --- | --- |
 | 标签对齐 | 必须使用窗口组件的 `labels` 输出；混标签窗口默认拒绝（`label_policy=strict`），可选 `last` 或 `mode` |
 | 划分方式 | `split_method=stratified` 分层随机、`group` 按设备分组、`temporal` 按特征行顺序的时间划分 |
+| 资产级留出 | `data.asset_key` 从实例名派生资产 → 窗口组件填 `asset_column` → 验证器用 `split_method=asset`，真正留出整口井/整台设备；`metrics.coverage` 报告未见资产数 |
 | 重叠窗口 | 重叠窗口不能随机划分，必须用 `group` 或 `temporal` |
 | 泄漏检查 | Runtime 会检查训练与测试窗口是否共享原始数据行，发现即报错 |
 | 全量预处理 | 全量缩放/编码会带探索性警告并传递到指标；SVM 的标准化与概率校准只在训练集内拟合 |
@@ -307,7 +352,7 @@ MCP bridge 只是转发到本地 HTTP 控制 API，所以**必须先启动服务
 
 `--from-config` 直接读取 `~/.codex/config.toml` 的 `[mcp_servers.fault-prediction]`；去掉该参数则用当前解释器和 `--url` 启动，方便 CI 或其它客户端复用。
 
-### 6.3 工具清单（36 个高层操作）
+### 6.3 工具清单（38 个高层操作）
 
 | 用途 | 工具 |
 | --- | --- |
@@ -349,7 +394,19 @@ get_pipeline_xml(...)
 
 ### 6.5 Skill
 
-[skills/fault-prediction/SKILL.md](skills/fault-prediction/SKILL.md) 告诉 Agent 如何按专业顺序搭方案：先探索数据，再决定是否过滤/删列/缩放/转换，然后选择特征与算法、建立并行对比、根据结果决定改哪里。把它复制到 Agent 的技能目录，或让 Agent 直接读取。
+[skills/fault-prediction/SKILL.md](skills/fault-prediction/SKILL.md) 告诉 Agent 如何按专业顺序搭方案：先探索数据，再决定是否过滤/删列/缩放/转换，然后选择特征与算法、建立并行对比、根据结果决定改哪里。它按阶段组织（recon → 数据准备 → 质量预检 → 窗口与标签 → 特征 → 验证 → 执行排错 → 读结果 → 持久化 → 汇报），每个阶段都给出「要做什么 / 怎么配 / 注意什么 / 何时可以进入下一步」，并把细节拆到四个参考文件：
+
+| 文件 | 内容 |
+| --- | --- |
+| `SKILL.md` | 入口（385 行）：决策、硬约束、路由、阶段自检闸门、38 个工具的用途表与 5 类能力索引 |
+| `references/recipes.md` | 可直接照抄的调用序列（常规分类、onset 数据、资产留出、无监督、超大文件、失败后重跑、三模型对比） |
+| `references/stages.md` | 每个阶段的细节：参数表、实测数字、检查清单与「注意事项」（入口把它挪出来，只留决策与闸门） |
+| `references/troubleshooting.md` | 报错原文 → 原因 → 修法，以及每条护栏为什么存在 |
+| `references/components.md` | 56 个组件的用途、端口、关键参数与「什么时候不要用」 |
+
+把它复制到 Agent 的技能目录，或让 Agent 直接读取（`docs/deploy.md` 的安装脚本会一并安装整个目录）。
+
+从第十一轮起，skill 里多了三样专门对付"有组件却用不上"的东西：Recon 阶段要求产出一份 3~6 行的**能力清单**（这次任务可能用得上的手段，而不是 56 个组件的目录）；每个问题多发的阶段末尾有一道 **Stage gate** 自检闸门（逐条自问，命中才动手，最多 6 条）；汇报时必须交代闸门结论和整场没触及的能力类别。这三处由 `tests/test_skill_guide.py` 的 22 项检查守住，其中一条专门防止闸门膨胀成组件清单。
 
 也可以用原始 HTTP：
 
@@ -497,12 +554,17 @@ tests/                    pytest 与 DOM 集成测试
 scripts/                  组件目录导出、浏览器验收脚本
 ```
 
+源码注释约定：模块与函数的 docstring 保留英文摘要（与既有代码风格一致），
+并补充中文说明——写清"这个模块负责什么、为什么这么设计、有哪些坑"，
+关键实现处再用中文行内注释解释数值细节与护栏原因。`fault_core` 不依赖 `fault_platform`，
+这条依赖方向不要打破：它保证数值算法可以脱离平台单独测试与复用。
+
 ---
 
 ## 12. 验证
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest -q                 # 53 项通过
+.\.venv\Scripts\python.exe -m pytest -q                 # 140 项通过（1 项按可选依赖跳过）
 .\.venv\Scripts\python.exe -m ruff check src tests scripts
 .\.venv\Scripts\python.exe -m pip check
 node --check src/fault_platform/web/app.js
@@ -514,7 +576,7 @@ npm run browser-check                                   # Chrome headless 真实
 .\.venv\Scripts\python.exe scripts\export_release.py --build        # 打可交付的部署包
 ```
 
-`npm run browser-check` 会启动临时服务与 Chrome，通过 DevTools 协议验证组件库渲染、布局尺寸、节点与连线绘制、真实指针拖拽持久化、缩放与适应画布、组件放置与参数表单、**Agent 改动实时出现在页面**、**Agent 触发执行时页面显示进度**、方案执行与结果面板，并把截图写到 `.fault-platform/screenshots`。它不替代人工像素评审。
+`npm run browser-check` 会启动临时服务与 Chrome，通过 DevTools 协议验证 16 组检查：组件库渲染、布局尺寸、**组件库折叠与搜索展开**、**分隔条拖拽改变面板宽高、方向跟手、刷新后保持**、**窄窗口下三栏钳制不溢出**、节点与连线绘制、**连线是圆角正交折线（端点误差 ≤1.5px、除圆角外无斜向行程）**、真实指针拖拽持久化、缩放与适应画布、组件放置与参数表单、**Agent 改动实时出现在页面**、**Agent 触发执行时页面显示进度**、方案执行与结果面板、历史与 XML 面板；截图写到 `.fault-platform/screenshots`（`01c`/`01d` 是组件库与分隔条的 3x 放大图，`02b-edges-zoom.png` 是连线折角的 2x 放大图、`04-feature-overview.png` 是特征表概览，供人工目视评审）。
 
 依赖快照见 `requirements-win-py311.lock`（Windows / Python 3.11 验证环境），`dist/` 内含可安装 wheel。详细结果见 [docs/validation.md](docs/validation.md)。
 
@@ -541,7 +603,7 @@ npm run browser-check                                   # Chrome headless 真实
 
 - [总体架构](docs/architecture.md)：对象职责、边界、数据流与实现约定
 - [项目设计文档](docs/design.md)：完整设计（对象模型、执行语义、端口/参数系统、XML、UI、MCP、领域约定、ADR）
-- [组件与参数参考](docs/components.md)：29 个组件的端口与参数表
+- [组件与参数参考](docs/components.md)：56 个组件的端口与参数表
 - [MCP 接入](docs/mcp.md)：bridge 配置与调用约定
 - [Agent Skill](skills/fault-prediction/SKILL.md)：Agent 搭方案的专业流程
 - [验证记录](docs/validation.md)：测试、浏览器验收与首版边界

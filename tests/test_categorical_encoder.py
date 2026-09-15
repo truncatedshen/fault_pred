@@ -79,9 +79,11 @@ def test_component_exposes_encoder_and_transform_component_reuses_it(registry, d
     future = dataset.iloc[:3].copy()
     future.loc[future.index[0], "category"] = "future-category"
 
-    transformed = registry.create("feature.categorical_transform").execute(
-        {"dataset": future, "encoder": encoder}, context
-    ).outputs["features"]
+    transformed = (
+        registry.create("feature.categorical_transform")
+        .execute({"dataset": future, "encoder": encoder}, context)
+        .outputs["features"]
+    )
 
     assert list(transformed.columns) == list(fitted.outputs["features"].columns)
     assert transformed.iloc[0].sum() == 0.0

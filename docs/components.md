@@ -33,6 +33,23 @@ Load a streamed dataset fully into memory so global operations (sort, dedup, plo
 | 参数 | 类型 | 默认值 | 必填 | 选项 |
 | --- | --- | --- | --- | --- |
 
+## data.asset_key · 资产标识
+
+Derive the owning asset (well/machine) from an instance key so validation can hold out whole assets
+
+**输入**：dataset : Dataset
+
+**输出**：dataset : Dataset
+
+| 参数 | 类型 | 默认值 | 必填 | 选项 |
+| --- | --- | --- | --- | --- |
+| column | column | null | 是 |  |
+| target | string | "asset" | 否 |  |
+| mode | enum | "split" | 否 | split, regex |
+| separator | string | "_" | 否 |  |
+| index | integer | 0 | 否 |  min=0, max=None |
+| pattern | expression | "" | 否 |  |
+
 ## data.quality · 数据质量预检
 
 Per-group constant/zero columns, flat-window ratio, duplicate rows and mixed-label windows
@@ -96,12 +113,77 @@ Select, drop, rename, reorder, create or cast columns
 
 | 参数 | 类型 | 默认值 | 必填 | 选项 |
 | --- | --- | --- | --- | --- |
-| operation | enum | "select" | 否 | select, drop, rename, reorder, create, cast_type |
+| operation | enum | "select" | 否 | select, drop, rename, reorder, create, cast_type, drop_empty, drop_constant, trim_extrema |
 | columns | column_list | [] | 否 |  |
 | mapping | object | {} | 否 |  |
 | name | string | "" | 否 |  |
 | expression_text | expression | "" | 否 |  |
 | dtype | enum | "float64" | 否 | float64, int64, string, bool |
+| extrema_count | integer | 1 | 否 |  min=1, max=None |
+
+## data.time_resample · 按时间重采样
+
+Aggregate numeric signals onto a regular datetime grid
+
+**输入**：dataset : Dataset
+
+**输出**：dataset : Dataset
+
+| 参数 | 类型 | 默认值 | 必填 | 选项 |
+| --- | --- | --- | --- | --- |
+| time_column | column | null | 是 |  |
+| frequency | string | null | 是 |  |
+| columns | column_list | [] | 否 |  |
+| aggregation | enum | "mean" | 否 | mean, median, min, max, sum, first, last |
+| group_column | column | null | 否 |  |
+| fill_method | enum | "none" | 否 | none, interpolate, ffill |
+
+## data.split · 数据切分
+
+Create reproducible random, temporal or group train/test datasets
+
+**输入**：dataset : Dataset
+
+**输出**：train : Dataset，test : Dataset
+
+| 参数 | 类型 | 默认值 | 必填 | 选项 |
+| --- | --- | --- | --- | --- |
+| method | enum | "random" | 否 | random, temporal, group |
+| test_size | float | 0.25 | 否 |  min=0.05, max=0.5 |
+| random_state | integer | 42 | 否 |  min=0, max=None |
+| group_column | column | null | 否 |  |
+| stratify_column | column | null | 否 |  |
+
+## data.neighbor_features · 临近数据纳入
+
+Append lag and lead values without crossing equipment groups
+
+**输入**：dataset : Dataset
+
+**输出**：dataset : Dataset
+
+| 参数 | 类型 | 默认值 | 必填 | 选项 |
+| --- | --- | --- | --- | --- |
+| columns | column_list | null | 是 |  |
+| offsets | list | [1] | 是 |  |
+| group_column | column | null | 否 |  |
+| time_column | column | null | 否 |  |
+| drop_missing | boolean | false | 否 |  |
+
+## data.imputation · 缺失值填充
+
+Fill numeric missing values by mean or interpolation
+
+**输入**：dataset : Dataset
+
+**输出**：dataset : Dataset
+
+| 参数 | 类型 | 默认值 | 必填 | 选项 |
+| --- | --- | --- | --- | --- |
+| columns | column_list | [] | 否 |  |
+| method | enum | "mean" | 否 | mean, interpolate |
+| group_column | column | null | 否 |  |
+| interpolation_method | enum | "linear" | 否 | linear, nearest |
 
 ## data.normalization · 规范化
 
@@ -147,11 +229,26 @@ Log, power and bounded arithmetic expressions
 | power | float | 2 | 否 |  min=-10, max=10 |
 | expression_text | expression | "x" | 否 |  |
 
+## data.binarize · 特征二值化
+
+Convert numeric values above a threshold to one and the rest to zero
+
+**输入**：dataset : Dataset
+
+**输出**：dataset : Dataset
+
+| 参数 | 类型 | 默认值 | 必填 | 选项 |
+| --- | --- | --- | --- | --- |
+| columns | column_list | null | 是 |  |
+| threshold | float | 0.0 | 否 |  |
+| keep_original | boolean | true | 否 |  |
+| suffix | string | "_binary" | 否 |  |
+
 ## explore.central_tendency · 集中趋势
 
 Mean, median, mode and weighted mean
 
-**输入**：dataset : Dataset
+**输入**：dataset : Dataset | FeatureDataset
 
 **输出**：statistics : StatisticsResult
 
@@ -165,7 +262,7 @@ Mean, median, mode and weighted mean
 
 Variance, standard deviation, range, IQR, MAD and CV
 
-**输入**：dataset : Dataset
+**输入**：dataset : Dataset | FeatureDataset
 
 **输出**：statistics : StatisticsResult
 
@@ -178,7 +275,7 @@ Variance, standard deviation, range, IQR, MAD and CV
 
 Pearson, Spearman or Kendall correlation
 
-**输入**：dataset : Dataset
+**输入**：dataset : Dataset | FeatureDataset
 
 **输出**：matrix : CorrelationMatrix
 
@@ -187,11 +284,87 @@ Pearson, Spearman or Kendall correlation
 | columns | column_list | [] | 否 |  |
 | method | enum | "pearson" | 否 | pearson, spearman, kendall |
 
+## explore.distribution · 分布检查
+
+Quantiles, shape statistics and bounded histograms for numeric columns
+
+**输入**：dataset : Dataset | FeatureDataset
+
+**输出**：statistics : StatisticsResult
+
+| 参数 | 类型 | 默认值 | 必填 | 选项 |
+| --- | --- | --- | --- | --- |
+| columns | column_list | [] | 否 |  |
+| bins | integer | 20 | 否 |  min=2, max=200 |
+
+## explore.periodicity · 周期性检查
+
+Inspect lag autocorrelation and report the strongest candidate period
+
+**输入**：dataset : Dataset
+
+**输出**：statistics : StatisticsResult
+
+| 参数 | 类型 | 默认值 | 必填 | 选项 |
+| --- | --- | --- | --- | --- |
+| columns | column_list | [] | 否 |  |
+| max_lag | integer | 100 | 否 |  min=1, max=10000 |
+| sampling_rate | float | null | 否 |  min=1e-09, max=None |
+
+## explore.concept_drift · 概念漂移
+
+Compare reference and current numeric distributions with PSI and the KS test
+
+**输入**：reference : Dataset，current : Dataset
+
+**输出**：statistics : StatisticsResult
+
+| 参数 | 类型 | 默认值 | 必填 | 选项 |
+| --- | --- | --- | --- | --- |
+| columns | column_list | [] | 否 |  |
+| bins | integer | 10 | 否 |  min=2, max=100 |
+| psi_threshold | float | 0.2 | 否 |  min=0, max=None |
+| alpha | float | 0.05 | 否 |  min=1e-06, max=1 |
+
+## explore.cross_relation · 互相关与互协方差
+
+Lagged cross-correlation or cross-covariance between two numeric signals
+
+**输入**：dataset : Dataset
+
+**输出**：matrix : CorrelationMatrix
+
+| 参数 | 类型 | 默认值 | 必填 | 选项 |
+| --- | --- | --- | --- | --- |
+| first_column | column | null | 是 |  |
+| second_column | column | null | 是 |  |
+| method | enum | "cross_correlation" | 否 | cross_correlation, cross_covariance |
+| max_lag | integer | 20 | 否 |  min=1, max=10000 |
+| normalize | boolean | true | 否 |  |
+
+## explore.anomaly · 异常探索
+
+Boxplot bounds, rolling dynamic thresholds or robust hyperbolic-tangent smoothing
+
+**输入**：dataset : Dataset | FeatureDataset
+
+**输出**：prediction : Prediction
+
+| 参数 | 类型 | 默认值 | 必填 | 选项 |
+| --- | --- | --- | --- | --- |
+| columns | column_list | [] | 否 |  |
+| method | enum | "boxplot" | 否 | boxplot, dynamic_threshold, hyperbolic_smoothing |
+| window | integer | 20 | 否 |  min=2, max=None |
+| threshold | float | 3.0 | 否 |  min=0, max=None |
+| iqr_multiplier | float | 1.5 | 否 |  min=0, max=None |
+| group_column | column | null | 否 |  |
+| time_column | column | null | 否 |  |
+
 ## visual.scatter · 散点图
 
 Bounded scatter plot with optional groups
 
-**输入**：dataset : Dataset
+**输入**：dataset : Dataset | FeatureDataset
 
 **输出**：plot : PlotArtifact
 
@@ -208,7 +381,7 @@ Bounded scatter plot with optional groups
 
 Time series plot with bounded samples
 
-**输入**：dataset : Dataset
+**输入**：dataset : Dataset | FeatureDataset
 
 **输出**：plot : PlotArtifact
 
@@ -219,11 +392,89 @@ Time series plot with bounded samples
 | group | column | null | 否 |  |
 | title | string | "Time series" | 否 |  |
 
+## visual.subplot · 子图
+
+Create one bounded line or scatter panel per selected value column
+
+**输入**：dataset : Dataset | FeatureDataset
+
+**输出**：plot : PlotArtifact
+
+| 参数 | 类型 | 默认值 | 必填 | 选项 |
+| --- | --- | --- | --- | --- |
+| x | column | null | 是 |  |
+| value_columns | column_list | null | 是 |  |
+| kind | enum | "line" | 否 | line, scatter |
+| title | string | "Subplots" | 否 |  |
+| max_points | integer | 500 | 否 |  min=10, max=10000 |
+
+## visual.histogram · 直方图
+
+Histogram counts or density for up to twelve numeric columns
+
+**输入**：dataset : Dataset | FeatureDataset
+
+**输出**：plot : PlotArtifact
+
+| 参数 | 类型 | 默认值 | 必填 | 选项 |
+| --- | --- | --- | --- | --- |
+| columns | column_list | null | 是 |  |
+| bins | integer | 20 | 否 |  min=2, max=200 |
+| density | boolean | false | 否 |  |
+| title | string | "Histogram" | 否 |  |
+
+## visual.compare · 对比画图
+
+Overlay selected columns from two datasets with bounded sampling
+
+**输入**：first : Dataset，second : Dataset
+
+**输出**：plot : PlotArtifact
+
+| 参数 | 类型 | 默认值 | 必填 | 选项 |
+| --- | --- | --- | --- | --- |
+| columns | column_list | null | 是 |  |
+| x_column | column | null | 否 |  |
+| first_name | string | "first" | 否 |  |
+| second_name | string | "second" | 否 |  |
+| title | string | "Dataset comparison" | 否 |  |
+| max_points | integer | 500 | 否 |  min=10, max=10000 |
+
+## visual.anomaly · 异常点可视化
+
+Separate normal and anomalous rows using a boolean flag column
+
+**输入**：dataset : Dataset，prediction : Prediction
+
+**输出**：plot : PlotArtifact
+
+| 参数 | 类型 | 默认值 | 必填 | 选项 |
+| --- | --- | --- | --- | --- |
+| x | column | null | 是 |  |
+| y | column | null | 是 |  |
+| anomaly_column | column | null | 是 |  |
+| title | string | "Anomalies" | 否 |  |
+| max_points | integer | 500 | 否 |  min=10, max=10000 |
+
+## visual.relationship · 关系图
+
+Thresholded numeric feature relationship graph with bounded edges
+
+**输入**：dataset : Dataset | FeatureDataset
+
+**输出**：plot : PlotArtifact
+
+| 参数 | 类型 | 默认值 | 必填 | 选项 |
+| --- | --- | --- | --- | --- |
+| columns | column_list | [] | 否 |  |
+| method | enum | "pearson" | 否 | pearson, spearman, kendall |
+| threshold | float | 0.3 | 否 |  min=0, max=1 |
+
 ## visual.overview · 数据概览
 
 Shape, dtypes, missing rates, summary and time range
 
-**输入**：dataset : Dataset
+**输入**：dataset : Dataset | FeatureDataset
 
 **输出**：overview : Visualization
 
@@ -243,6 +494,7 @@ Grouped/windowed statistics and aligned window labels
 | --- | --- | --- | --- | --- |
 | columns | column_list | null | 是 |  |
 | group_column | column | null | 否 |  |
+| asset_column | column | null | 否 |  |
 | label_column | column | null | 否 |  |
 | time_column | column | null | 否 |  |
 | window_size | integer | 0 | 否 |  min=0, max=None |
@@ -263,6 +515,7 @@ Linear, polynomial or exponential trends with residual and R² features
 | --- | --- | --- | --- | --- |
 | columns | column_list | null | 是 |  |
 | group_column | column | null | 否 |  |
+| asset_column | column | null | 否 |  |
 | label_column | column | null | 否 |  |
 | time_column | column | null | 否 |  |
 | window_size | integer | 0 | 否 |  min=0, max=None |
@@ -270,6 +523,62 @@ Linear, polynomial or exponential trends with residual and R² features
 | label_policy | enum | "strict" | 否 | strict, last, mode |
 | fitting_method | enum | "linear" | 否 | linear, polynomial, exponential |
 | degree | integer | 2 | 否 |  min=1, max=5 |
+
+## feature.rolling_statistics · 滚动统计特征
+
+Rolling mean, standard deviation, median or repeated-maximum flags
+
+**输入**：dataset : Dataset
+
+**输出**：features : FeatureDataset
+
+| 参数 | 类型 | 默认值 | 必填 | 选项 |
+| --- | --- | --- | --- | --- |
+| columns | column_list | null | 是 |  |
+| method | enum | "mean" | 否 | mean, std, median, max_repeat |
+| window | integer | 5 | 否 |  min=2, max=100000 |
+| group_column | column | null | 否 |  |
+| time_column | column | null | 否 |  |
+
+## feature.temporal · 差分与自相关特征
+
+Row-aligned first/second differences or rolling autocorrelation
+
+**输入**：dataset : Dataset
+
+**输出**：features : FeatureDataset
+
+| 参数 | 类型 | 默认值 | 必填 | 选项 |
+| --- | --- | --- | --- | --- |
+| columns | column_list | null | 是 |  |
+| method | enum | "first_difference" | 否 | first_difference, second_difference, autocorrelation |
+| lag | integer | 1 | 否 |  min=1, max=None |
+| window | integer | 20 | 否 |  min=3, max=None |
+| group_column | column | null | 否 |  |
+| time_column | column | null | 否 |  |
+
+## feature.entropy · 熵特征
+
+Windowed approximate entropy and histogram-based information entropy
+
+**输入**：dataset : Dataset
+
+**输出**：features : FeatureDataset，labels : LabelVector（可选）
+
+| 参数 | 类型 | 默认值 | 必填 | 选项 |
+| --- | --- | --- | --- | --- |
+| columns | column_list | null | 是 |  |
+| group_column | column | null | 否 |  |
+| asset_column | column | null | 否 |  |
+| label_column | column | null | 否 |  |
+| time_column | column | null | 否 |  |
+| window_size | integer | 0 | 否 |  min=0, max=None |
+| step | integer | 0 | 否 |  min=0, max=None |
+| label_policy | enum | "strict" | 否 | strict, last, mode |
+| methods | feature_list | ["approximate_entropy", "information_entropy"] | 是 | approximate_entropy, information_entropy |
+| bins | integer | 16 | 否 |  min=2, max=200 |
+| embedding_dimension | integer | 2 | 否 |  min=1, max=5 |
+| tolerance_ratio | float | 0.2 | 否 |  min=0, max=None |
 
 ## feature.categorical · 分类特征
 
@@ -310,6 +619,7 @@ FFT amplitude features per window: dominant frequency, centroid, entropy, band a
 | --- | --- | --- | --- | --- |
 | columns | column_list | null | 是 |  |
 | group_column | column | null | 否 |  |
+| asset_column | column | null | 否 |  |
 | label_column | column | null | 否 |  |
 | time_column | column | null | 否 |  |
 | window_size | integer | 0 | 否 |  min=0, max=None |
@@ -361,9 +671,10 @@ Random Forest classification with reproducible holdout evaluation
 
 | 参数 | 类型 | 默认值 | 必填 | 选项 |
 | --- | --- | --- | --- | --- |
-| split_method | enum | "stratified" | 否 | stratified, group, temporal |
+| split_method | enum | "stratified" | 否 | stratified, group, asset, temporal |
 | test_size | float | 0.25 | 否 |  min=0.05, max=0.5 |
 | random_state | integer | 42 | 否 |  min=0, max=None |
+| positive_class | string | "" | 否 |  |
 | n_estimators | integer | 100 | 否 |  min=1, max=2000 |
 | max_depth | integer | null | 否 |  min=1, max=100 |
 | min_samples_split | integer | 2 | 否 |  min=2, max=None |
@@ -380,9 +691,10 @@ SVM with standardization fitted on training data only
 
 | 参数 | 类型 | 默认值 | 必填 | 选项 |
 | --- | --- | --- | --- | --- |
-| split_method | enum | "stratified" | 否 | stratified, group, temporal |
+| split_method | enum | "stratified" | 否 | stratified, group, asset, temporal |
 | test_size | float | 0.25 | 否 |  min=0.05, max=0.5 |
 | random_state | integer | 42 | 否 |  min=0, max=None |
+| positive_class | string | "" | 否 |  |
 | kernel | enum | "rbf" | 否 | linear, poly, rbf, sigmoid |
 | C | float | 1.0 | 否 |  min=1e-06, max=None |
 | gamma | enum | "scale" | 否 | scale, auto |
@@ -399,15 +711,137 @@ XGBoost classification; optional xgboost dependency
 
 | 参数 | 类型 | 默认值 | 必填 | 选项 |
 | --- | --- | --- | --- | --- |
-| split_method | enum | "stratified" | 否 | stratified, group, temporal |
+| split_method | enum | "stratified" | 否 | stratified, group, asset, temporal |
 | test_size | float | 0.25 | 否 |  min=0.05, max=0.5 |
 | random_state | integer | 42 | 否 |  min=0, max=None |
+| positive_class | string | "" | 否 |  |
 | n_estimators | integer | 100 | 否 |  min=1, max=2000 |
 | max_depth | integer | 4 | 否 |  min=1, max=32 |
 | learning_rate | float | 0.1 | 否 |  min=0.0001, max=1 |
 | subsample | float | 1.0 | 否 |  min=0.01, max=1 |
 | colsample_bytree | float | 1.0 | 否 |  min=0.01, max=1 |
 | objective | enum | "auto" | 否 | auto, binary:logistic, multi:softprob |
+
+## validation.decision_tree · 决策树
+
+Decision-tree fault classification with reproducible holdout evaluation
+
+**输入**：features : FeatureDataset，labels : LabelVector
+
+**输出**：model : Model，prediction : Prediction，metrics : Metrics，importance : FeatureImportance
+
+| 参数 | 类型 | 默认值 | 必填 | 选项 |
+| --- | --- | --- | --- | --- |
+| split_method | enum | "stratified" | 否 | stratified, group, asset, temporal |
+| test_size | float | 0.25 | 否 |  min=0.05, max=0.5 |
+| random_state | integer | 42 | 否 |  min=0, max=None |
+| positive_class | string | "" | 否 |  |
+| criterion | enum | "gini" | 否 | gini, entropy, log_loss |
+| max_depth | integer | null | 否 |  min=1, max=100 |
+| min_samples_split | integer | 2 | 否 |  min=2, max=None |
+| min_samples_leaf | integer | 1 | 否 |  min=1, max=None |
+| class_weight | enum | null | 否 | balanced |
+
+## validation.reservoir_classifier · 水库机分类
+
+Echo-state feature mapping followed by logistic fault classification
+
+**输入**：features : FeatureDataset，labels : LabelVector
+
+**输出**：model : Model，prediction : Prediction，metrics : Metrics
+
+| 参数 | 类型 | 默认值 | 必填 | 选项 |
+| --- | --- | --- | --- | --- |
+| split_method | enum | "stratified" | 否 | stratified, group, asset, temporal |
+| test_size | float | 0.25 | 否 |  min=0.05, max=0.5 |
+| random_state | integer | 42 | 否 |  min=0, max=None |
+| positive_class | string | "" | 否 |  |
+| reservoir_size | integer | 50 | 否 |  min=5, max=500 |
+| spectral_radius | float | 0.9 | 否 |  min=0.01, max=1.5 |
+| input_scale | float | 0.5 | 否 |  min=1e-06, max=10 |
+| leaking_rate | float | 1.0 | 否 |  min=0.01, max=1 |
+| n_steps | integer | 3 | 否 |  min=1, max=50 |
+| C | float | 1.0 | 否 |  min=1e-06, max=None |
+| max_iter | integer | 1000 | 否 |  min=100, max=10000 |
+| class_weight | enum | null | 否 | balanced |
+
+## validation.linear_regression · 线性回归
+
+Numeric target prediction with random, group or temporal holdout metrics
+
+**输入**：features : FeatureDataset，target : LabelVector
+
+**输出**：model : Model，prediction : Prediction，metrics : Metrics，importance : FeatureImportance
+
+| 参数 | 类型 | 默认值 | 必填 | 选项 |
+| --- | --- | --- | --- | --- |
+| split_method | enum | "random" | 否 | random, group, temporal |
+| test_size | float | 0.25 | 否 |  min=0.05, max=0.5 |
+| random_state | integer | 42 | 否 |  min=0, max=None |
+| fit_intercept | boolean | true | 否 |  |
+| positive | boolean | false | 否 |  |
+
+## validation.arma · ARMA
+
+Autoregressive moving-average fit with a temporal holdout forecast
+
+**输入**：dataset : Dataset
+
+**输出**：model : Model，prediction : Prediction，metrics : Metrics
+
+| 参数 | 类型 | 默认值 | 必填 | 选项 |
+| --- | --- | --- | --- | --- |
+| column | column | null | 是 |  |
+| p | integer | 2 | 否 |  min=0, max=50 |
+| q | integer | 1 | 否 |  min=0, max=50 |
+| test_size | float | 0.25 | 否 |  min=0.05, max=0.5 |
+| iterations | integer | 5 | 否 |  min=1, max=100 |
+| time_column | column | null | 否 |  |
+
+## validation.knn_detector · KNN检测
+
+Unsupervised anomaly scores from standardized k-nearest-neighbor distances
+
+**输入**：dataset : Dataset
+
+**输出**：model : Model，prediction : Prediction，metrics : Metrics
+
+| 参数 | 类型 | 默认值 | 必填 | 选项 |
+| --- | --- | --- | --- | --- |
+| columns | column_list | [] | 否 |  |
+| contamination | float | 0.05 | 否 |  min=1e-06, max=0.5 |
+| neighbors | integer | 5 | 否 |  min=1, max=None |
+
+## validation.isolation_forest_detector · 隔离森林检测
+
+Unsupervised Isolation Forest scores and contamination-based anomaly flags
+
+**输入**：dataset : Dataset
+
+**输出**：model : Model，prediction : Prediction，metrics : Metrics
+
+| 参数 | 类型 | 默认值 | 必填 | 选项 |
+| --- | --- | --- | --- | --- |
+| columns | column_list | [] | 否 |  |
+| contamination | float | 0.05 | 否 |  min=1e-06, max=0.5 |
+| random_state | integer | 42 | 否 |  min=0, max=None |
+| n_estimators | integer | 100 | 否 |  min=1, max=2000 |
+
+## validation.persistence_detector · Persist检测器
+
+Flag a threshold excursion after it persists for a configured number of rows
+
+**输入**：dataset : Dataset
+
+**输出**：model : Model，prediction : Prediction，metrics : Metrics
+
+| 参数 | 类型 | 默认值 | 必填 | 选项 |
+| --- | --- | --- | --- | --- |
+| column | column | null | 是 |  |
+| threshold | float | null | 是 |  |
+| direction | enum | "above" | 否 | above, below, absolute |
+| min_consecutive | integer | 3 | 否 |  min=1, max=None |
+| group_column | column | null | 否 |  |
 
 ## data.labels · 标签向量
 
@@ -432,6 +866,20 @@ Explicit Dataset to FeatureDataset conversion
 | 参数 | 类型 | 默认值 | 必填 | 选项 |
 | --- | --- | --- | --- | --- |
 | columns | column_list | null | 是 |  |
+
+## feature.imputation · 特征缺失处理
+
+Fill or drop NaN feature columns (flat windows yield NaN spectra) before modelling
+
+**输入**：features : FeatureDataset
+
+**输出**：features : FeatureDataset
+
+| 参数 | 类型 | 默认值 | 必填 | 选项 |
+| --- | --- | --- | --- | --- |
+| columns | column_list | [] | 否 |  |
+| method | enum | "mean" | 否 | mean, median, zero, drop_columns |
+| fill_value | float | 0.0 | 否 |  |
 
 ## feature.merge · 合并特征
 

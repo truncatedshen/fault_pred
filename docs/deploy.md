@@ -13,7 +13,7 @@
 | 内容 | 作用 |
 | --- | --- |
 | `dist/*.whl` | 平台本体（`fault_core` + `fault_platform`） |
-| `skills/fault-prediction/SKILL.md` | 给 Agent 的领域技能 |
+| `skills/fault-prediction/` | 给 Agent 的领域技能：`SKILL.md` 阶段手册 + `references/`（recipes、troubleshooting、components） |
 | `scripts/deploy.ps1` | 目标机一键安装（建 venv、装包、装 skill、写 MCP 配置、跑验收） |
 | `scripts/verify_deploy.py` | 目标机验收脚本（14 项检查） |
 | `scripts/mcp_smoke.py` | MCP 端到端冒烟（只用 MCP 工具建图并执行） |

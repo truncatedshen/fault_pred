@@ -59,7 +59,11 @@ def main() -> int:
     arguments = parser.parse_args()
 
     config = Path(arguments.config).expanduser()
+    # Resolve once: a relative interpreter would break when the client launches the
+    # bridge from another working directory.
     python = Path(arguments.python).expanduser()
+    if not python.is_absolute():
+        python = (Path.cwd() / python).resolve()
     if not python.exists():
         print(f"FAIL: interpreter not found: {python}")
         return 2

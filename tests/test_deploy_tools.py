@@ -133,3 +133,27 @@ def test_cli_accepts_a_utf8_bom_and_normalises_it(tmp_path):
 @pytest.mark.parametrize("name", ["deploy.ps1", "verify_deploy.py", "mcp_smoke.py", "install_mcp_config.py"])
 def test_release_inputs_exist(name):
     assert (Path(__file__).resolve().parents[1] / "scripts" / name).exists()
+
+
+def test_cli_stores_an_absolute_interpreter_path(tmp_path):
+    """A relative --python would break when the client starts the bridge elsewhere."""
+    config = tmp_path / "config.toml"
+    scripts = Path(__file__).resolve().parents[1] / "scripts"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(scripts / "install_mcp_config.py"),
+            "--config",
+            str(config),
+            "--python",
+            "scripts/../scripts/../.venv/Scripts/python.exe",
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        cwd=Path(__file__).resolve().parents[1],
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    entry = tomllib.loads(config.read_text(encoding="utf-8"))["mcp_servers"][SERVER]
+    assert Path(entry["command"]).is_absolute()
+    assert ".." not in entry["command"]

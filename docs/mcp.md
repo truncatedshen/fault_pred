@@ -32,7 +32,7 @@
 
 `--from-config` 读取 `~/.codex/config.toml` 的 `[mcp_servers.fault-prediction]` 并原样启动，报告里会打印 `bridge_source`。不加该参数时使用 `sys.executable` 与 `--url`，便于其它客户端或 CI 复用；`--url` 可指向别的服务端口。
 
-当前实测结果：36 个工具、9 个 feature 组件可检索、`feature.spectral` 的 sampling_rate 为必填、6 条连线成功、`Dataset → FeatureDataset` 被拒绝并返回 `Incompatible port types`、执行 SUCCESS、随机森林 accuracy=1.0（合成数据）、频域节点产出主频与谱 RMS 列、XML 5392 字符、检查点保存并恢复 5 个已完成节点。
+当前实测结果：38 个工具、13 个 feature 组件可检索、`feature.spectral` 的 sampling_rate 为必填、6 条连线成功、`Dataset → FeatureDataset` 被拒绝并返回 `Incompatible port types`、执行 SUCCESS、随机森林 accuracy=1.0（合成数据）、频域节点产出主频与谱 RMS 列、XML 6157 字符、检查点保存并恢复 5 个已完成节点。
 
 客户端侧可以再确认一次注册情况：
 
@@ -40,7 +40,7 @@
 codex mcp list
 ~~~
 
-Skill 位于 `skills/fault-prediction/SKILL.md`，可复制到 Agent 技能目录或直接读取。
+Skill 位于 `skills/fault-prediction/`（`SKILL.md` + `references/` 三份参考资料），可整目录复制到 Agent 技能目录或直接读取；技能按阶段说明每个阶段怎么用、有哪些注意事项，并列出全部 38 个工具的用途。
 
 Agent 的每次编辑与执行都会经 `GET /api/events`（SSE）推送给打开的网页：节点实时出现或消失，执行时节点状态、耗时与缓存命中逐条更新。用户此时若有未保存的本地改动，页面显示冲突横幅而不是静默覆盖。
 

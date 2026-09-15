@@ -1,4 +1,15 @@
-"""Lossless graph XML with structural and registry validation."""
+"""Lossless graph XML with structural and registry validation.
+
+XML 只承载**配置**（节点、参数、端口、连接、画布信息），不承载任何运行产物，
+因此文件很小（超过 2 MB 直接拒绝）。写与读都做严格校验：
+
+* 写：先校验图，再按 XSD 校验生成的文档，保证导出物一定可被本平台读回；
+* 读：先做 XXE 防护（禁用实体解析、禁止 DTD、不联网），再按 XSD 校验，
+  然后逐节点比对"XML 里声明的端口"与"注册表里的端口"，最后校验连接与整体结构。
+
+这样"导出的 XML 换个版本读不回来"这类问题会在导入时立刻暴露成明确错误，
+而不是在运行时变成难以定位的行为差异。
+"""
 
 from __future__ import annotations
 
@@ -16,10 +27,17 @@ MAX_XML_BYTES = 2_000_000
 
 
 def _json(value: Any) -> str:
+    """按 JSON 存参数值：保留类型（数字/布尔/列表/字典）且拒绝 NaN。"""
     return json.dumps(value, ensure_ascii=False, allow_nan=False)
 
 
 def _parse(text: str) -> etree._Element:
+    """把 XML 文本解析成元素树，并做完整体积、安全与 XSD 校验。
+
+    安全设置：``resolve_entities=False``、``no_network=True``、``load_dtd=False``、
+    ``huge_tree=False``，并显式拒绝带 DOCTYPE 的文档——这些都是为了阻断 XXE
+    与实体膨胀（billion laughs）这类解析器层面的攻击。
+    """
     raw = text.encode("utf-8")
     if len(raw) > MAX_XML_BYTES:
         raise ValueError("XML exceeds 2 MB; graphs must not embed runtime datasets")
@@ -37,8 +55,15 @@ def _parse(text: str) -> etree._Element:
 
 class XMLSerializer:
     def dumps(self, graph: ComponentGraph) -> str:
+        """把图序列化成 XML 文本。
+
+        参数按 ``encoding="json"`` 存放，端口声明的顺序与注册表一致，
+        因此同一个图重复导出得到稳定一致的文本（便于 diff 与版本管理）。
+        生成后立刻用 :func:`_parse` 自校验：不会写出"自己都读不回来"的文件。
+        """
         errors = graph.validate_graph(require_complete=False)
         if errors:
+            # 允许导出"编辑中"的图（未填参数/未连线），但结构错误必须挡住。
             raise ValueError("; ".join(errors))
         root = etree.Element(
             "faultPredictionPipeline",
@@ -93,14 +118,24 @@ class XMLSerializer:
         return result
 
     def save(self, graph: ComponentGraph, path: str | Path) -> None:
+        """把图写到磁盘（调用方负责先写临时文件再原子替换）。"""
         Path(path).write_text(self.dumps(graph), encoding="utf-8")
 
 
 class XMLParser:
     def __init__(self, registry: ComponentRegistry) -> None:
+        """需要一个注册表：导入时必须能按类型名找到组件实现，才能做端口一致性校验。"""
         self.registry = registry
 
     def loads(self, text: str, require_complete: bool = False) -> ComponentGraph:
+        """从 XML 文本还原图，并在每一层做交叉校验。
+
+        * 组件版本必须与注册表一致，否则拒绝（避免"配置来自别的版本"的静默错配）；
+        * 参数不能重复，值按 JSON 解析；
+        * 文件里声明的端口列表必须与注册表**逐项相同**（名字、类型、必填），
+          防止手改 XML 绕过类型系统；
+        * 最后跑一遍图校验；``require_complete=True`` 时缺参数或未连线也会失败。
+        """
         root = _parse(text)
         graph = ComponentGraph(self.registry, root.get("name"), root.get("id"))
         graph.metadata = json.loads(root.findtext("metadata", "{}"))
@@ -137,6 +172,7 @@ class XMLParser:
                 for p in specs
             ]
             if declared != expected:
+                # 端口对不上说明 XML 被改过或来自不兼容的版本，必须拒绝而不是"尽力解析"。
                 raise ValueError(f"Port declarations differ from registry: {node.id}")
         for edge in root.findall("./connections/connection"):
             graph.connect(
@@ -149,10 +185,12 @@ class XMLParser:
         return graph
 
     def load(self, path: str | Path, require_complete: bool = False) -> ComponentGraph:
+        """从文件读取（容忍 UTF-8 BOM：Windows 编辑器的常见产物）。"""
         return self.loads(Path(path).read_text(encoding="utf-8-sig"), require_complete)
 
 
 def validate_xml(text: str, registry: ComponentRegistry, require_complete: bool = False) -> list[str]:
+    """校验一段 XML 是否是合法方案：返回错误列表（空列表表示通过），不抛异常。"""
     try:
         XMLParser(registry).loads(text, require_complete)
         return []

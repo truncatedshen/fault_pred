@@ -27,7 +27,9 @@
     <aside class="library">
       <div class="panel-heading"><h2>组件库</h2><span id="catalog-count" class="count"></span></div>
       <label class="search"><span>⌕</span><input id="search" placeholder="搜索组件…" aria-label="搜索组件"></label>
-      <div class="library-tabs"><button id="all-components" class="active">全部组件</button><button id="favorites">收藏</button></div>
+      <div class="catalog-filter"><select id="category-filter" aria-label="组件分类"><option value="">全部分类</option></select></div>
+      <div class="library-tabs"><button id="all-components" class="active">全部</button><button id="favorites">收藏</button><button id="recent-components">最近</button></div>
+      <div class="library-tools"><button id="toggle-groups" aria-label="展开或折叠全部分组">▾ 折叠全部</button><button id="reset-layout" title="恢复默认面板宽高">↺ 恢复布局</button></div>
       <div id="component-library" class="catalog"></div>
       <div class="data-box"><div><strong>数据文件</strong><button id="upload">＋ 上传 CSV</button></div><select id="data-files" aria-label="已上传数据文件"><option value="">选择数据源…</option></select><small>选择文件可添加数据输入节点</small></div>
     </aside>
@@ -48,6 +50,9 @@
       <div class="panel-heading"><h2>节点配置</h2><span class="eyebrow">INSPECTOR</span></div>
       <div id="inspector-content"><div class="inspector-empty"><span>⌖</span><h3>选择一个组件</h3><p>查看端口信息并配置运行参数。</p></div></div>
     </aside>
+    <div id="library-splitter" class="splitter vertical" role="separator" aria-orientation="vertical" aria-label="调整组件库宽度" title="拖动调整宽度 · 方向键微调 · 双击恢复默认" tabindex="0"></div>
+    <div id="inspector-splitter" class="splitter vertical" role="separator" aria-orientation="vertical" aria-label="调整节点配置宽度" title="拖动调整宽度 · 方向键微调 · 双击恢复默认" tabindex="0"></div>
+    <div id="results-splitter" class="splitter horizontal" role="separator" aria-orientation="horizontal" aria-label="调整结果面板高度" title="拖动调整高度 · 方向键微调 · 双击恢复默认" tabindex="0"></div>
   </main>
   <footer><span><i class="online-dot"></i>Runtime ready <span id="footer-version">v0.1.0</span></span><span id="footer-message">组件 → 连接 → 校验 → 执行</span><span>Component · Graph · Workspace</span></footer>
   <div id="toast" role="status"></div>

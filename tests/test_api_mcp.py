@@ -31,11 +31,28 @@ def call(client, operation, **arguments):
     return client.post("/api/control/" + operation, json=arguments)
 
 
+def test_schema_exposes_compatible_input_types(service):
+    """Agent 必须能发现"这个口还吃什么"：schema 要带 accepted_types，检索也要认得。"""
+    with TestClient(create_app(service=service)) as client:
+        schema = call(client, "get_component_schema", component_type="visual.overview").json()
+        port = next(p for p in schema["component"]["input_ports"] if p["name"] == "dataset")
+        assert port["data_type"] == "Dataset"
+        assert port["accepted_types"] == ["Dataset", "FeatureDataset"]
+
+        # 反过来：按 FeatureDataset 检索，能直接找到可挂在特征分支上的检查类组件。
+        found = call(client, "list_components", input_type="FeatureDataset", limit=200).json()
+        assert found["total"] >= 11
+        types = {item["component_type"] for item in found["components"]}
+        assert {"visual.overview", "visual.line", "explore.correlation"} <= types
+        # 数据转换组件不在这份清单里——放宽的只有检查类组件。
+        assert "data.filter" not in types
+
+
 def test_api_example_execution_and_xml(service):
     with TestClient(create_app(service=service)) as client:
         assert client.get("/").status_code == 200
         assert client.get("/static/app.js").status_code == 200
-        assert client.get("/api/health").json()["components"] == 29
+        assert client.get("/api/health").json()["components"] == 56
         example = call(client, "create_example").json()
         pipeline_id = example["pipeline_id"]
         assert call(client, "validate_pipeline", pipeline_id=pipeline_id).json()["valid"]
@@ -197,6 +214,11 @@ async def test_real_stdio_mcp_and_shared_http_graph(live_server):
     async with stdio_client(parameters) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
+            discovered = await session.call_tool("search_components", {"query": "水库机", "limit": 10})
+            discovery_payload = json.loads(discovered.content[0].text)
+            assert [item["component_type"] for item in discovery_payload["components"]] == [
+                "validation.reservoir_classifier"
+            ]
             result = await session.call_tool("create_pipeline", {"name": "MCP integration"})
             payload = json.loads(result.content[0].text)
             assert payload["success"]

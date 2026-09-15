@@ -5,14 +5,36 @@ const categories = {
   data: ["数据处理", "▦"], explore: ["数据探索", "◈"], visual: ["数据可视化", "▤"],
   feature: ["特征提取", "ƒ"], validation: ["算法验证", "◇"],
 };
+// 面板默认宽高与可拖拽范围（像素）。library/inspector 是宽度，results 是高度。
+const DEFAULT_LAYOUT = {library: 236, inspector: 278, results: 252};
+const PANEL_LIMITS = {library: [170, 460], inspector: [190, 520], results: [120, 560]};
+// 方向键微调：向右/上就是"变大"，但右侧面板的"变大"是向左拖，所以分开定义。
+const PANEL_KEYS = {
+  library: {grow: "ArrowRight", shrink: "ArrowLeft", axis: "x", step: 16, dragSign: 1},
+  inspector: {grow: "ArrowLeft", shrink: "ArrowRight", axis: "x", step: 16, dragSign: -1},
+  results: {grow: "ArrowUp", shrink: "ArrowDown", axis: "y", step: 24, dragSign: -1},
+};
+// 组件总数超过该值时，子分类默认折叠：目录变大后先给"目录"，需要时再展开。
+const GROUP_AUTO_COLLAPSE = 24;
 const state = {
   catalog: [], graph: null, selected: new Set(), edge: null, pending: null,
   zoom: 1, pan: {x: 40, y: 35}, undo: [], redo: [], statuses: {}, running: false,
-  saving: false, tab: "result", onlyFavorites: false, favorites: new Set(),
+  saving: false, tab: "result", libraryView: "all", favorites: new Set(), recent: [],
   drag: null, resultRequest: 0, dirty: false, poll: null,
   events: null, syncing: false, remoteVersion: null, nodeMeta: {},
+  collapsed: new Set(), expanded: new Set(), groupKeys: [], layout: {...DEFAULT_LAYOUT},
+  renderedCollapsed: new Set(),
 };
 try { state.favorites = new Set(JSON.parse(localStorage.getItem("fault-favorites") || "[]")); } catch {}
+try { state.recent = JSON.parse(localStorage.getItem("fault-recent") || "[]").slice(0, 12); } catch {}
+try { state.collapsed = new Set(JSON.parse(localStorage.getItem("fault-library-collapsed") || "[]")); } catch {}
+try { state.expanded = new Set(JSON.parse(localStorage.getItem("fault-library-expanded") || "[]")); } catch {}
+try {
+  const saved = JSON.parse(localStorage.getItem("fault-layout") || "{}");
+  for (const name of Object.keys(DEFAULT_LAYOUT)) {
+    if (Number.isFinite(saved[name])) state.layout[name] = saved[name];
+  }
+} catch {}
 const schema = (type) => state.catalog.find((c) => c.component_type === type);
 const activeNode = () => state.graph?.nodes.find((n) => n.id === [...state.selected][0]);
 const categoryColor = (category) => categories[category] ? category : "data";
@@ -68,28 +90,64 @@ async function openGraph(graph, fit = true) {
   await showResult();
 }
 function renderCatalog() {
-  const query = $("#search").value.toLowerCase();
+  const query = $("#search").value.trim().toLowerCase();
+  const categoryFilter = $("#category-filter").value;
+  // 搜索、分类筛选或切换收藏/最近视图时强制展开：命中的组件必须看得见。
+  const filtering = Boolean(query) || Boolean(categoryFilter) || state.libraryView !== "all";
+  const recentOrder = new Map(state.recent.map((type, index) => [type, index]));
   const filtered = state.catalog.filter((c) =>
-    (!state.onlyFavorites || state.favorites.has(c.component_type)) &&
-    [c.component_type, c.display_name, c.description, ...(c.tags || [])].join(" ").toLowerCase().includes(query));
-  $("#catalog-count").textContent = state.catalog.length;
-  $("#component-library").innerHTML = Object.entries(categories).map(([category, [title, icon]]) => {
+    (!categoryFilter || c.category === categoryFilter) &&
+    (state.libraryView !== "favorites" || state.favorites.has(c.component_type)) &&
+    (state.libraryView !== "recent" || recentOrder.has(c.component_type)) &&
+    [c.component_type, c.display_name, c.description, c.category, c.subcategory,
+      ...(c.tags || []), ...(c.search_keywords || [])].join(" ").toLowerCase().includes(query));
+  if (state.libraryView === "recent") filtered.sort((a, b) => recentOrder.get(a.component_type) - recentOrder.get(b.component_type));
+  $("#catalog-count").textContent = filtered.length === state.catalog.length ?
+    state.catalog.length : filtered.length + "/" + state.catalog.length;
+  const componentMarkup = (c, icon) => '<div class="component-item" draggable="true" data-type="' +
+    esc(c.component_type) + '" style="--category:var(--' + categoryColor(c.category) +
+    ')" title="' + esc(c.description) + '"><span class="component-icon">' + icon +
+    "</span><span>" + esc(c.display_name) + "</span><button class=\"star " +
+    (state.favorites.has(c.component_type) ? "saved" : "") + '" aria-label="收藏 ' +
+    esc(c.display_name) + '">☆</button></div>';
+  const categoryOrder = [
+    ...Object.keys(categories),
+    ...[...new Set(filtered.map((c) => c.category))].filter((category) => !categories[category]),
+  ];
+  const autoCollapse = state.catalog.length > GROUP_AUTO_COLLAPSE;
+  const keys = [];
+  const collapsedKeys = [];
+  $("#component-library").innerHTML = categoryOrder.map((category) => {
     const components = filtered.filter((c) => c.category === category);
     if (!components.length) return "";
-    return '<div class="category-title">' + title + "<span>" + components.length + "</span></div>" +
-      components.map((c) => '<div class="component-item" draggable="true" data-type="' + esc(c.component_type) +
-        '" style="--category:var(--' + category + ')" title="' + esc(c.description) + '">' +
-        '<span class="component-icon">' + icon + "</span><span>" + esc(c.display_name) + "</span>" +
-        '<button class="star ' + (state.favorites.has(c.component_type) ? "saved" : "") +
-        '" aria-label="收藏 ' + esc(c.display_name) + '">☆</button></div>').join("");
-  }).join("");
-  // Unknown plugin categories still get a discoverable group.
-  const extras = filtered.filter((c) => !categories[c.category]);
-  for (const c of extras) {
-    const item = document.createElement("div");
-    item.className = "component-item"; item.draggable = true; item.dataset.type = c.component_type;
-    item.textContent = c.display_name;
-    $("#component-library").append(item);
+    const [title, icon] = categories[category] || [category, "◇"];
+    const categoryKey = groupKey("cat", category);
+    keys.push(categoryKey);
+    const categoryCollapsed = groupCollapsed("cat", category, false, filtering);
+    if (categoryCollapsed) collapsedKeys.push(categoryKey);
+    const subcategories = [...new Set(components.map((c) => c.subcategory || "通用"))];
+    // 只有一个"通用"子分类的类别（例如可视化）不再套一层，直接列出组件。
+    const needsSubcategory = subcategories.length > 1 || subcategories[0] !== "通用";
+    const groups = subcategories.map((subcategory) => {
+      const members = components.filter((c) => (c.subcategory || "通用") === subcategory);
+      if (!needsSubcategory) return members.map((c) => componentMarkup(c, icon)).join("");
+      const subcategoryKey = groupKey("sub", category + "/" + subcategory);
+      keys.push(subcategoryKey);
+      const subcategoryCollapsed = groupCollapsed(
+        "sub", category + "/" + subcategory, autoCollapse, filtering);
+      if (subcategoryCollapsed) collapsedKeys.push(subcategoryKey);
+      const heading = groupHeading("subcategory-title", subcategoryKey, esc(subcategory),
+        members.length, subcategoryCollapsed);
+      return heading + groupBody(subcategoryCollapsed, members.map((c) => componentMarkup(c, icon)).join(""));
+    }).join("");
+    return groupHeading("category-title", categoryKey, esc(title), components.length, categoryCollapsed, icon) +
+      groupBody(categoryCollapsed, groups);
+  }).join("") || '<div class="catalog-empty">没有匹配的组件</div>';
+  state.groupKeys = keys;
+  state.renderedCollapsed = new Set(collapsedKeys);
+  for (const header of document.querySelectorAll(".category-title, .subcategory-title")) {
+    // 以"当前渲染出来的状态"取反，而不是看显式记录：默认折叠的分组同样要能一次点开。
+    header.onclick = () => toggleGroup(header.dataset.group, header.getAttribute("aria-expanded") === "true");
   }
   for (const item of document.querySelectorAll(".component-item")) {
     item.ondragstart = (e) => e.dataTransfer.setData("component", item.dataset.type);
@@ -103,6 +161,169 @@ function renderCatalog() {
       renderCatalog();
     };
   }
+  updateGroupToolbar();
+}
+function groupKey(kind, id) {
+  return kind + ":" + id;
+}
+// 折叠状态优先级：过滤时强制展开 → 用户显式折叠/展开过 → 目录规模决定的默认值。
+function groupCollapsed(kind, id, defaultCollapsed, filtering) {
+  if (filtering) return false;
+  const key = groupKey(kind, id);
+  if (state.collapsed.has(key)) return true;
+  if (state.expanded.has(key)) return false;
+  return defaultCollapsed;
+}
+function groupHeading(className, key, label, count, collapsed, icon) {
+  return '<button class="' + className + (collapsed ? " collapsed" : "") + '" data-group="' + esc(key) +
+    '" aria-expanded="' + String(!collapsed) + '"><i class="chevron">' + (collapsed ? "▸" : "▾") + "</i>" +
+    (icon ? '<span class="group-icon">' + icon + "</span>" : "") + label +
+    (className === "category-title" ? '<span class="group-count">' : "<span>") + count + "</span></button>";
+}
+function groupBody(collapsed, markup) {
+  return '<div class="group-body' + (collapsed ? " collapsed" : "") + '">' + markup + "</div>";
+}
+function saveGroupState() {
+  localStorage.setItem("fault-library-collapsed", JSON.stringify([...state.collapsed]));
+  localStorage.setItem("fault-library-expanded", JSON.stringify([...state.expanded]));
+}
+function toggleGroup(key, collapsed = null) {
+  const next = collapsed === null ? !state.collapsed.has(key) : collapsed;
+  if (next) {
+    state.collapsed.add(key);
+    state.expanded.delete(key);
+  } else {
+    state.collapsed.delete(key);
+    state.expanded.add(key);
+  }
+  saveGroupState();
+  renderCatalog();
+}
+function allGroupsCollapsed() {
+  return state.groupKeys.length > 0 && state.groupKeys.every((key) => state.renderedCollapsed.has(key));
+}
+function toggleAllGroups() {
+  const collapse = !allGroupsCollapsed();
+  state.collapsed = new Set(collapse ? state.groupKeys : []);
+  state.expanded = new Set(collapse ? [] : state.groupKeys);
+  saveGroupState();
+  renderCatalog();
+  toast(collapse ? "组件库已折叠为目录，点击分组展开" : "组件库已全部展开");
+}
+function updateGroupToolbar() {
+  const button = $("#toggle-groups");
+  if (button) button.textContent = allGroupsCollapsed() ? "▸ 展开全部" : "▾ 折叠全部";
+}
+// ── 面板尺寸 ─────────────────────────────────────────────
+// 布局只由 :root 上的三个 CSS 变量描述；状态保存在 localStorage，刷新后保持。
+function setPanelSize(name, value) {
+  const [min] = PANEL_LIMITS[name];
+  state.layout[name] = Math.round(Math.max(min, Math.min(panelCeiling(name), value)));
+  applyLayout();
+}
+// 上限同时受视口限制：侧栏不超过视口宽度的 34%，结果面板不超过高度的 45%，
+// 这样无论怎么拖，画布都还留得下可用空间。
+function panelCeiling(name) {
+  const [, max] = PANEL_LIMITS[name];
+  const viewport = name === "results" ? window.innerHeight * 0.45 : window.innerWidth * 0.34;
+  return Math.min(max, Math.round(viewport));
+}
+function persistLayout() {
+  localStorage.setItem("fault-layout", JSON.stringify(state.layout));
+}
+function applyLayout() {
+  const root = document.documentElement.style;
+  root.setProperty("--library-width", state.layout.library + "px");
+  root.setProperty("--inspector-width", state.layout.inspector + "px");
+  root.setProperty("--results-height", state.layout.results + "px");
+  updateSplitterPositions();
+}
+// 分隔条按"实际渲染出来的边界"定位：这样宽度钳制与响应式断点都不会让它跑偏。
+function updateSplitterPositions() {
+  const workspace = $(".workspace");
+  const library = $(".library");
+  const inspector = $(".inspector");
+  const center = $(".center");
+  const results = $(".results");
+  if (!workspace || !library || !inspector || !center || !results) return;
+  if (typeof workspace.getBoundingClientRect !== "function") return;
+  const base = workspace.getBoundingClientRect();
+  if (!base.width) return;
+  const libraryBox = library.getBoundingClientRect();
+  const inspectorBox = inspector.getBoundingClientRect();
+  const centerBox = center.getBoundingClientRect();
+  const resultsBox = results.getBoundingClientRect();
+  const librarySplitter = $("#library-splitter");
+  if (librarySplitter) librarySplitter.style.left = Math.round(libraryBox.right - base.left - 3) + "px";
+  const inspectorSplitter = $("#inspector-splitter");
+  if (inspectorSplitter) inspectorSplitter.style.right = Math.round(base.right - inspectorBox.left - 3) + "px";
+  const resultsSplitter = $("#results-splitter");
+  if (resultsSplitter) {
+    resultsSplitter.style.left = Math.round(centerBox.left - base.left) + "px";
+    resultsSplitter.style.width = Math.round(centerBox.width) + "px";
+    resultsSplitter.style.bottom = Math.round(base.bottom - resultsBox.top - 3) + "px";
+  }
+}
+function nudgePanel(name, direction) {
+  const spec = PANEL_KEYS[name];
+  if (!spec) return;
+  setPanelSize(name, state.layout[name] + (direction === "grow" ? spec.step : -spec.step));
+  persistLayout();
+}
+function startPanelDrag(event, name) {
+  if (event.button) return;
+  event.preventDefault();
+  const handle = event.currentTarget;
+  const spec = PANEL_KEYS[name];
+  const start = {position: spec.axis === "x" ? event.clientX : event.clientY, size: state.layout[name]};
+  handle.classList.add("dragging");
+  document.body.classList.add("resizing", spec.axis === "x" ? "col-resize" : "row-resize");
+  handle.setPointerCapture?.(event.pointerId);
+  const move = (moveEvent) => {
+    const current = spec.axis === "x" ? moveEvent.clientX : moveEvent.clientY;
+    // 左侧与结果面板"往外拖=变大"，右侧面板方向相反。
+    // 方向统一由 PANEL_KEYS.dragSign 描述：底部结果面板与右侧面板的方向相反。
+    const delta = spec.dragSign * (current - start.position);
+    setPanelSize(name, start.size + delta);
+  };
+  const finish = () => {
+    handle.classList.remove("dragging");
+    document.body.classList.remove("resizing", "col-resize", "row-resize");
+    handle.removeEventListener("pointermove", move);
+    handle.removeEventListener("pointerup", finish);
+    handle.removeEventListener("pointercancel", finish);
+    persistLayout();
+  };
+  handle.addEventListener("pointermove", move);
+  handle.addEventListener("pointerup", finish);
+  handle.addEventListener("pointercancel", finish);
+}
+function resetLayout() {
+  state.layout = {...DEFAULT_LAYOUT};
+  applyLayout();
+  persistLayout();
+  toast("面板宽高已恢复默认");
+}
+function initLayout() {
+  applyLayout();
+  for (const [selector, name] of [["#library-splitter", "library"],
+    ["#inspector-splitter", "inspector"], ["#results-splitter", "results"]]) {
+    const handle = $(selector);
+    if (!handle) continue;
+    // 用 addEventListener 而不是 onpointerdown 属性：属性式监听在 jsdom 里不会触发，
+    // 改完之后"拖拽方向"这条逻辑才能被 DOM 测试覆盖到。
+    handle.addEventListener("pointerdown", (event) => startPanelDrag(event, name));
+    handle.addEventListener("dblclick", resetLayout);
+    handle.addEventListener("keydown", (event) => {
+      const spec = PANEL_KEYS[name];
+      if (event.key === spec.grow || event.key === spec.shrink) {
+        event.preventDefault();
+        nudgePanel(name, event.key === spec.grow ? "grow" : "shrink");
+      }
+      if (event.key === "Home") { event.preventDefault(); resetLayout(); }
+    });
+  }
+  window.addEventListener("resize", updateSplitterPositions);
 }
 function applyTransform() {
   $("#canvas-world").style.transform = "translate(" + state.pan.x + "px," + state.pan.y + "px) scale(" + state.zoom + ")";
@@ -120,6 +341,11 @@ function render() {
 function nodeStatus(nodeId) {
   return state.statuses[nodeId] || "PENDING";
 }
+// 端口类型标签：输入端口可以声明兼容类型（例如概览同时接受 Dataset 与 FeatureDataset）。
+function portTypes(port) {
+  return (port.accepted_types && port.accepted_types.length ? port.accepted_types : [port.data_type])
+    .join(" | ");
+}
 function renderNodes() {
   $("#nodes").innerHTML = state.graph.nodes.map((n) => {
     const c = schema(n.type); if (!c) return "";
@@ -127,7 +353,7 @@ function renderNodes() {
     const ports = (kind, specs) => specs.map((p) =>
       '<div class="port ' + kind + (state.pending?.node === n.id && state.pending?.port === p.name ? " active" : "") +
       '" data-node="' + esc(n.id) + '" data-port="' + esc(p.name) + '" data-kind="' + kind +
-      '" title="' + esc(p.data_type + (p.required ? " · required" : " · optional")) + '">' +
+      '" title="' + esc(portTypes(p) + (p.required ? " · required" : " · optional")) + '">' +
       (kind === "input" ? '<span class="port-dot"></span>' : "") + esc(p.name) +
       (kind === "output" ? '<span class="port-dot"></span>' : "") + "</div>").join("");
     return '<article class="node ' + (state.selected.has(n.id) ? "selected" : "") + '" data-id="' + esc(n.id) +
@@ -146,10 +372,13 @@ function renderNodes() {
 function portPosition(nodeId, port, kind) {
   const element = document.querySelector('.node[data-id="' + CSS.escape(nodeId) + '"] .port.' + kind +
     '[data-port="' + CSS.escape(port) + '"] .port-dot');
-  if (element) {
-    const r = element.getBoundingClientRect(), canvas = $("#canvas").getBoundingClientRect();
-    return {x:(r.left + r.width / 2 - canvas.left - state.pan.x) / state.zoom,
-            y:(r.top + r.height / 2 - canvas.top - state.pan.y) / state.zoom};
+  const box = element ? element.getBoundingClientRect() : null;
+  // 尺寸量不到时（端口尚未渲染、或环境不支持布局）回退到按节点位置与端口序号推算的坐标，
+  // 否则所有端口会塌缩到同一个点，连线全部退化成长度为零的路径。
+  if (box && (box.width || box.height)) {
+    const canvas = $("#canvas").getBoundingClientRect();
+    return {x:(box.left + box.width / 2 - canvas.left - state.pan.x) / state.zoom,
+            y:(box.top + box.height / 2 - canvas.top - state.pan.y) / state.zoom};
   }
   const node = state.graph.nodes.find((n) => n.id === nodeId);
   const c = schema(node.type);
@@ -158,29 +387,92 @@ function portPosition(nodeId, port, kind) {
   return {x: node.position.x + (kind === "input" ? 12 : 206),
           y: node.position.y + 63 + (offset + idx) * 22};
 }
-function curve(a, b) {
-  const dx = Math.max(60, Math.abs(b.x - a.x) * .48);
-  return "M" + a.x + "," + a.y + " C" + (a.x + dx) + "," + a.y + " " +
-    (b.x - dx) + "," + b.y + " " + b.x + "," + b.y;
+// ── 连线路由 ─────────────────────────────────────────────
+// 连线一律走"圆角正交折线"（Simulink 那种直线 + 折角），不用贝塞尔曲线：
+// 出端口先水平走一段 stub 再接竖直通道，最后水平进入目标端口。
+const EDGE_STUB = 16;    // 出/入端口之后必须保持水平的距离
+const EDGE_RADIUS = 7;   // 折角圆角半径（调大就又会变成曲线）
+const EDGE_LANE = 9;     // 同一竖直通道上并行连线的错开距离
+function round2(value) { return Math.round(value * 100) / 100; }
+// 正交折线 → 带圆角的 path。圆角半径按相邻两段中较短的一段收缩，短段也不会被切坏。
+function edgePathD(points, radius = EDGE_RADIUS) {
+  const commands = ["M" + round2(points[0].x) + "," + round2(points[0].y)];
+  for (let i = 1; i < points.length - 1; i++) {
+    const prev = points[i - 1], cur = points[i], next = points[i + 1];
+    const cross = (cur.x - prev.x) * (next.y - cur.y) - (cur.y - prev.y) * (next.x - cur.x);
+    if (Math.abs(cross) < 0.01) continue;   // 共线点不是折角，省略掉
+    const inLength = Math.hypot(cur.x - prev.x, cur.y - prev.y);
+    const outLength = Math.hypot(next.x - cur.x, next.y - cur.y);
+    const r = Math.min(radius, inLength / 2, outLength / 2);
+    commands.push("L" + round2(cur.x - Math.sign(cur.x - prev.x) * r) + "," +
+                  round2(cur.y - Math.sign(cur.y - prev.y) * r));
+    commands.push("Q" + round2(cur.x) + "," + round2(cur.y) + " " +
+                  round2(cur.x + Math.sign(next.x - cur.x) * r) + "," +
+                  round2(cur.y + Math.sign(next.y - cur.y) * r));
+  }
+  const last = points[points.length - 1];
+  commands.push("L" + round2(last.x) + "," + round2(last.y));
+  return commands.join(" ");
+}
+// 正交路由：首尾严格落在两个端口圆心，中间只有水平段与竖直段。
+// 常规情况（目标在右侧）是一条"Z"：右 stub → 竖直通道 → 水平进端口；
+// 回边或两节点几乎重叠时改走"U"：绕到两行之间，避免横穿节点。
+function orthogonalRoute(a, b, lane = 0) {
+  if (b.x - a.x >= EDGE_STUB * 2) {
+    const stub = EDGE_STUB;
+    const channel = (a.x + b.x) / 2 + lane;   // 两端口之间的空档中线
+    return [a, {x: a.x + stub, y: a.y}, {x: channel, y: a.y},
+            {x: channel, y: b.y}, {x: b.x - stub, y: b.y}, b];
+  }
+  const stub = EDGE_STUB * 2;   // 回边要绕开节点本体，出线留得更宽
+  const sameRow = Math.abs(b.y - a.y) < EDGE_LANE * 2;
+  const alley = (a.y + b.y) / 2 + lane + (sameRow ? 54 : 0);
+  return [a, {x: a.x + stub, y: a.y}, {x: a.x + stub, y: alley},
+          {x: b.x - EDGE_STUB, y: alley}, {x: b.x - EDGE_STUB, y: b.y}, b];
+}
+// 同一条竖直通道上并行的连线互相错开，避免叠成一条看不清的粗线。
+function claimLane(occupied, a, b) {
+  const top = Math.min(a.y, b.y), bottom = Math.max(a.y, b.y), base = (a.x + b.x) / 2;
+  for (let step = 0; step < 12; step++) {
+    const lane = (step % 2 ? -1 : 1) * Math.ceil(step / 2) * EDGE_LANE;
+    const clash = occupied.some((item) => Math.abs(item.x - (base + lane)) < EDGE_LANE - 1 &&
+      Math.min(item.bottom, bottom) - Math.max(item.top, top) > -1);
+    if (!clash) { occupied.push({x: base + lane, top, bottom}); return lane; }
+  }
+  return 0;
 }
 function drawEdges() {
   if (!state.graph) return;
+  const occupied = [];
   $("#connections").innerHTML = state.graph.edges.map((e, index) => {
     const a = portPosition(e.source_node, e.source_port, "output");
     const b = portPosition(e.target_node, e.target_port, "input");
+    const d = edgePathD(orthogonalRoute(a, b, claimLane(occupied, a, b)));
+    const title = esc(e.source_node + "." + e.source_port + " → " + e.target_node + "." + e.target_port);
     return '<path data-edge="' + index + '" class="' + (state.edge === index ? "selected" : "") +
-      '" d="' + curve(a, b) + '"><title>' + esc(e.source_node + "." + e.source_port + " → " +
-      e.target_node + "." + e.target_port) + "</title></path>";
+      '" d="' + d + '"><title>' + title + "</title></path>" +
+      // 1.8px 的折线太难点中，再叠一条透明粗线当点击热区（热区永远保持透明）。
+      '<path data-edge-hit="' + index + '" class="edge-hit" d="' + d + '"><title>' + title +
+      "</title></path>";
   }).join("");
   if (state.pending?.point) {
     const a = portPosition(state.pending.node, state.pending.port, "output");
     const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    path.setAttribute("class", "pending"); path.setAttribute("d", curve(a, state.pending.point));
+    path.setAttribute("class", "pending");
+    path.setAttribute("d", edgePathD(orthogonalRoute(a, state.pending.point, 0)));
     $("#connections").append(path);
   }
-  $("#connections").querySelectorAll("[data-edge]").forEach((path) => path.onclick = (e) => {
-    e.stopPropagation(); state.edge = Number(path.dataset.edge); state.selected.clear();
-    renderNodes(); renderInspector(); showResult();
+  $("#connections").querySelectorAll("[data-edge],[data-edge-hit]").forEach((path) => {
+    const index = Number(path.dataset.edge ?? path.dataset.edgeHit);
+    path.onclick = (e) => {
+      e.stopPropagation(); state.edge = index; state.selected.clear();
+      renderNodes(); renderInspector(); showResult();
+    };
+    if (path.dataset.edgeHit === undefined) return;
+    // 悬停在热区上时高亮真正那条线，热区自己保持透明。
+    const visible = () => $("#connections").querySelector('[data-edge="' + index + '"]');
+    path.onmouseenter = () => visible()?.classList.add("hover");
+    path.onmouseleave = () => visible()?.classList.remove("hover");
   });
 }
 async function portClick({node, port, kind}) {
@@ -228,6 +520,9 @@ async function addNode(type, position, parameters = {}) {
     ...Object.fromEntries(c.parameter_schema.map((p) => [p.name, clone(p.default)])), ...parameters,
   }});
   state.selected = new Set([id]); await commit(candidate);
+  state.recent = [type, ...state.recent.filter((item) => item !== type)].slice(0, 12);
+  localStorage.setItem("fault-recent", JSON.stringify(state.recent));
+  renderCatalog();
 }
 function renderInspector() {
   const n = activeNode();
@@ -247,8 +542,8 @@ function renderInspector() {
     c.parameter_schema.map((p, i) => parameterField(p, n.parameters[p.name], i)).join("") +
     '<button type="submit" id="apply-params" class="primary">应用参数</button></form>' +
     '<div class="inspect-section">输入 / 输出端口</div>' +
-    [...c.input_ports.map((p) => "↳ " + p.name + " : " + p.data_type),
-     ...c.output_ports.map((p) => "↗ " + p.name + " : " + p.data_type)].map((s) =>
+    [...c.input_ports.map((p) => "↳ " + p.name + " : " + portTypes(p)),
+     ...c.output_ports.map((p) => "↗ " + p.name + " : " + portTypes(p))].map((s) =>
       '<div class="port-info">' + esc(s) + "</div>").join("") +
     '<div class="node-actions"><button id="run-node">运行此节点</button><button id="run-from">从此向后执行</button><button id="retry-node">重试此分支</button></div>';
   const form = $("#parameter-form");
@@ -680,12 +975,20 @@ $("#pipeline-name").onchange = guard(async (e) => {
   await commit(candidate); await listPipelines();
 });
 $("#search").oninput = renderCatalog;
-$("#favorites").onclick = () => {
-  state.onlyFavorites = true; $("#favorites").classList.add("active"); $("#all-components").classList.remove("active"); renderCatalog();
-};
-$("#all-components").onclick = () => {
-  state.onlyFavorites = false; $("#all-components").classList.add("active"); $("#favorites").classList.remove("active"); renderCatalog();
-};
+function setLibraryView(view) {
+  state.libraryView = view;
+  const active = view === "all" ? "all-components" : view === "favorites" ? "favorites" : "recent-components";
+  for (const id of ["all-components", "favorites", "recent-components"]) {
+    $("#" + id).classList.toggle("active", id === active);
+  }
+  renderCatalog();
+}
+$("#favorites").onclick = () => setLibraryView("favorites");
+$("#all-components").onclick = () => setLibraryView("all");
+$("#recent-components").onclick = () => setLibraryView("recent");
+$("#category-filter").onchange = renderCatalog;
+$("#toggle-groups").onclick = toggleAllGroups;
+$("#reset-layout").onclick = resetLayout;
 $("#run").onclick = guard(() => runPipeline());
 $("#remote-reload").onclick = guard(reloadFromServer);
 $("#remote-keep").onclick = () => { hideRemoteBanner(); toast("已保留本地修改；下次保存若版本冲突会再次提示"); };
@@ -756,8 +1059,13 @@ window.addEventListener("keydown", guard(async (e) => {
 window.addEventListener("resize", fitCanvas);
 async function init() {
   subscribeEvents();
-  const result = await api("list_components", {limit:100, include_schema:true});
-  state.catalog = result.components; renderCatalog();
+  initLayout();
+  const result = await api("list_components", {limit:500, include_schema:true});
+  state.catalog = result.components;
+  $("#category-filter").innerHTML = '<option value="">全部分类</option>' +
+    [...new Set(state.catalog.map((c) => c.category))].map((category) =>
+      '<option value="' + esc(category) + '">' + esc(categories[category]?.[0] || category) + "</option>").join("");
+  renderCatalog();
   const pipelines = await api("list_pipelines");
   if (pipelines.pipelines.length) {
     await openGraph((await api("get_pipeline", {pipeline_id:pipelines.pipelines[0].id})).graph);

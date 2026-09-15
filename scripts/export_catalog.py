@@ -8,6 +8,11 @@ from pathlib import Path
 from fault_platform.registry import default_registry
 
 
+def port_types(port: dict) -> str:
+    """端口类型文本：输入端口可能声明兼容类型（例如 ``Dataset | FeatureDataset``）。"""
+    return " | ".join(port.get("accepted_types") or [port["data_type"]])
+
+
 def main() -> None:
     root = Path(__file__).resolve().parents[1]
     definitions = default_registry().list(limit=100)
@@ -23,7 +28,7 @@ def main() -> None:
                 c["description"],
                 "",
                 "**输入**："
-                + ("，".join(f"{p['name']} : {p['data_type']}" for p in c["input_ports"]) or "无"),
+                + ("，".join(f"{p['name']} : {port_types(p)}" for p in c["input_ports"]) or "无"),
                 "",
                 "**输出**："
                 + "，".join(

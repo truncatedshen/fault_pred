@@ -6,7 +6,7 @@
 | --- | --- |
 | 文档性质 | 系统设计文档（架构、对象模型、执行语义、接口与约束） |
 | 对应实现 | `src/fault_core`、`src/fault_platform`（版本 0.1.0） |
-| 组件规模 | 29 个内置原子组件，5 个分类 |
+| 组件规模 | 56 个内置组件，5 个分类 |
 | 主要读者 | 平台开发者、算法工程师、集成 Agent 的工程师、评审者 |
 | 相关文档 | [总体架构摘要](architecture.md) · [组件参考](components.md) · [MCP 接入](mcp.md) · [验证记录](validation.md) · [README](../README.md) |
 
@@ -24,7 +24,7 @@
 
 | 编号 | 目标 | 落地方式 |
 | --- | --- | --- |
-| G1 | 复杂方案由原子组件组合而成 | 29 个单一职责组件 + 类型化端口 |
+| G1 | 复杂方案由组件组合而成 | 56 个单一职责组件 + 类型化端口 |
 | G2 | 人工与 Agent 使用同一底层系统 | 网页与 MCP 都调用同一 Pipeline Control API，操作同一 Graph/Workspace |
 | G3 | 组件可插拔，扩展不触碰核心 | Registry 统一注册；Graph/Runtime/XML/UI/MCP 无组件分支 |
 | G4 | 方案结构可持久化、可交换、可评审 | XML + XSD + Registry 语义校验，参数以 JSON 保类型 |
@@ -116,7 +116,7 @@
 | --- | --- | --- |
 | `fault_core` | 数值计算、数据校验、特征窗口、模型训练与指标 | 图结构、状态、持久化 |
 | `components/base.py` | 组件契约：端口、参数、元数据、执行接口 | 具体算法、IO、UI |
-| `components/builtin.py` | 29 个内置组件的薄适配层 | 数学实现（在 fault_core） |
+| `components/builtin.py` | 56 个内置组件的薄适配层 | 数学实现（在 fault_core） |
 | `registry.py` | 组件注册、目录、检索、Schema 导出 | 组件实例状态 |
 | `graph.py` | 节点/连线/DAG 校验/拓扑排序/克隆/序列化 | 运行数据 |
 | `runtime.py` | 执行调度、输入解析、指纹、失败传播 | 组件内部算法 |
@@ -255,7 +255,7 @@ class Connection:
 | --- | --- |
 | `add_node` / `remove_node` / `get_node` | 节点增删查；删除节点会清理相关连线 |
 | `configure(node_id, parameters)` | 参数更新（组件层失败回滚） |
-| `connect` / `disconnect` | 连接管理；`connect` 校验端口存在、类型一致、目标输入未被占用、不产生环 |
+| `connect` / `disconnect` | 连接管理；`connect` 校验端口存在、类型兼容（输入端口可声明兼容类型）、目标输入未被占用、不产生环 |
 | `validate_graph(require_complete=True)` | 汇总错误列表（不抛异常，供 UI/API 展示） |
 | `detect_cycle()` / `topological_sort()` | Kahn 算法；有环抛 `Graph contains a cycle` |
 | `descendants(node_id)` | 下游可达集合，用于"从节点执行"与失效传播 |
@@ -337,7 +337,7 @@ class PipelineService:
     jobs: dict[str, Future]
     events: dict[str, Event]
     bus: EventBus                      # 事件总线：图修订、执行状态、检查点
-    operations: dict[str, Callable]   # 36 个控制操作，经 pydantic 严格校验
+    operations: dict[str, Callable]   # 38 个控制操作，经 pydantic 严格校验
 ```
 
 设计要点：
@@ -400,8 +400,8 @@ ComponentRegistry ────────────────────�
 
 ### 4.2 两阶段类型检查
 
-1. **静态（建图时）**：`ComponentGraph.connect` 比较 `OutputPort.data_type` 与 `InputPort.data_type`，不相等即拒绝，例如 `Dataset → FeatureDataset` 会得到 `Incompatible port types: Dataset -> FeatureDataset`。
-2. **动态（执行时）**：Runtime 在把上游输出注入组件前，用 `validate_value(value, port.data_type)` 校验真实对象；组件返回后再次校验其输出端口。
+1. **静态（建图时）**：`ComponentGraph.connect` 检查上游 `OutputPort.data_type` 是否落在目标 `InputPort.accepted_types` 内，不在即拒绝，例如把 `LabelVector` 接进概览得到 `Incompatible port types: LabelVector -> Dataset | FeatureDataset`。输入端口可以用 `accepts` 声明兼容类型（检查类组件同时接受 `Dataset` 与 `FeatureDataset`，所以特征分支可以直接挂概览），输出端口永远只有一个类型——"宽容"属于接收方。
+2. **动态（执行时）**：Runtime 在把上游输出注入组件前，用 `validate_input(value, port)` 校验真实对象（满足任一兼容类型即可）；组件返回后按输出端口的唯一类型再次校验。
 
 静态检查保证图"结构合法"，动态检查保证"数据确实符合声明"，两者缺一不可（例如组件实现写错返回类型时会被立刻拦截）。
 
@@ -409,19 +409,21 @@ ComponentRegistry ────────────────────�
 
 故障预测流程里，`Dataset`（原始行）与 `FeatureDataset`（窗口特征行）的语义完全不同：前者有逐行标签，后者有窗口来源。若允许隐式转换，最容易出现的错误正是"把逐行标签接到窗口特征上"，而这在工业场景里会直接产出错误的模型评估。因此平台选择让类型不匹配**在建模阶段就失败**，并强制显式使用 `feature.select` / 窗口组件完成转换。
 
+端口兼容类型不是隐式转换：它只表示"这个组件看得懂这类表"，运行时对象原样传入、不做任何转换。原始表与特征表在运行时都是 DataFrame，检查类组件（概览、绘图、探索）对两者的处理完全相同，所以放宽它们只是让中间产物可被观察，不会让"逐行标签接到窗口特征上"这类错误溜过去。
+
 ---
 
 ## 5. 组件库设计与清单
 
-### 5.1 清单（29 个）
+### 5.1 清单（56 个）
 
 | 分类 | 组件 |
 | --- | --- |
-| 数据处理 `data` | `data.input`、`data.filter`、`data.row_operation`、`data.column_operation`、`data.normalization`、`data.standardization`、`data.transformation`、`data.labels` |
-| 数据探索 `explore` | `explore.central_tendency`、`explore.dispersion`、`explore.correlation` |
-| 数据可视化 `visual` | `visual.overview`、`visual.scatter`、`visual.line` |
-| 特征提取 `feature` | `feature.statistical`、`feature.fitting`、`feature.spectral`、`feature.categorical`、`feature.categorical_transform`、`feature.select`、`feature.merge`、`feature.score_select`、`feature.pca` |
-| 算法验证 `validation` | `validation.random_forest`、`validation.svm`、`validation.xgboost`、`validation.compare` |
+| 数据处理 `data` | `data.input`、`data.materialize`、`data.quality`、`data.filter`、`data.row_operation`、`data.column_operation`、`data.time_resample`、`data.split`、`data.neighbor_features`、`data.imputation`、`data.normalization`、`data.standardization`、`data.transformation`、`data.binarize`、`data.labels` |
+| 数据探索 `explore` | `explore.central_tendency`、`explore.dispersion`、`explore.correlation`、`explore.distribution`、`explore.periodicity`、`explore.concept_drift`、`explore.cross_relation`、`explore.anomaly` |
+| 数据可视化 `visual` | `visual.overview`、`visual.scatter`、`visual.line`、`visual.subplot`、`visual.histogram`、`visual.compare`、`visual.anomaly`、`visual.relationship` |
+| 特征提取 `feature` | `feature.statistical`、`feature.fitting`、`feature.rolling_statistics`、`feature.temporal`、`feature.entropy`、`feature.spectral`、`feature.categorical`、`feature.categorical_transform`、`feature.select`、`feature.merge`、`feature.score_select`、`feature.pca` |
+| 算法验证 `validation` | `validation.random_forest`、`validation.svm`、`validation.xgboost`、`validation.decision_tree`、`validation.reservoir_classifier`、`validation.linear_regression`、`validation.arma`、`validation.knn_detector`、`validation.isolation_forest_detector`、`validation.persistence_detector`、`validation.compare` |
 
 完整端口与参数表由 `scripts/export_catalog.py` 从 Registry 生成到 [components.md](components.md)。
 
@@ -747,7 +749,8 @@ faultPredictionPipeline
 | 项 | 选择 | 理由 |
 | --- | --- | --- |
 | 技术栈 | 原生 HTML + CSS + ES Module JS | 无构建步骤、无 Node 依赖，`python -m fault_platform serve` 即可用 |
-| 渲染 | DOM 节点 + SVG 连线 | 节点数量有限，DOM 便于表单与可访问性；连线用贝塞尔路径 |
+| 渲染 | DOM 节点 + SVG 连线 | 节点数量有限，DOM 便于表单与可访问性；连线用圆角正交折线 |
+| 连线路由 | `orthogonalRoute()` + `edgePathD()` | 出端口先水平 stub 16px，接竖直通道，再水平进入目标端口；折角圆角 7px；回边走 U 形绕行；同一通道的并行线按 9px 分道；另叠一条 15px 透明热区方便点选 |
 | 状态 | 单一 `state` 对象 | 便于撤销/重做与一致性维护 |
 | 通信 | 只调用 `/api/control/*` 与 `/api/data*` | 与 MCP 共用同一条控制通道 |
 
@@ -760,7 +763,9 @@ state = {
   undo:[], redo:[],                                   // 历史栈（快照式）
   statuses:{}, running, saving, dirty, poll,          // 运行与轮询
   tab, resultRequest,                                 // 结果面板
-  onlyFavorites, favorites                            // 组件库筛选（localStorage）
+  onlyFavorites, favorites,                           // 组件库筛选（localStorage）
+  collapsed, expanded, groupKeys, renderedCollapsed,  // 组件库折叠状态（localStorage）
+  layout:{library, inspector, results}                // 三栏宽高（localStorage）
 }
 ```
 
@@ -769,7 +774,8 @@ state = {
 | 交互 | 实现要点 |
 | --- | --- |
 | 实时同步 | `EventSource('/api/events')` 订阅；`graph_changed` 且版本不同 → 无本地改动自动重载，有改动弹冲突横幅；`node_status`/`history` 直接更新节点徽章与耗时；断线自动重连 |
-| 组件库 | 由 `list_components` 动态生成；按 `category` 分组，搜索匹配类型/显示名/描述/标签；收藏存 `localStorage` |
+| 组件库 | 由 `list_components` 动态生成；按 `category → subcategory` 两级折叠（超过 24 个组件时子分类默认折叠），搜索匹配类型/显示名/描述/标签，命中时强制展开；收藏与折叠状态存 `localStorage` |
+| 面板尺寸 | 三条分隔条（左栏宽度、右栏宽度、结果面板高度）拖动/方向键调整，双击复位；尺寸写入 `:root` 的 CSS 变量并持久化。分隔条按实际渲染边界定位在 `.workspace` 内，侧栏上限为视口宽度的 34%、结果面板为高度的 45%。左栏"向右"、右栏"向左"、结果面板"向上"拖都是变大——分隔条都贴在面板朝内的那条边，方向由 `PANEL_KEYS.dragSign` 统一描述，指针与键盘方向键一致 |
 | 拖入节点 | 调色板 `dragstart` 写入 `component` MIME，画布 `drop` 计算画布坐标后 `addNode` |
 | 节点移动 | 画布 `pointerdown` 命中节点 → `pointermove` 更新位置 → `pointerup` 提交（提交前保留 `before` 快照用于撤销） |
 | 连线 | 点击输出端口进入 pending 状态（跟随鼠标绘制虚线），再点击输入端口完成；Esc 取消 |
@@ -831,10 +837,10 @@ Server-Sent Events 而不是 WebSocket，是因为这里只有服务端→浏览
 | `GET` | `/api/health` | 状态与组件数量 |
 | `GET` | `/api/data` | 列出 `data_root` 下的 CSV |
 | `POST` | `/api/data/upload` | 上传 CSV（25 MB，返回列名与预览） |
-| `POST` | `/api/control/{operation}` | 36 个控制操作统一入口 |
+| `POST` | `/api/control/{operation}` | 38 个控制操作统一入口 |
 | `GET` | `/api/events` | Server-Sent Events：图修订、节点状态、执行状态、检查点（可按 `pipeline_id` 过滤，支持 `Last-Event-ID` 补发） |
 
-### 11.2 操作分组（36 个）
+### 11.2 操作分组（38 个）
 
 | 分组 | 操作 |
 | --- | --- |
@@ -846,7 +852,23 @@ Server-Sent Events 而不是 WebSocket，是因为这里只有服务端→浏览
 
 ### 11.3 Observation 约定
 
-### 11.3a Agent 可用性（第三轮真实使用后的修订）
+### 11.3a 资产级验证与结果可解释性（第四轮修订）
+
+真实 3W 数据暴露了一个评估陷阱：`split_method=group` 按**实例**划分，而一口井常带多个实例，于是"测试井"往往已在训练集里出现过，分数虚高。修订：
+
+| 机制 | 说明 |
+| --- | --- |
+| `data.asset_key` | 从实例键派生资产列（`split` 模式按分隔符取第 N 段，`regex` 模式取第一个捕获组） |
+| `asset_column` | 窗口组件（统计/拟合/频域/熵）把资产随特征写入 `attrs["assets"]`；`feature.merge` 与验证器把它纳入 provenance 校验 |
+| `split_method="asset"` | 验证器按资产分组建模，真正留出整台设备/整口井；缺少资产列或资产不足两个时给出可执行错误 |
+| `metrics["coverage"]` | 报告训练/测试的实例数与资产数、以及**测试中未见过的资产数**——"3/3 测试井未见过"比一个准确率数字更能说明泛化能力 |
+| 成本敏感指标 | `balanced_accuracy`、`average_precision`（PR-AUC）、逐类 `per_class_recall`、原始类别名的 `train/test_class_counts`、可指定正类的 `miss_rate` |
+
+同一份 3W 数据（28 实例 / 10 口井，8091 窗口，72 特征，RF 300 棵）实测：按实例划分 AUC=0.716、未见资产 0/6；按资产留一 AUC=0.528、未见资产 3/3。前者包含"同井不同事件"的记忆成分，后者才是部署关心的答案。
+
+配套的 `feature.imputation` 负责把平窗口产生的 NaN 频域特征补上或删列；模型遇到 NaN 会点名具体列并提示插入该组件，而不是抛出泛泛的类型错误。
+
+### 11.3b Agent 可用性（第三轮真实使用后的修订）
 
 第一轮真实使用暴露了三个"能跑但不好用"的点，设计上做了对应修订：
 
@@ -899,7 +921,7 @@ Agent ──stdio──► mcp_server.py ──HTTP──► /api/control/{opera
 
 | 设计点 | 说明 |
 | --- | --- |
-| 工具集 | 与 `CONTROL_OPERATIONS` 一一对应，共 36 个工具；**不**把 29 个原子组件暴露成工具 |
+| 工具集 | 与 `CONTROL_OPERATIONS` 一一对应，共 38 个工具；56 个组件由 Registry 通过组件查询与图编辑工具暴露 |
 | 签名来源 | 用 `inspect.signature` + `get_type_hints` 从 `PipelineService` 方法自动生成工具入参，避免"两套定义漂移" |
 | 描述 | 每个工具带一句面向 Agent 的说明（见 `DESCRIPTIONS`） |
 | 传输 | `FastMCP` + stdio；`--url` 指定后端服务地址（默认 `http://127.0.0.1:8765`） |
@@ -909,6 +931,8 @@ Agent ──stdio──► mcp_server.py ──HTTP──► /api/control/{opera
 ### 11.5 Skill 的定位
 
 `skills/fault-prediction/SKILL.md` **不计算数据**，只提供领域工作流知识：如何先探索数据、如何选择预处理、如何做窗口与标签、如何并行验证多个算法、如何解读警告与指标、什么时候修改方案。它使 Agent 的操作序列符合工程习惯，而不是把组件按字母顺序堆起来。
+
+技能按阶段编写，每个阶段固定回答四件事：目标是什么、怎么配（真实参数名）、要注意什么（护栏与常见坑）、满足什么条件才能进入下一阶段。`SKILL.md` 之外还有三份参考：`references/recipes.md`（可照抄的调用序列）、`references/troubleshooting.md`（报错原文 → 原因 → 修法）、`references/components.md`（56 个组件的用途与关键参数）。`tests/test_skill_guide.py` 会校验技能里出现的工具名与组件名真实存在、38 个工具全部被写到、附录里的组件计数与 Registry 一致——技能不允许与代码漂移。
 
 ---
 

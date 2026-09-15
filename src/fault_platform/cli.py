@@ -1,4 +1,14 @@
-"""Command line entry points for headless execution, web and MCP."""
+"""Command line entry points for headless execution, web and MCP.
+
+四个子命令：
+
+* ``serve``：启动本地服务（网页设计器 + HTTP 控制 API + SSE）；
+* ``demo``：生成合成数据与示例方案，执行一次并把结果写到 ``demo_result.json``；
+* ``run``：无界面执行一份方案 XML，打印 JSON 摘要（适合脚本化取指标）；
+* ``mcp``：把 MCP stdio bridge 接到正在运行的服务上。
+
+``run``/``demo`` 失败时会以退出码 1 结束，方便 CI 与部署脚本判断。
+"""
 
 from __future__ import annotations
 
@@ -14,6 +24,7 @@ from fault_platform.xml_io import XMLParser, XMLSerializer
 
 
 def main() -> None:
+    """解析命令行参数并分发到对应子命令。"""
     parser = argparse.ArgumentParser(description="Fault Prediction Component Platform")
     commands = parser.add_subparsers(dest="command", required=True)
     serve = commands.add_parser("serve", help="Start the local visual designer")
@@ -45,6 +56,7 @@ def main() -> None:
 
         from fault_platform.api import create_app
 
+        # 只绑定回环地址：这是一个面向本机单用户的服务，没有鉴权与多用户隔离。
         uvicorn.run(
             create_app(
                 args.data_root,
@@ -63,6 +75,7 @@ def main() -> None:
         return
     registry = default_registry()
     if args.command == "demo":
+        # demo 既是演示也是冒烟测试：先造数据、写 XML，再执行并导出结果。
         destination = Path(args.output).resolve()
         data_root = destination / "data"
         create_dataset(data_root / "synthetic_equipment.csv")
@@ -70,8 +83,10 @@ def main() -> None:
         XMLSerializer().save(graph, destination / "example_pipeline.xml")
     else:
         data_root = Path(args.data_root).resolve()
+        # require_complete=True：XML 里缺必填参数或端口没接好会直接失败，而不是跑到一半才报错。
         graph = XMLParser(registry).load(args.xml, require_complete=True)
     ws = ExecutionEngine().execute(graph, ExecutionContext(FaultWorkspace(graph.pipeline_id), data_root))
+    # 只抽取各节点的 metrics 端口（没有该端口的节点自然跳过），避免把大表打进终端。
     metrics = {
         n: ws.get_output(n, "metrics") for n, outputs in ws.node_results.items() if "metrics" in outputs
     }

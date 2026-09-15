@@ -118,8 +118,11 @@ class Client {
     await this.mouse("mouseReleased", x, y, {buttons: 0});
   }
 
-  async screenshot(destination) {
-    const {data} = await this.send("Page.captureScreenshot", {format: "png"});
+  async screenshot(destination, clip = null, scale = 1) {
+    // clip + scale 用来输出"放大图"：整屏截图看不出 1px 分隔条与树形引导线的细节。
+    const params = {format: "png"};
+    if (clip) params.clip = {...clip, scale};
+    const {data} = await this.send("Page.captureScreenshot", params);
     fs.writeFileSync(destination, Buffer.from(data, "base64"));
   }
 }
@@ -182,7 +185,7 @@ async function main() {
       }
     }, "test platform server did not start");
     const health = await (await fetch(`${origin}/api/health`)).json();
-    if (health.components !== 29) throw new Error(`expected 29 components, got ${health.components}`);
+    if (health.components !== 56) throw new Error(`expected 56 components, got ${health.components}`);
     report.checks.push({name: "server exposes the full registry", components: health.components});
 
     client = await Client.connect(cdpPort);
@@ -190,7 +193,7 @@ async function main() {
     await client.send("Runtime.enable");
     await client.send("Page.navigate", {url: origin});
     await until(
-      () => client.evaluate("document.readyState === 'complete' && document.querySelectorAll('.component-item').length === 29"),
+      () => client.evaluate("document.readyState === 'complete' && document.querySelectorAll('.component-item').length === 56"),
       "component palette did not render in Chrome",
     );
 
@@ -217,6 +220,176 @@ async function main() {
       library: palette.library, canvas: palette.canvas, inspector: palette.inspector,
     });
     await client.screenshot(path.join(shootDir, "01-catalog.png"));
+
+    // 组件库折叠：56 个组件超过自动折叠阈值，默认给"目录"，展开与搜索都必须能看到组件。
+    const folding = await client.evaluate(`(() => {
+      const library = document.querySelector("#component-library");
+      const domItems = library.querySelectorAll(".component-item").length;
+      const visible = () => [...library.querySelectorAll(".component-item")]
+        .filter((item) => item.getBoundingClientRect().height > 0).length;
+      const first = {collapsedBodies: library.querySelectorAll(".group-body.collapsed").length,
+        visible: visible()};
+      document.querySelector('.subcategory-title[data-group="sub:feature/频域 Frequency"]').click();
+      const header = library.querySelector('.subcategory-title[data-group="sub:feature/频域 Frequency"]');
+      const expanded = {aria: header.getAttribute("aria-expanded"),
+        bodyCollapsed: header.nextElementSibling.classList.contains("collapsed"), visible: visible()};
+      document.querySelector("#search").value = "频域";
+      document.querySelector("#search").dispatchEvent(new Event("input", {bubbles: true}));
+      const searching = {collapsedBodies: library.querySelectorAll(".group-body.collapsed").length,
+        visible: visible(), count: document.querySelector("#catalog-count").textContent};
+      document.querySelector("#search").value = "";
+      document.querySelector("#search").dispatchEvent(new Event("input", {bubbles: true}));
+      document.querySelector("#toggle-groups").click();
+      const collapsed = {collapsedBodies: library.querySelectorAll(".group-body.collapsed").length,
+        visible: visible(), fitsWithoutScroll: library.scrollHeight <= library.clientHeight + 4};
+      document.querySelector("#toggle-groups").click();
+      const headers = [...library.querySelectorAll(".category-title, .subcategory-title")];
+      const clipped = headers.filter((header) => header.scrollWidth > header.clientWidth + 1).length;
+      return {domItems, first, expanded, searching, collapsed, expandedAgain: visible(), clippedHeaders: clipped};
+    })()`);
+    if (folding.domItems !== 56) {
+      throw new Error(`collapsing must keep all 56 items in the DOM, got ${folding.domItems}`);
+    }
+    if (!(folding.first.collapsedBodies > 0 && folding.first.visible < 56)) {
+      throw new Error(`a large catalog should open as a directory: ${JSON.stringify(folding.first)}`);
+    }
+    if (folding.expanded.aria !== "true" || folding.expanded.bodyCollapsed) {
+      throw new Error(`clicking a subgroup header did not expand it: ${JSON.stringify(folding.expanded)}`);
+    }
+    if (folding.searching.collapsedBodies !== 0 || folding.searching.visible === 0) {
+      throw new Error(`search must reveal matches: ${JSON.stringify(folding.searching)}`);
+    }
+    if (folding.collapsed.visible !== 0 || folding.expandedAgain < 40) {
+      throw new Error(`collapse-all/expand-all failed: ${JSON.stringify(folding)}`);
+    }
+    if (!folding.collapsed.fitsWithoutScroll || folding.clippedHeaders) {
+      throw new Error(`the directory view must fit without scroll or clipping: ${JSON.stringify(folding)}`);
+    }
+    report.checks.push({name: "component library folds into a directory and stays searchable", ...folding});
+    // 此时组件库已全部展开（默认目录视图见 01-catalog.png）。
+    await client.screenshot(path.join(shootDir, "01b-library-expanded.png"));
+    // 放大图：树形引导线与分隔条在整屏截图里几乎看不见，人工评审需要 3x 裁剪。
+    const treeBox = await client.evaluate(`(() => { const rect = document.querySelector(".category-title").getBoundingClientRect();
+      return {x: 0, y: Math.max(0, Math.round(rect.top) - 14)}; })()`);
+    await client.screenshot(path.join(shootDir, "01c-library-tree-zoom.png"),
+      {x: treeBox.x, y: treeBox.y, width: 250, height: 210}, 3);
+    const edgeBox = await client.evaluate(`(() => { const rect = document.querySelector("#library-splitter").getBoundingClientRect();
+      return {x: Math.max(0, Math.round(rect.left) - 40)}; })()`);
+    // 静止时分隔条是透明的，只有悬停才出现抓手，所以这张放大图要在悬停态下截。
+    await client.mouse("mouseMoved", edgeBox.x + 43, 400, {buttons: 0});
+    await pause(220);
+    await client.screenshot(path.join(shootDir, "01d-panel-splitter-zoom.png"),
+      {x: edgeBox.x, y: 240, width: 90, height: 320}, 3);
+    await client.mouse("mouseMoved", 700, 400, {buttons: 0});
+    await pause(120);
+
+    // 面板尺寸：真实指针拖动分隔条 → 宽度变化并写入 localStorage，刷新后仍然生效。
+    const beforeResize = await client.evaluate(`(() => { const box = document.querySelector("#component-library").getBoundingClientRect();
+      const handle = document.querySelector("#library-splitter").getBoundingClientRect();
+      return {width: Math.round(box.width), handle: {x: handle.left + handle.width / 2, y: handle.top + 120}}; })()`);
+    if (beforeResize.handle.x < 100) throw new Error("library splitter was not positioned");
+    await client.mouse("mousePressed", beforeResize.handle.x, beforeResize.handle.y);
+    for (let step = 1; step <= 6; step++) {
+      await client.mouse("mouseMoved", beforeResize.handle.x + (90 * step) / 6, beforeResize.handle.y);
+    }
+    await client.mouse("mouseReleased", beforeResize.handle.x + 90, beforeResize.handle.y, {buttons: 0});
+    await pause(200);
+    const afterResize = await client.evaluate(`(() => { const box = document.querySelector("#component-library").getBoundingClientRect();
+      const stored = JSON.parse(localStorage.getItem("fault-layout") || "{}");
+      const canvas = document.querySelector("#canvas").getBoundingClientRect();
+      return {width: Math.round(box.width), stored, canvas: [canvas.width, canvas.height],
+        variable: document.documentElement.style.getPropertyValue("--library-width")}; })()`);
+    if (afterResize.width - beforeResize.width < 60) {
+      throw new Error(`dragging the splitter did not widen the library: ${JSON.stringify({beforeResize, afterResize})}`);
+    }
+    if (afterResize.stored.library !== parseFloat(afterResize.variable)) {
+      // 面板宽度：CSS 变量与 localStorage 必须一致（测量宽度会因为边框差一两个像素）。
+      throw new Error(`the new width was not persisted: ${JSON.stringify(afterResize)}`);
+    }
+    if (afterResize.canvas[0] < 100 || afterResize.canvas[1] < 100) {
+      throw new Error(`resizing broke the canvas layout: ${JSON.stringify(afterResize.canvas)}`);
+    }
+    await client.send("Page.reload", {});
+    await until(
+      () => client.evaluate("document.readyState === 'complete' && document.querySelectorAll('.component-item').length === 56"),
+      "palette did not come back after reload",
+    );
+    const restored = await client.evaluate(`(() => { const box = document.querySelector("#component-library").getBoundingClientRect();
+      return Math.round(box.width); })()`);
+    if (Math.abs(restored - afterResize.width) > 2) {
+      throw new Error(`panel width was not restored after reload: ${restored} vs ${afterResize.width}`);
+    }
+    report.checks.push({
+      name: "panel splitters resize the layout and survive a reload",
+      before: beforeResize.width, after: afterResize.width, restored,
+      variable: afterResize.variable, canvas: afterResize.canvas,
+    });
+
+    // 拖拽方向：左栏的分隔条在面板右沿（向右拖=变宽），右栏与底部面板的分隔条贴的是"朝内"的
+    // 那条边（向左拖=右栏变宽，向上拖=结果面板变高）。真实指针事件驱动，三个方向都要对。
+    const dirStart = await client.evaluate(`(() => {
+      const size = (selector) => { const rect = document.querySelector(selector).getBoundingClientRect();
+        return {w: Math.round(rect.width), h: Math.round(rect.height)}; };
+      const handle = (selector) => { const rect = document.querySelector(selector).getBoundingClientRect();
+        return {x: rect.left + rect.width / 2, y: rect.top + 3}; };
+      return {inspector: size(".inspector"), results: size(".results"), canvas: size("#canvas"),
+        inspectorHandle: handle("#inspector-splitter"), resultsHandle: handle("#results-splitter")}; })()`);
+    await client.mouse("mousePressed", dirStart.inspectorHandle.x, 400);
+    for (let step = 1; step <= 5; step++) {
+      await client.mouse("mouseMoved", dirStart.inspectorHandle.x - (80 * step) / 5, 400);
+    }
+    await client.mouse("mouseReleased", dirStart.inspectorHandle.x - 80, 400, {buttons: 0});
+    await pause(150);
+    const resultsHandle = await client.evaluate(`(() => { const rect = document.querySelector("#results-splitter").getBoundingClientRect();
+      return {x: rect.left + rect.width / 2, y: rect.top + 3}; })()`);
+    await client.mouse("mousePressed", resultsHandle.x, resultsHandle.y);
+    for (let step = 1; step <= 5; step++) {
+      await client.mouse("mouseMoved", resultsHandle.x, resultsHandle.y - (140 * step) / 5);
+    }
+    await client.mouse("mouseReleased", resultsHandle.x, resultsHandle.y - 140, {buttons: 0});
+    await pause(150);
+    const dirEnd = await client.evaluate(`(() => {
+      const size = (selector) => { const rect = document.querySelector(selector).getBoundingClientRect();
+        return {w: Math.round(rect.width), h: Math.round(rect.height)}; };
+      return {inspector: size(".inspector"), results: size(".results"), canvas: size("#canvas")}; })()`);
+    if (dirEnd.inspector.w - dirStart.inspector.w < 50) {
+      throw new Error(`dragging the inspector splitter left must widen it: ${JSON.stringify({dirStart, dirEnd})}`);
+    }
+    if (dirEnd.results.h - dirStart.results.h < 60) {
+      throw new Error(`dragging the results splitter up must make it taller: ${JSON.stringify({dirStart, dirEnd})}`);
+    }
+    if (dirEnd.canvas.w < 300 || dirEnd.canvas.h < 200) {
+      throw new Error(`directional resizing squeezed the canvas: ${JSON.stringify(dirEnd.canvas)}`);
+    }
+    report.checks.push({
+      name: "splitters follow the pointer on all three edges",
+      inspector: [dirStart.inspector.w, dirEnd.inspector.w],
+      results: [dirStart.results.h, dirEnd.results.h], canvas: dirEnd.canvas,
+    });
+
+    // 窄窗口下三栏必须都还可用：面板按视口钳制，不出现横向溢出。
+    await client.send("Emulation.setDeviceMetricsOverride", {
+      width: 960, height: 720, deviceScaleFactor: 1, mobile: false,
+    });
+    await pause(300);
+    const narrow = await client.evaluate(`(() => {
+      const box = (selector) => { const rect = document.querySelector(selector).getBoundingClientRect();
+        return [Math.round(rect.width), Math.round(rect.height)]; };
+      const libraryHandle = document.querySelector("#library-splitter").getBoundingClientRect();
+      const libraryBox = document.querySelector(".library").getBoundingClientRect();
+      return {library: box(".library"), canvas: box("#canvas"), inspector: box(".inspector"),
+        overflowX: document.documentElement.scrollWidth - innerWidth,
+        handleAligned: Math.abs((libraryHandle.left + libraryHandle.width / 2) - libraryBox.right) <= 4};
+    })()`);
+    await client.send("Emulation.clearDeviceMetricsOverride", {});
+    await pause(200);
+    for (const [name, size] of Object.entries({library: narrow.library, canvas: narrow.canvas,
+      inspector: narrow.inspector})) {
+      if (size[0] < 100 || size[1] < 100) throw new Error(`${name} collapsed at 960px: ${size}`);
+    }
+    if (narrow.overflowX > 1) throw new Error(`layout overflows horizontally: ${narrow.overflowX}px`);
+    if (!narrow.handleAligned) throw new Error("the splitter drifted away from the panel edge");
+    report.checks.push({name: "three columns stay usable and clamped in a narrow window", ...narrow});
 
     const created = await (await fetch(`${origin}/api/control/create_example`, {
       method: "POST", headers: {"Content-Type": "application/json"}, body: "{}",
@@ -252,7 +425,64 @@ async function main() {
       node_size_units: [Math.round(nodes[0].width / fittedZoom), Math.round(nodes[0].height / fittedZoom)],
       shortest_edge_path: Math.min(...edges),
     });
+
+    // 连线必须是"圆角正交折线"：沿路径抽样，除折角圆角外不能有斜向行程；
+    // 端点还要精确落在端口圆心上（用 screenCTM 把用户坐标换算成屏幕坐标再比）。
+    const routing = await client.evaluate(`(() => {
+      const edges = ${JSON.stringify(created.graph.edges)};
+      const dotCenter = (nodeId, port, kind) => {
+        const dot = document.querySelector('.node[data-id="' + CSS.escape(nodeId) + '"] .port.' + kind +
+          '[data-port="' + CSS.escape(port) + '"] .port-dot');
+        const box = dot.getBoundingClientRect();
+        return {x: box.left + box.width / 2, y: box.top + box.height / 2};
+      };
+      let worstDiagonal = 0, worstEndpoint = 0, curves = 0;
+      const paths = [...document.querySelectorAll("#connections path[data-edge]")];
+      paths.forEach((path) => {
+        const d = path.getAttribute("d");
+        if (/[CcSsAa]/.test(d)) curves += 1;
+        const length = path.getTotalLength();
+        let diagonal = 0, previous = path.getPointAtLength(0);
+        const step = Math.max(0.5, length / 500);
+        for (let at = step; at <= length; at += step) {
+          const point = path.getPointAtLength(at);
+          const dx = Math.abs(point.x - previous.x), dy = Math.abs(point.y - previous.y);
+          if (dx > 0.05 && dy > 0.05) diagonal += Math.hypot(dx, dy);
+          previous = point;
+        }
+        worstDiagonal = Math.max(worstDiagonal, diagonal);
+        const matrix = path.getScreenCTM();
+        const start = path.getPointAtLength(0).matrixTransform(matrix);
+        const end = path.getPointAtLength(length).matrixTransform(matrix);
+        const edge = edges[Number(path.dataset.edge)];
+        const from = dotCenter(edge.source_node, edge.source_port, "output");
+        const to = dotCenter(edge.target_node, edge.target_port, "input");
+        worstEndpoint = Math.max(worstEndpoint,
+          Math.hypot(start.x - from.x, start.y - from.y), Math.hypot(end.x - to.x, end.y - to.y));
+      });
+      return {paths: paths.length, curves,
+        worstDiagonal: Math.round(worstDiagonal * 10) / 10,
+        worstEndpoint: Math.round(worstEndpoint * 100) / 100,
+        hitPaths: document.querySelectorAll("#connections path.edge-hit").length};
+    })()`);
+    // 折角半径 7，一条边最多 4~6 个圆角，斜向行程上限约 25px；贝塞尔曲线会远超这个量级。
+    if (routing.curves) throw new Error(`edges still contain curve commands: ${JSON.stringify(routing)}`);
+    if (routing.worstDiagonal > 90) throw new Error(`edges are not orthogonal: ${JSON.stringify(routing)}`);
+    if (routing.worstEndpoint > 1.5) throw new Error(`edge endpoints miss the port dots: ${JSON.stringify(routing)}`);
+    if (routing.hitPaths !== routing.paths) throw new Error(`every edge needs a click hit path: ${JSON.stringify(routing)}`);
+    report.checks.push({name: "connections are drawn as rounded orthogonal polylines", ...routing});
     await client.screenshot(path.join(shootDir, "02-example-graph.png"));
+    // 放大图：正交折线的折角与端口接合处，供人工目视评审（整屏截图看不清 7px 圆角）。
+    const edgeZoom = await client.evaluate(`(() => {
+      const boxes = [...document.querySelectorAll("#connections path[data-edge]")].map((path) => path.getBoundingClientRect());
+      const left = Math.min(...boxes.map((box) => box.left)), right = Math.max(...boxes.map((box) => box.right));
+      const top = Math.min(...boxes.map((box) => box.top)), bottom = Math.max(...boxes.map((box) => box.bottom));
+      const width = Math.min(620, right - left + 40), height = Math.min(440, bottom - top + 40);
+      const x = Math.max(0, Math.min((left + right) / 2 - width / 2, innerWidth - width));
+      const y = Math.max(0, Math.min((top + bottom) / 2 - height / 2, innerHeight - height));
+      return {x: Math.round(x), y: Math.round(y), width: Math.round(width), height: Math.round(height)};
+    })()`);
+    await client.screenshot(path.join(shootDir, "02b-edges-zoom.png"), edgeZoom, 2);
 
     let start = null;
     let dragId = null;
@@ -474,6 +704,58 @@ async function main() {
     }
     report.checks.push({name: "history and XML tabs render from the backend", xml_characters: xml.length});
 
+    // 中间产物必须可检验：把概览挂到特征分支上，服务端要接受（输入端口声明了 FeatureDataset），
+    // 跑完之后特征表的行列与列名要能直接读出来，浏览器里也要出现这个新节点。
+    const controlApi = (operation, payload) => fetch(`${origin}/api/control/${operation}`, {
+      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload),
+    }).then((response) => response.json());
+    const currentGraph = (await controlApi("get_pipeline", {pipeline_id: pipelineId})).graph;
+    const featureNode = currentGraph.nodes.filter((node) => node.type.startsWith("feature."))
+      .find((node) => node.type !== "feature.merge");
+    if (!featureNode) throw new Error("the example graph has no feature branch to inspect");
+    await controlApi("add_component", {pipeline_id: pipelineId, component_type: "visual.overview",
+      node_id: "feature_overview", position: {x: 760, y: 720}});
+    const wired = await controlApi("connect_components", {pipeline_id: pipelineId,
+      source_node: featureNode.id, source_port: "features", target_node: "feature_overview",
+      target_port: "dataset"});
+    if (!wired.success) throw new Error(`a feature branch must be inspectable: ${JSON.stringify(wired)}`);
+    await controlApi("execute_pipeline", {pipeline_id: pipelineId});
+    await until(async () => {
+      const status = await controlApi("get_pipeline_status", {pipeline_id: pipelineId});
+      return ["SUCCESS", "FAILED", "CANCELLED"].includes(status.status);
+    }, "re-run after wiring the overview node never finished");
+    const overviewResult = await controlApi("get_node_result", {pipeline_id: pipelineId, node_id: "feature_overview"});
+    const overview = overviewResult.outputs?.overview?.value;
+    if (!overview?.row_count || !overview.column_names?.length) {
+      throw new Error(`overview on a feature branch returned nothing usable: ${JSON.stringify(overviewResult).slice(0, 300)}`);
+    }
+    await until(
+      () => client.evaluate(`[...document.querySelectorAll(".node")].some((node) => node.dataset.id === "feature_overview")`),
+      "the new overview node never appeared in the designer",
+    );
+    // 点开这个节点：结果面板必须把特征表概览画出来（"N 行 × M 列" + 列名），这是工程师真正要看的。
+    // 前一项检查停在 XML 标签页，先切回"运行结果"。
+    await client.evaluate(`(() => { document.querySelector('[data-tab="result"]').click(); return true; })()`);
+    await client.evaluate("document.querySelector('#fit').click()");
+    await pause(300);
+    const overviewPoint = await client.evaluate(hitPoint("feature_overview"));
+    if (!overviewPoint) throw new Error("the overview node is not clickable in the designer");
+    await client.click(overviewPoint.x, overviewPoint.y);
+    let featurePanel = "";
+    for (let attempt = 0; attempt < 60; attempt++) {
+      featurePanel = await client.evaluate("document.querySelector('#result-content').textContent");
+      if (featurePanel.includes("__mean")) break;
+      await pause(120);
+    }
+    if (!featurePanel.includes("行 ×") || !featurePanel.includes("__mean")) {
+      throw new Error(`the designer did not show the feature table summary: ${featurePanel.slice(0, 200)}`);
+    }
+    await client.screenshot(path.join(shootDir, "04-feature-overview.png"));
+    report.checks.push({
+      name: "a feature branch can be inspected by an overview node",
+      source: `${featureNode.id}.features`, rows: overview.row_count,
+      columns: overview.column_names.length, sample_columns: overview.column_names.slice(0, 3),
+    });
     report.screenshots = fs.readdirSync(shootDir).map((name) => path.join(shootDir, name));
     report.success = true;
   } finally {

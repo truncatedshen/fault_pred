@@ -1,4 +1,17 @@
-"""Local web server hosting the designer and shared pipeline control API."""
+"""Local web server hosting the designer and shared pipeline control API.
+
+路由分三类：
+
+* **页面与静态资源**：``/`` 返回设计器页面，``/static`` 提供前端文件；
+* **控制 API**：``POST /api/control/{operation}`` 转发到
+  :meth:`fault_platform.service.PipelineService.dispatch`，
+  ``/api/health`` 与 ``/api/data``、``/api/data/upload`` 提供健康检查与数据文件管理；
+* **事件流**：``GET /api/events`` 是 SSE，把图修订、节点状态与运行状态实时推给页面。
+
+安全边界：服务只监听回环地址，并额外做了三层防护——
+``TrustedHostMiddleware`` 限制 Host、中间件校验同源（跨源写操作直接 403）、
+响应头带 nosniff 与 CSP。这是面向本机单用户的开发服务，不含鉴权与多租户隔离。
+"""
 
 from __future__ import annotations
 
@@ -16,6 +29,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from fault_platform.events import HEARTBEAT_SECONDS
 from fault_platform.service import PipelineService
+from fault_platform.version import PLATFORM_VERSION
 from fault_platform.workspace import json_safe
 
 WEB_ROOT = Path(__file__).with_name("web")
@@ -28,21 +42,28 @@ def create_app(
     artifact_cache_mb: int | None = None,
     artifact_spill_dir: str | Path | None = None,
 ) -> FastAPI:
+    """构造 FastAPI 应用；``service`` 可注入（测试里传入自建的服务实例）。"""
     control = service or PipelineService(
         data_root, storage_root, artifact_cache_mb=artifact_cache_mb, artifact_spill_dir=artifact_spill_dir
     )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        """应用生命周期：关闭时释放服务（停线程池、释放产物与溢写文件）。"""
         yield
         control.close()
 
-    app = FastAPI(title="Fault Prediction Component Platform", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="Fault Prediction Component Platform", version=PLATFORM_VERSION, lifespan=lifespan)
     app.state.service = control
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "[::1]", "testserver"])
 
     @app.middleware("http")
     async def local_origin(request: Request, call_next):
+        """只允许同源的写操作，并统一追加安全响应头。
+
+        读操作（GET/HEAD/OPTIONS）不检查来源；写操作若带 ``Origin`` 头，
+        则它的主机必须与请求的 Host 一致——这样其它网页无法通过浏览器悄悄改本机的方案。
+        """
         origin = request.headers.get("origin")
         if request.method not in {"GET", "HEAD", "OPTIONS"} and origin:
             from urllib.parse import urlparse
@@ -66,32 +87,40 @@ def create_app(
 
     @app.get("/api/health")
     def health():
+        """健康检查：状态、版本、组件数与缓存统计（部署验收脚本用它）。"""
         return {
             "status": "ok",
-            "version": "0.1.0",
-            "components": len(control.registry.list()),
+            "version": PLATFORM_VERSION,
+            "components": len(control.registry),
             "artifact_cache": control.workspaces.cache_stats(),
         }
 
     @app.post("/api/control/{operation}")
     def dispatch(operation: str, arguments: dict[str, Any]):
+        """控制 API 的统一出口：业务失败返回 400 且带结构化错误，成功返回 200。"""
         result = control.dispatch(operation, arguments)
         return JSONResponse(result, status_code=200 if result.get("success") else 400)
 
     @app.get("/api/events")
     async def events(request: Request, pipeline_id: str | None = None, last_event_id: str | None = None):
-        """Server-Sent Events: graph revisions, node transitions and run status."""
+        """SSE 事件流：图修订、节点状态迁移与运行状态。
+
+        连接建立时先补发 ``last_event_id`` 之后的历史事件（断线重连不丢帧），
+        之后每 ``HEARTBEAT_SECONDS`` 发一次注释行保活；客户端断开时注销订阅。
+        """
         try:
             subscription, replay = control.subscribe_events(pipeline_id, last_event_id)
         except ValueError as exc:
             return JSONResponse({"success": False, "summary": str(exc)}, status_code=404)
 
         async def stream():
+            """实际的生成器：先发一行握手注释，再补历史帧，最后持续推送新帧。"""
             try:
                 yield ": connected\n\n"
                 for event in replay:
                     yield event.to_sse(control.bus.frame_id(event))
                 while True:
+                    # 阻塞式取队列放到线程里：不阻塞事件循环，其它 HTTP 请求照常处理。
                     event = await asyncio.to_thread(subscription.get, HEARTBEAT_SECONDS)
                     if event is None:
                         if subscription.closed or await request.is_disconnected():
@@ -110,7 +139,13 @@ def create_app(
 
     @app.get("/api/data")
     def datasets():
-        paths = sorted(control.data_root.glob("**/*.csv"))[:200]
+        """列出数据目录下的 CSV/Parquet（最多 200 条），供页面选择输入文件。
+
+        再次校验路径在 ``data_root`` 内：``glob`` 拿到的是路径对象，
+        这里做一次归一化确认，避免符号链接把目录外的文件暴露出去。
+        """
+        patterns = ("**/*.csv", "**/*.parquet", "**/*.pq")
+        paths = sorted(path for pattern in patterns for path in control.data_root.glob(pattern))[:200]
         return {
             "datasets": [
                 {"path": p.relative_to(control.data_root).as_posix(), "bytes": p.stat().st_size}
@@ -121,7 +156,19 @@ def create_app(
 
     @app.post("/api/data/upload")
     async def upload(file: UploadFile = File(...)):
-        destination = control.data_root / "uploads" / f"dataset_{uuid4().hex[:12]}.csv"
+        """上传数据文件：只接受 CSV/Parquet，单个文件上限 25 MB。
+
+        文件名会被替换成 ``dataset_<随机>.<后缀>``，避免路径穿越与重名覆盖；
+        写入后立刻尝试解析前 5 行，解析不了就删除文件并报错。
+        更大的文件请直接放进 ``data_root``（或用 ``--data-root`` 指向数据目录）。
+        """
+        suffix = Path(file.filename or "dataset.csv").suffix.lower()
+        if suffix not in {".csv", ".parquet", ".pq"}:
+            return JSONResponse(
+                {"success": False, "summary": "Upload CSV or Parquet (.csv, .parquet, .pq)"},
+                status_code=400,
+            )
+        destination = control.data_root / "uploads" / f"dataset_{uuid4().hex[:12]}{suffix}"
         destination.parent.mkdir(parents=True, exist_ok=True)
         size = 0
         try:
@@ -129,13 +176,15 @@ def create_app(
                 while chunk := await file.read(1024 * 1024):
                     size += len(chunk)
                     if size > 25 * 1024 * 1024:
-                        raise ValueError(
-                            "CSV upload limit is 25 MB; place larger files in the data directory"
-                        )
+                        # 边写边计数，超限时立即中止，不必等文件传完。
+                        raise ValueError("Upload limit is 25 MB; place larger files in the data directory")
                     handle.write(chunk)
-            preview = pd.read_csv(destination, nrows=5, encoding="utf-8-sig")
+            if suffix == ".csv":
+                preview = pd.read_csv(destination, nrows=5, encoding="utf-8-sig")
+            else:
+                preview = pd.read_parquet(destination).head(5)
             if preview.empty:
-                raise ValueError("CSV has no data rows")
+                raise ValueError("Uploaded file has no data rows")
             return {
                 "success": True,
                 "path": destination.relative_to(control.data_root).as_posix(),
@@ -143,6 +192,7 @@ def create_app(
                 "preview": json_safe(preview.to_dict(orient="records")),
             }
         except Exception as exc:
+            # 失败时清理半成品，避免留下一个"看起来存在但读不了"的文件。
             destination.unlink(missing_ok=True)
             return JSONResponse({"success": False, "summary": str(exc)}, status_code=400)
         finally:

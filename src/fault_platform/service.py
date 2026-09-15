@@ -1,4 +1,19 @@
-"""Shared control API: both the web editor and MCP call these operations."""
+"""Shared control API: both the web editor and MCP call these operations.
+
+这是平台的"控制面"：网页设计器与 MCP bridge 都通过 HTTP 调用这里的方法，
+因此两边改的是同一张图、同一份运行状态（这也是"人机协同编辑"能成立的原因）。
+
+三个贯穿全文件的约定：
+
+1. **单一入口与统一契约**。所有操作都在 :data:`CONTROL_OPERATIONS` 中登记，
+   用 ``validate_call`` 做严格参数校验，并被 :meth:`PipelineService.dispatch` 包成
+   ``{"success": bool, ...}`` 的观测结果——失败也返回结构化错误，而不是抛栈给客户端。
+2. **一把全局锁**。除 :data:`BLOCKING_OPERATIONS`（只有 ``wait_for_pipeline``，它会 sleep）
+   之外，所有操作都在同一把可重入锁下执行，保证图编辑与状态读取不会看到中间态。
+3. **编辑即失效**。任何图编辑都会把该方案的 workspace 标记为"图已变更"、
+   状态退回 CREATED，并广播 ``graph_changed`` 事件，让打开的网页立刻刷新——
+   宁可从零重算，也不让旧结果冒充当前结果。
+"""
 
 from __future__ import annotations
 
@@ -18,9 +33,11 @@ from fault_platform.examples import create_dataset, example_graph
 from fault_platform.graph import ComponentGraph
 from fault_platform.registry import ComponentRegistry, default_registry
 from fault_platform.runtime import ExecutionContext, ExecutionEngine
+from fault_platform.version import PLATFORM_VERSION
 from fault_platform.workspace import FaultWorkspace, PipelineStatus, WorkspaceManager, json_safe
 from fault_platform.xml_io import XMLParser, XMLSerializer
 
+#: 全部控制操作；顺序即工具列表顺序，MCP bridge 会为每一个生成同名工具。
 CONTROL_OPERATIONS = (
     "create_pipeline",
     "list_pipelines",
@@ -33,6 +50,8 @@ CONTROL_OPERATIONS = (
     "list_datasets",
     "list_components",
     "search_components",
+    "retrieve_components",
+    "get_component_facets",
     "get_component_schema",
     "add_component",
     "add_components",
@@ -73,6 +92,14 @@ class PipelineService:
         artifact_cache_mb: int | None = None,
         artifact_spill_dir: str | Path | None = None,
     ) -> None:
+        """初始化服务：数据目录、存储目录、组件注册表、workspace 管理器与事件总线。
+
+        * ``data_root``：所有数据路径的沙箱根目录（组件只能读它里面的文件）；
+        * ``storage_root``：XML 与运行期文件的存放处，默认 ``<data_root>/.fault-platform``；
+        * ``artifact_cache_mb`` + ``artifact_spill_dir``：产物缓存预算与溢写目录。
+          溢写目录带 ``session-<随机后缀>``，**上一次进程遗留的文件不会被复用**；
+        * 线程池固定 2 个工作线程：不同方案可以并行跑，同一方案仍由任务的先后顺序约束。
+        """
         self.data_root = Path(data_root).resolve()
         self.data_root.mkdir(parents=True, exist_ok=True)
         self.storage_root = Path(storage_root or self.data_root / ".fault-platform").resolve()
@@ -98,6 +125,7 @@ class PipelineService:
         }
 
     def close(self) -> None:
+        """停止服务：唤醒等待中的执行、关闭事件总线、等待线程池收尾并释放全部产物。"""
         for event in self.events.values():
             event.set()
         self.bus.close()
@@ -105,12 +133,19 @@ class PipelineService:
         self.workspaces.cleanup()
 
     def dispatch(self, operation: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        """Bounded success/error observations; never return raw artifacts."""
+        """所有控制调用的统一入口：校验、加锁、执行，并把结果包成有界观测。
+
+        返回约定：成功时 ``success=True`` 并展开操作自身的返回值；
+        失败时 ``success=False`` 加 ``error_code``/``summary``/``recommended_action``。
+        业务上"校验不通过"（``validate_pipeline`` 的 ``valid=False``）也算 success=False，
+        因为它同样表示"这次请求没有达到预期效果"。
+        任何路径都不会把原始产物（大表、模型）直接返回——产物只以摘要与引用出现。
+        """
         try:
             if operation not in self.operations:
                 raise ValueError(f"Unknown operation: {operation}")
             if operation in BLOCKING_OPERATIONS:
-                # wait_for_pipeline sleeps; holding the global lock would freeze the service.
+                # wait_for_pipeline 会 sleep：持有全局锁会让其它请求（包括网页刷新）全部卡住。
                 result = self.operations[operation](**arguments)
             else:
                 with self.lock:
@@ -125,6 +160,8 @@ class PipelineService:
                 "warnings": result.get("warnings", []),
             }
         except (ValueError, KeyError, TypeError, OSError, ValidationError) as exc:
+            # 只捕获"可预期的失败"：参数错误、缺对象、校验失败、文件问题。
+            # 真正的 bug（如 AttributeError）仍然抛出，避免被伪装成普通错误信息。
             return {
                 "success": False,
                 "error_code": type(exc).__name__,
@@ -133,6 +170,7 @@ class PipelineService:
             }
 
     def _graph(self, pipeline_id: str, editable: bool = False) -> ComponentGraph:
+        """取图；``editable=True`` 时禁止在运行中编辑（避免改到正在执行的图）。"""
         if pipeline_id not in self.graphs:
             raise ValueError(f"Unknown pipeline: {pipeline_id}")
         if editable and pipeline_id in self.jobs and not self.jobs[pipeline_id].done():
@@ -140,6 +178,7 @@ class PipelineService:
         return self.graphs[pipeline_id]
 
     def _workspace(self, pipeline_id: str, workspace_id: str | None = None) -> FaultWorkspace:
+        """取 workspace：显式给 id 就用它，否则用该方案最近一次运行的 workspace。"""
         self._graph(pipeline_id)
         key = workspace_id or self.latest.get(pipeline_id)
         if not key:
@@ -147,7 +186,11 @@ class PipelineService:
         return self.workspaces.get_workspace(key, pipeline_id)
 
     def _invalidate(self, pipeline_id: str) -> None:
-        """Edited graphs must not continue advertising old results as current."""
+        """图被编辑后让旧结果失效：状态退回 CREATED 并标记 ``graph_changed``。
+
+        标记的作用是让读取接口返回 ``PENDING`` + "Graph changed; run to refresh results."，
+        而不是把上一版图算出的结果当成当前结果。
+        """
         for ws in self.workspaces.workspaces.values():
             if ws.pipeline_id == pipeline_id:
                 ws.status = PipelineStatus.CREATED
@@ -155,7 +198,7 @@ class PipelineService:
                 ws.touch()
 
     def _changed(self, pipeline_id: str, operation: str) -> None:
-        """Announce a graph revision so open designers can refresh."""
+        """广播 ``graph_changed`` 事件，让打开的网页实时刷新图。"""
         graph = self.graphs.get(pipeline_id)
         self.bus.publish(
             pipeline_id,
@@ -167,12 +210,14 @@ class PipelineService:
         )
 
     def create_pipeline(self, name: str = "未命名方案") -> dict[str, Any]:
+        """新建一张空图，返回其 id 与序列化内容。"""
         graph = ComponentGraph(self.registry, name)
         self.graphs[graph.pipeline_id] = graph
         self._changed(graph.pipeline_id, "create_pipeline")
         return {"pipeline_id": graph.pipeline_id, "graph": graph.serialize()}
 
     def list_pipelines(self) -> dict[str, Any]:
+        """列出当前进程里的全部方案（只给 id/名称/节点数，不返回图本体）。"""
         return {
             "pipelines": [
                 {"id": g.pipeline_id, "name": g.name, "nodes": len(g.nodes)} for g in self.graphs.values()
@@ -180,10 +225,11 @@ class PipelineService:
         }
 
     def get_pipeline(self, pipeline_id: str) -> dict[str, Any]:
+        """取某个方案的完整序列化图。需要结构信息时调用它一次，而不是逐次编辑都回吐整图。"""
         return {"pipeline_id": pipeline_id, "graph": self._graph(pipeline_id).serialize()}
 
     def _revision(self, pipeline_id: str, include_graph: bool) -> dict[str, Any]:
-        """Small acknowledgement for edits: counts and version, optionally the whole graph."""
+        """编辑操作的轻量回执：版本号与节点/边计数；``include_graph=True`` 时才附整图。"""
         graph = self.graphs[pipeline_id]
         payload: dict[str, Any] = {
             "pipeline_id": pipeline_id,
@@ -196,10 +242,11 @@ class PipelineService:
         return payload
 
     def delete_pipeline(self, pipeline_id: str) -> dict[str, Any]:
-        """Remove a pipeline, its workspaces, spilled files and checkpoints."""
+        """删除方案及其全部运行痕迹：workspace、产物、溢写文件与检查点。"""
         self._graph(pipeline_id)
         job = self.jobs.get(pipeline_id)
         if job is not None and not job.done():
+            # 运行中删除会让执行线程操作已释放的对象，因此要求先取消。
             raise ValueError("Pipeline is running; cancel it before deleting")
         self.graphs.pop(pipeline_id, None)
         self.jobs.pop(pipeline_id, None)
@@ -210,25 +257,29 @@ class PipelineService:
         return {"pipeline_id": pipeline_id, "deleted": True, "workspaces_removed": removed}
 
     def get_server_info(self) -> dict[str, Any]:
-        """Where the service reads data from and how much it is holding."""
+        """服务自述：版本、Python 版本、数据目录与存储目录、数据文件数、组件数、缓存统计。
+
+        Agent 用它回答"服务在哪读数据、现在占了多少内存"——这两件事以前只能靠读进程命令行猜。
+        """
         files = sorted(
             path.relative_to(self.data_root).as_posix()
             for path in self.data_root.glob("**/*")
             if path.is_file() and path.suffix.lower() in {".csv", ".parquet", ".pq"}
         )
         return {
-            "version": "0.1.0",
+            "version": PLATFORM_VERSION,
             "python": sys.version.split()[0],
             "data_root": str(self.data_root),
             "storage_root": str(self.storage_root),
             "data_file_count": len(files),
             "data_files": files[:50],
-            "components": len(self.registry.list(limit=500)),
+            "components": len(self.registry),
             "pipelines": len(self.graphs),
             "artifact_cache": self.workspaces.cache_stats(),
         }
 
     def list_datasets(self) -> dict[str, Any]:
+        """列出 ``data_root`` 下可读的数据文件（CSV/Parquet）及字节大小，最多 200 条。"""
         return {
             "data_root": str(self.data_root),
             "datasets": [
@@ -241,6 +292,12 @@ class PipelineService:
     def replace_pipeline(
         self, pipeline_id: str, graph: dict[str, Any], expected_version: int | None = None
     ) -> dict[str, Any]:
+        """整体替换一张图（前端"保存"与批量改图的落点）。
+
+        ``expected_version`` 提供乐观并发控制：与当前版本不一致就拒绝，
+        避免两个客户端（人 + Agent）互相覆盖对方的编辑。
+        新图的版本号取"旧版本 + 1"，因此替换也算一次修订。
+        """
         previous = self._graph(pipeline_id, editable=True)
         if expected_version is not None and expected_version != previous.version:
             raise ValueError("Graph changed in another client; reload before editing")
@@ -254,8 +311,9 @@ class PipelineService:
         return self.get_pipeline(pipeline_id)
 
     def load_pipeline(self, xml: str) -> dict[str, Any]:
+        """从 XML 文本导入一张图；若 id 与已有方案冲突则分配新 id，保证是"新建"而非覆盖。"""
         graph = XMLParser(self.registry).loads(xml)
-        # Import is a new document, preserving an existing open pipeline.
+        # 导入语义是"新增文档"，不能悄悄覆盖已经打开的方案。
         if graph.pipeline_id in self.graphs:
             graph.pipeline_id = f"pipeline_{uuid4().hex[:12]}"
         self.graphs[graph.pipeline_id] = graph
@@ -263,12 +321,18 @@ class PipelineService:
         return {"pipeline_id": graph.pipeline_id, "graph": graph.serialize()}
 
     def save_pipeline(self, pipeline_id: str, filename: str | None = None) -> dict[str, Any]:
+        """把图保存成 XML。
+
+        路径被限制在 ``storage_root`` 内且后缀必须是 ``.xml``；
+        写入采用"先写临时文件再原子替换"，避免写到一半被读到半个文件。
+        """
         graph = self._graph(pipeline_id)
         filename = filename or f"{pipeline_id}.xml"
         destination = (self.storage_root / filename).resolve()
         if not destination.is_relative_to(self.storage_root) or destination.suffix.lower() != ".xml":
             raise ValueError("Save path must be an XML file within the pipeline storage directory")
         destination.parent.mkdir(parents=True, exist_ok=True)
+        # 先写 .tmp 再 replace：崩溃时最多留下临时文件，不会损坏已保存的方案。
         temporary = destination.with_suffix(".tmp")
         XMLSerializer().save(graph, temporary)
         temporary.replace(destination)
@@ -281,20 +345,113 @@ class PipelineService:
         tags: list[str] | None = None,
         input_type: str | None = None,
         output_type: str | None = None,
-        limit: int = 100,
-        include_schema: bool = True,
+        limit: int = 20,
+        include_schema: bool = False,
+        offset: int = 0,
+        subcategory: str | None = None,
+        version: str | None = None,
+        compatibility: str | None = None,
     ) -> dict[str, Any]:
+        """分页列出组件；返回 ``total``/``returned``/``has_more`` 支持翻页与"还有多少"判断。
+
+        ``limit`` 上限 500，``include_schema=False``（默认）不返回参数表——浏览目录时不需要它，
+        需要时再对少数组件调 ``get_component_schema``。
+        """
+        filters = {
+            "category": category,
+            "query": query,
+            "tags": tags,
+            "input_type": input_type,
+            "output_type": output_type,
+            "subcategory": subcategory,
+            "version": version,
+            "compatibility": compatibility,
+        }
+        total = self.registry.count(**filters)
+        bounded_limit = max(0, min(limit, 500))
+        bounded_offset = max(0, offset)
         return {
             "components": self.registry.list(
-                category, query, tags, input_type, output_type, limit, include_schema
-            )
+                limit=bounded_limit,
+                include_schema=include_schema,
+                offset=bounded_offset,
+                **filters,
+            ),
+            "total": total,
+            "returned": min(bounded_limit, max(0, total - bounded_offset)),
+            "offset": bounded_offset,
+            "limit": bounded_limit,
+            "has_more": bounded_offset + bounded_limit < total,
         }
 
-    def search_components(self, query: str, limit: int = 20) -> dict[str, Any]:
-        return self.list_components(query=query, limit=limit, include_schema=False)
+    def search_components(
+        self,
+        query: str,
+        category: str | None = None,
+        tags: list[str] | None = None,
+        input_type: str | None = None,
+        output_type: str | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        """关键词检索组件（``list_components`` 的便捷包装，等价于 ``query=...``）。"""
+        return self.list_components(
+            category=category,
+            query=query,
+            tags=tags,
+            input_type=input_type,
+            output_type=output_type,
+            limit=limit,
+            include_schema=False,
+        )
+
+    def retrieve_components(
+        self,
+        intent: str,
+        category: str | None = None,
+        tags: list[str] | None = None,
+        input_type: str | None = None,
+        output_type: str | None = None,
+        source_component_type: str | None = None,
+        target_component_type: str | None = None,
+        limit: int = 10,
+        include_schema: bool = False,
+    ) -> dict[str, Any]:
+        """按自然语言意图检索组件，返回带 ``score`` 与 ``match_reasons`` 的排序结果。
+
+        ``source_component_type``/``target_component_type`` 是"往已有图里插组件"的关键：
+        指定后只返回"能把上游输出接进来、且输出能被下游接收"的类型。
+        """
+        components = self.registry.retrieve(
+            intent=intent,
+            category=category,
+            tags=tags,
+            input_type=input_type,
+            output_type=output_type,
+            source_component_type=source_component_type,
+            target_component_type=target_component_type,
+            limit=limit,
+            include_schema=include_schema,
+        )
+        return {
+            "components": components,
+            "returned": len(components),
+            "limit": max(0, min(limit, 50)),
+        }
 
     def get_component_schema(self, component_type: str) -> dict[str, Any]:
+        """取单个组件的完整 schema（端口类型、参数定义、实现类）。"""
         return {"component": self.registry.get(component_type).schema()}
+
+    def get_component_facets(self) -> dict[str, Any]:
+        """目录导航：分类/子分类/标签/版本/兼容区间的计数分布，外加组件总数与平台版本。
+
+        组件规模变大后，Agent 应先看 facets 决定范围，再对少量组件拉 schema。
+        """
+        return {
+            "total": self.registry.count(),
+            "platform_version": PLATFORM_VERSION,
+            "facets": self.registry.facets(),
+        }
 
     def add_component(
         self,
@@ -305,6 +462,7 @@ class PipelineService:
         position: dict[str, float] | None = None,
         include_graph: bool = True,
     ) -> dict[str, Any]:
+        """添加一个组件节点；默认返回整图（``include_graph=false`` 时只回执计数）。"""
         graph = self._graph(pipeline_id, editable=True)
         node = graph.add_node(component_type, node_id, parameters, position)
         self._invalidate(pipeline_id)
@@ -322,6 +480,9 @@ class PipelineService:
 
         Each entry: ``{"component_type": ..., "node_id": ..., "parameters": {...}, "position": {...}}``.
         Returns counts by default; pass ``include_graph=true`` for the full graph.
+
+        中文说明：批量新增是"用几次调用搭好一张图"的关键——默认不回吐整图，
+        只返回版本号、节点/边计数与新增节点列表（每个只有 id 与类型）。
         """
         if not components:
             raise ValueError("components must contain at least one entry")
@@ -339,6 +500,7 @@ class PipelineService:
         return {**self._revision(pipeline_id, include_graph), "added": added, "added_count": len(added)}
 
     def remove_component(self, pipeline_id: str, node_id: str, include_graph: bool = True) -> dict[str, Any]:
+        """删除节点及其相关边。"""
         self._graph(pipeline_id, editable=True).remove_node(node_id)
         self._invalidate(pipeline_id)
         self._changed(pipeline_id, "remove_component")
@@ -347,6 +509,7 @@ class PipelineService:
     def configure_component(
         self, pipeline_id: str, node_id: str, parameters: dict[str, Any], include_graph: bool = True
     ) -> dict[str, Any]:
+        """修改单个节点的参数（参数会按 schema 校验，失败则整体回滚）。"""
         self._graph(pipeline_id, editable=True).configure(node_id, parameters)
         self._invalidate(pipeline_id)
         self._changed(pipeline_id, "configure_component")
@@ -361,6 +524,7 @@ class PipelineService:
         target_port: str,
         include_graph: bool = True,
     ) -> dict[str, Any]:
+        """连接两个端口；类型不匹配、目标输入已占用或成环都会被拒绝。"""
         self._graph(pipeline_id, editable=True).connect(source_node, source_port, target_node, target_port)
         self._invalidate(pipeline_id)
         self._changed(pipeline_id, "connect_components")
@@ -372,6 +536,9 @@ class PipelineService:
         """Wire many ports in one call.
 
         Each entry: ``{"source_node": ..., "source_port": ..., "target_node": ..., "target_port": ...}``.
+
+        中文说明：批量连线同样默认不回吐整图，只返回连线数与回执。
+        任意一条连线失败会让整个调用报错（前面的连线已生效，可用 ``get_pipeline`` 核对）。
         """
         if not connections:
             raise ValueError("connections must contain at least one entry")
@@ -391,6 +558,7 @@ class PipelineService:
         target_port: str,
         include_graph: bool = True,
     ) -> dict[str, Any]:
+        """断开一条连线。"""
         self._graph(pipeline_id, editable=True).disconnect(source_node, source_port, target_node, target_port)
         self._invalidate(pipeline_id)
         self._changed(pipeline_id, "disconnect_components")
@@ -402,6 +570,9 @@ class PipelineService:
         """Update several nodes' parameters in one call.
 
         Each entry: ``{"node_id": ..., "parameters": {...}}``.
+
+        中文说明：修改后重新执行时，只有"参数变了的节点及其下游"会重算（指纹机制），
+        因此改一个阈值不需要重跑整张图。
         """
         if not updates:
             raise ValueError("updates must contain at least one entry")
@@ -413,6 +584,11 @@ class PipelineService:
         return {**self._revision(pipeline_id, include_graph), "updated_count": len(updates)}
 
     def validate_pipeline(self, pipeline_id: str) -> dict[str, Any]:
+        """只做结构校验，不执行任何计算：返回 ``{"valid": bool, "errors": [...]}``。
+
+        校验包括图结构（端口/必填输入/环/重复连接）、组件兼容性与组件自身的外部资源预检。
+        先用它把关，比让一次真实执行失败要便宜得多。
+        """
         graph = self._graph(pipeline_id)
         context = ExecutionContext(FaultWorkspace(pipeline_id), self.data_root)
         errors = self.engine.validate(graph, context)
@@ -426,10 +602,14 @@ class PipelineService:
         node_id: str | None,
         incremental: bool,
     ) -> None:
+        """线程池里的执行体：跑引擎、清"图已变更"标记、异常兜底并广播结束事件。"""
         try:
             self.engine.execute(graph, context, mode, node_id, incremental)
+            # 执行成功说明"当前图"与"当前结果"重新一致，可以撤掉待刷新标记。
             context.workspace.metadata.pop("graph_changed", None)
         except Exception as exc:
+            # 运行时自身出错也要落到 workspace 上；否则状态会永远停在 RUNNING，
+            # 等待方只能一直等到超时。
             with context.workspace.lock:
                 context.workspace.status = PipelineStatus.FAILED
                 context.workspace.errors["_runtime"] = {
@@ -444,6 +624,8 @@ class PipelineService:
                 errors=[str(exc)],
             )
         finally:
+            # 只有"这次运行的 workspace 仍是该方案的最新"时才广播 finished，
+            # 避免并发运行互相覆盖事件语义。
             if self.latest.get(context.workspace.pipeline_id) == context.workspace.workspace_id:
                 self.bus.publish(
                     context.workspace.pipeline_id,
@@ -460,6 +642,15 @@ class PipelineService:
         mode: str = "all",
         node_id: str | None = None,
     ) -> dict[str, Any]:
+        """启动一次异步执行，立即返回 ``RUNNING`` 与 ``workspace_id``。
+
+        要点：
+
+        * 执行前先 ``validate_pipeline``，有错直接拒绝，不占用线程池；
+        * 提交给线程池的是图的**克隆**，因此运行期间前端/Agent 的编辑不会影响这次执行；
+        * ``mode``：``all`` 全图、``node`` 单节点、``from`` 该节点及其全部下游；
+        * 引擎的事件回调接进事件总线，网页因此能看到实时节点状态与耗时。
+        """
         graph = self._graph(pipeline_id, editable=True)
         if mode not in {"all", "node", "from"}:
             raise ValueError("Invalid execution mode")
@@ -498,17 +689,21 @@ class PipelineService:
         return {"pipeline_id": pipeline_id, "workspace_id": ws.workspace_id, "status": "RUNNING"}
 
     def execute_node(self, pipeline_id: str, node_id: str, workspace_id: str | None = None) -> dict[str, Any]:
+        """只执行一个节点（强制重算，不走增量复用）。"""
         return self.execute_pipeline(pipeline_id, workspace_id, False, "node", node_id)
 
     def execute_from_node(
         self, pipeline_id: str, node_id: str, workspace_id: str | None = None
     ) -> dict[str, Any]:
+        """从某节点开始重算（含其全部下游），上游产物复用。"""
         return self.execute_pipeline(pipeline_id, workspace_id, False, "from", node_id)
 
     def retry_node(self, pipeline_id: str, node_id: str, workspace_id: str | None = None) -> dict[str, Any]:
+        """重试失败节点：等价于 :meth:`execute_from_node`（修好参数后用它最省时间）。"""
         return self.execute_from_node(pipeline_id, node_id, workspace_id)
 
     def cancel_pipeline(self, pipeline_id: str) -> dict[str, Any]:
+        """请求取消：置位取消事件，引擎在**下一个节点开始前**退出本次运行。"""
         self._graph(pipeline_id)
         if pipeline_id in self.events:
             self.events[pipeline_id].set()
@@ -518,6 +713,7 @@ class PipelineService:
         }
 
     def get_pipeline_status(self, pipeline_id: str, workspace_id: str | None = None) -> dict[str, Any]:
+        """查询运行状态：整体状态、逐节点状态、警告与错误；从未运行过时返回 ``CREATED``。"""
         self._graph(pipeline_id)
         if not workspace_id and pipeline_id not in self.latest:
             return {"pipeline_id": pipeline_id, "status": "CREATED", "node_status": {}}
@@ -530,7 +726,7 @@ class PipelineService:
         return summary
 
     def _workspace_warnings(self, pipeline_id: str, workspace_id: str | None) -> list[str]:
-        """Flag a stale workspace instead of silently reporting old results."""
+        """显式提醒"你读到的不是最新一次运行"，而不是默默返回旧结果。"""
         latest = self.latest.get(pipeline_id)
         if workspace_id and latest and workspace_id != latest:
             return [f"Reading workspace {workspace_id}, which is not the pipeline's latest ({latest})."]
@@ -547,6 +743,11 @@ class PipelineService:
 
         ``timed_out`` is set when the deadline passes so an agent can decide to keep
         waiting, cancel, or inspect partial results.
+
+        中文说明：这是唯一会阻塞的操作，因此**不持有全局锁**（见模块文档）。
+        轮询间隔限制在 0.05~5 秒：太密空转，太稀会让短任务白等。
+        超时不是错误——返回 ``timed_out=True`` 与当前状态，让调用方自行决定继续等、
+        取消，还是先看部分结果。
         """
         self._graph(pipeline_id)
         deadline = time.monotonic() + max(0.0, float(timeout_seconds))
@@ -571,6 +772,11 @@ class PipelineService:
         limit: int = 20,
         include_indices: bool = False,
     ) -> dict[str, Any]:
+        """取单个节点的结果摘要（各端口产物的 ``kind``/预览/引用 + 错误 + 警告）。
+
+        图被编辑过但结果还没刷新时，直接返回 ``PENDING`` 与提示，避免误读旧结果；
+        ``include_indices=False``（默认）会把长索引数组折叠成计数。
+        """
         self._graph(pipeline_id).get_node(node_id)
         ws = self._workspace(pipeline_id, workspace_id)
         if ws.metadata.get("graph_changed"):
@@ -596,6 +802,10 @@ class PipelineService:
         limit: int = 10,
         include_indices: bool = False,
     ) -> dict[str, Any]:
+        """取方案汇总：状态、逐节点摘要（默认最后 10 个节点）、缓存统计与警告。
+
+        ``truncated_nodes=True`` 表示还有节点没列出来，需要时再用 ``get_node_result`` 单独取。
+        """
         graph = self._graph(pipeline_id)
         ws = self._workspace(pipeline_id, workspace_id)
         nodes = list(graph.nodes)[-max(1, min(limit, 50)) :]
@@ -614,11 +824,13 @@ class PipelineService:
         }
 
     def get_pipeline_xml(self, pipeline_id: str) -> dict[str, Any]:
+        """直接把图导出成 XML 文本（不落盘），便于外部系统取用。"""
         return {"pipeline_id": pipeline_id, "xml": XMLSerializer().dumps(self._graph(pipeline_id))}
 
     def get_history(
         self, pipeline_id: str, workspace_id: str | None = None, limit: int = 100
     ) -> dict[str, Any]:
+        """取执行历史（默认最近 100 条、上限 200）：状态迁移、耗时、输入/输出摘要。"""
         ws = self._workspace(pipeline_id, workspace_id)
         with ws.lock:
             return {"history": [json_safe(asdict(h)) for h in ws.history[-max(1, min(limit, 200)) :]]}
@@ -626,24 +838,31 @@ class PipelineService:
     def subscribe_events(
         self, pipeline_id: str | None = None, last_event_id: int = 0
     ) -> tuple[Subscription, list[Any]]:
-        """Open an observation channel; unknown pipelines are rejected up front."""
+        """订阅事件流，返回 ``(订阅对象, 需要补发的历史事件)``；未知方案先报错。
+
+        HTTP 层用它实现 SSE：先补发 ``last_event_id`` 之后的事件，再持续读取新事件。
+        """
         if pipeline_id is not None:
             self._graph(pipeline_id)
         return self.bus.subscribe(pipeline_id, last_event_id)
 
     def unsubscribe_events(self, subscription: Subscription) -> None:
+        """取消订阅并关闭其队列（浏览器断开连接时调用）。"""
         self.bus.unsubscribe(subscription)
 
     def save_checkpoint(self, pipeline_id: str, workspace_id: str | None = None) -> dict[str, Any]:
+        """保存检查点（图 + workspace 快照；产物按引用固定共享，不复制数据）。"""
         graph = self._graph(pipeline_id, editable=True)
         ws = self._workspace(pipeline_id, workspace_id)
         if ws.metadata.get("graph_changed"):
+            # 图变了但没重跑：快照与图已经不一致，保存下来只会误导。
             raise ValueError("Execute edited graph before checkpointing")
         checkpoint = self.workspaces.save_checkpoint(ws.workspace_id, graph.serialize())
         self.bus.publish(pipeline_id, "checkpoint", checkpoint_id=checkpoint.checkpoint_id, action="save")
         return {"checkpoint": checkpoint.summary()}
 
     def load_checkpoint(self, checkpoint_id: str) -> dict[str, Any]:
+        """恢复检查点：同时还原图与 workspace，并把这次恢复当作一次新的图修订。"""
         if checkpoint_id not in self.workspaces.checkpoints:
             raise ValueError("Unknown checkpoint")
         cp = self.workspaces.checkpoints[checkpoint_id]
@@ -658,6 +877,7 @@ class PipelineService:
         return {"pipeline_id": graph.pipeline_id, "workspace_id": ws.workspace_id, "graph": graph.serialize()}
 
     def list_checkpoints(self, pipeline_id: str) -> dict[str, Any]:
+        """列出某个方案的检查点摘要（不含图与快照本体）。"""
         self._graph(pipeline_id)
         return {
             "checkpoints": [
@@ -666,6 +886,7 @@ class PipelineService:
         }
 
     def create_example(self, include_xgboost: bool = False) -> dict[str, Any]:
+        """生成合成数据与完整示例方案（数据文件已存在时直接复用，绝不覆盖用户文件）。"""
         path = create_dataset(self.data_root / "synthetic_equipment.csv")
         graph = example_graph(self.registry, path.relative_to(self.data_root).as_posix(), include_xgboost)
         self.graphs[graph.pipeline_id] = graph

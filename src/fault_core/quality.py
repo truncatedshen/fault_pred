@@ -4,6 +4,15 @@ Real telemetry is full of channels that are *not missing* but carry no informati
 part of the data: held tag values, all-zero registers, quantised measurement points.
 Per-group constant columns and flat windows are the two that silently break window
 features and frequency analysis, so they are reported first.
+
+生产数据里最伤人的不是 NaN，而是"非空但没信息"的通道：阀门卡住导致的保持值、
+未投用的寄存器（恒 0）、被量化死的测点。它们 ``missing_rate = 0``，
+``visual.overview`` 看不出任何异常，但会让窗口方差为 0、频谱整段 NaN。
+本模块把这类问题提前量化成报告，供 Agent 与人在建模前使用。
+
+两个参数约定：``group_column``/``label_column``/``time_column`` 属于标识列，
+不参与恒定列统计；``window_size``/``step``/``time_column`` 必须与后续窗口特征保持一致，
+否则报告的"平窗口比例"和真正跑出来的结果对不上。
 """
 
 from __future__ import annotations
@@ -28,6 +37,15 @@ def quality_report(
     max_groups: int = 20,
     flat_threshold: float = 0.0,
 ) -> dict[str, Any]:
+    """生成质量预检报告（返回 dict，由组件包装成 Visualization 产物）。
+
+    检查项：全 NaN 列、整表恒定列、全零列、逐组恒定列、重复行、逐列平窗口比例、
+    窗口内标签混合数，以及标签变化次数。
+
+    复杂度是 O(窗口数 × 列数)，所以按窗口统计只在配置了窗口参数时有意义；
+    ``max_groups`` 限制逐组明细的条数（上限 200），明细只是"举例"，
+    计数 ``groups_scanned`` 会如实说明扫了多少组。
+    """
     if not data.index.is_unique:
         raise ValueError("Quality report needs a unique row index")
     # Identifier columns are constant by nature; measuring them only adds noise.
@@ -47,6 +65,7 @@ def quality_report(
     per_group: list[dict[str, Any]] = []
     group_constants = 0
     if group_column:
+        # 明细有上限（默认 20、最多 200）：异常组本身会被计数，明细够用就行。
         limit = max(1, min(max_groups, 200))
         for index, (value, group_frame) in enumerate(data.groupby(group_column, sort=False, dropna=False)):
             if index >= limit:
@@ -64,6 +83,7 @@ def quality_report(
     for _, chunk, _, _ in windows(data, group_column, window_size, step, time_column):
         window_count += 1
         for name in numeric:
+            # 峰峰值（ptp）小于等于阈值即视为平窗口；默认阈值 0 表示"完全不变"。
             if float(np.ptp(chunk[name].to_numpy(dtype=float))) <= flat_threshold:
                 flat_counts[name] += 1
         if label_column and chunk[label_column].nunique(dropna=True) > 1:
@@ -75,6 +95,7 @@ def quality_report(
     transitions = 0
     if label_column:
         ordered = data.sort_values(time_column, kind="stable") if time_column else data
+        # 按组分内比较相邻标签：diff 不为 0 即发生一次标签变化（跨组的边界不计）。
         groups = (
             ordered.groupby(group_column, sort=False, dropna=False) if group_column else [("all", ordered)]
         )
@@ -141,6 +162,12 @@ def _findings(
     transitions: int,
     window_count: int,
 ) -> list[str]:
+    """把统计量翻译成可直接写进报告的结论句。
+
+    每条结论都给出**下一步动作**（删列、改 label_policy、调 flat_policy），
+    这样 Agent 不必自己从数字反推该做什么；没有标签变化时不写"标签"那两条，
+    避免报告里出现无意义的"0 个窗口混合标签"。
+    """
     notes: list[str] = []
     if all_nan:
         notes.append(f"All-NaN columns: {', '.join(all_nan[:6])}; drop or impute them before features.")

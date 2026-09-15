@@ -61,7 +61,11 @@ def main() -> None:
         if not (skill_source / "SKILL.md").exists():
             raise SystemExit(f"skill missing: {skill_source}")
         shutil.copytree(skill_source, root / "skills" / "fault-prediction")
-        manifest.append("skills/fault-prediction/SKILL.md")
+        manifest.extend(
+            path.relative_to(root).as_posix()
+            for path in sorted((root / "skills").rglob("*"))
+            if path.is_file()
+        )
 
         (root / "scripts").mkdir(exist_ok=True)
         (root / "docs").mkdir(exist_ok=True)

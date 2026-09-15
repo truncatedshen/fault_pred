@@ -1,4 +1,9 @@
-"""Reproducible synthetic equipment data and a complete example DAG."""
+"""Reproducible synthetic equipment data and a complete example DAG.
+
+示例数据由固定随机种子生成，因此每次运行都能得到完全相同的表与指标——
+这让"冒烟测试"和文档里的实测数字可复现。它只是**演示**：
+三类设备的合成信号不能代表任何真实工业数据的难度，报告里必须说清这一点。
+"""
 
 from __future__ import annotations
 
@@ -12,7 +17,7 @@ from fault_platform.registry import ComponentRegistry
 
 
 def create_dataset(path: Path) -> Path:
-    """Generate labelled synthetic runs; never overwrite an existing user file."""
+    """生成带标签的合成设备数据；文件已存在时直接复用，**绝不覆盖用户文件**。"""
     if path.exists():
         return path
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -22,6 +27,7 @@ def create_dataset(path: Path) -> Path:
     time = np.tile(np.arange(64), 90)
     pd.DataFrame(
         {
+            # 90 台设备 × 64 个采样点；label 决定均值与噪声强度，使三类在统计特征上可分。
             "equipment": groups,
             "time": time,
             "label": label,
@@ -39,6 +45,18 @@ def create_dataset(path: Path) -> Path:
 def example_graph(
     registry: ComponentRegistry, path: str = "synthetic_equipment.csv", include_xgboost: bool = False
 ) -> ComponentGraph:
+    """构造示例方案：数据输入 → 过滤 → 统计/拟合特征 → 合并 → 两个模型对比。
+
+    图里同时演示了三种典型结构：
+
+    * **主链**：``source → filter → stat/fitting → merge → 模型``；
+    * **终端分支**：``visual.overview``、``data.standardization → visual.line``
+      （探索输出不接模型）；
+    * **多模型对比**：两个验证器共享同一份特征与标签，metrics 一起进 ``validation.compare``。
+
+    ``include_xgboost=True`` 时再补第三个模型（需要可选依赖 xgboost）。
+    节点坐标是给网页画布用的，与执行无关。
+    """
     graph = ComponentGraph(registry, "设备故障 · 特征与模型验证")
     graph.metadata = {"description": "合成设备数据演示；模型指标不代表真实工业效果", "seed": 42}
     specs = [
@@ -106,6 +124,7 @@ def example_graph(
         ("standardize", "dataset", "line", "dataset"),
     ]
     if include_xgboost:
+        # 第三个模型接到 compare 的 third 端口：三个模型必须在同一批测试设备上比较。
         graph.add_node("validation.xgboost", "xgboost", {"split_method": "group"}, {"x": 1170, "y": 650})
         edges.extend(
             [

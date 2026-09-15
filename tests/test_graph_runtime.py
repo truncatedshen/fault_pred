@@ -1,5 +1,6 @@
 import pytest
 
+from fault_platform.components.base import DataType
 from fault_platform.graph import ComponentGraph
 from fault_platform.runtime import ExecutionEngine
 from fault_platform.workspace import NodeStatus, PipelineStatus, WorkspaceManager
@@ -88,3 +89,26 @@ def test_checkpoint_is_independent(pipeline, context):
     restored.clear_node("source")
     restored, _ = manager.load_checkpoint(cp.checkpoint_id)
     assert restored.get_output("source", "dataset").shape[0] == 640
+
+
+def test_feature_branches_are_inspectable(pipeline, context, registry):
+    """中间产物必须能被检验：检查类组件可以挂在特征分支上，转换类组件不会因此变宽松。"""
+    port = next(p for p in registry.get("visual.overview").input_ports if p.name == "dataset")
+    assert port.data_type is DataType.DATASET
+    assert port.accepted_types == (DataType.DATASET, DataType.FEATURE_DATASET)
+    # 只有检查类组件放宽：数据转换仍然只吃原始 Dataset。
+    assert registry.get("data.filter").input_ports[0].accepted_types == (DataType.DATASET,)
+
+    pipeline.add_node("visual.overview", "feature_overview")
+    pipeline.connect("features", "features", "feature_overview", "dataset")
+    with pytest.raises(ValueError, match="Incompatible port types"):
+        # 标签向量不是"表"，接进来仍然要被拒绝。
+        pipeline.connect("features", "labels", "feature_overview", "dataset")
+    assert not pipeline.validate_graph()
+
+    ws = ExecutionEngine().execute(pipeline, context)
+    assert ws.status == PipelineStatus.SUCCESS
+    features = ws.get_output("features", "features")
+    payload = ws.get_output("feature_overview", "overview")
+    assert payload["row_count"] == features.shape[0]
+    assert payload["column_names"] == list(features.columns)

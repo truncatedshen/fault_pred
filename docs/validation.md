@@ -1,22 +1,22 @@
 # 实施与验证记录
 
-环境：Windows、Python 3.11.7、Node.js 24.15.0。验证日期：2026-09-14。
+环境：Windows、Python 3.11.7、Node.js 24.15.0。验证日期：初版 2026-09-14，最后一轮（第十三轮）2026-09-15。
 
 ## 结果
 
 | 检查 | 结果 |
 | --- | --- |
-| Python / pytest | 95 项通过（1 项按可选依赖跳过） |
-| 前端 DOM 集成测试 | 4 项通过，连接真实临时 HTTP 服务 |
-| 真实浏览器验收 | Google Chrome headless + DevTools 协议，9 组检查通过（含实时同步，见下） |
+| Python / pytest | 147 项通过（1 项按可选依赖跳过） |
+| 前端 DOM 集成测试 | 8 项通过，连接真实临时 HTTP 服务 |
+| 真实浏览器验收 | Google Chrome headless + DevTools 协议，16 组检查通过（含实时同步、三块分隔条方向、连线正交性与"特征分支挂概览可检验"，见下） |
 | 实时同步（SSE） | Agent 改动 74 ms 内出现在打开的页面；Agent 触发执行时页面看到 RUNNING→SUCCESS 与节点耗时（见下） |
 | Random Forest / SVM / XGBoost 示例 | 全部执行成功，使用同一批测试设备 |
 | MCP | 真实 stdio 初始化和工具调用；HTTP 能读到 MCP 创建的节点 |
-| MCP 闭环冒烟 | `scripts/mcp_smoke.py --from-config` 按客户端配置启动 bridge，29 个工具完成建图、校验、执行、结果、XML 与检查点，见下 |
+| MCP 闭环冒烟 | `scripts/mcp_smoke.py --from-config` 按客户端配置启动 bridge，38 个工具完成建图、校验、执行、结果、XML 与检查点，见下 |
 | XML | XSD、Registry 语义验证、Graph → XML → Graph 等价 |
 | Ruff | 静态检查通过 |
 | JavaScript | node --check 通过 |
-| Agent Skill | skill-creator quick_validate 通过 |
+| Agent Skill | 	ests/test_skill_guide.py 23 项通过（工具面、组件引用、闸门不膨胀、入口不膨胀、参考可达），skill-creator quick_validate 通过 |
 | Python wheel 构建 | dist/fault_prediction_platform-0.1.0-py3-none-any.whl |
 | 依赖一致性 | pip check 无冲突 |
 
@@ -153,6 +153,55 @@ DOM 测试覆盖组件库、参数表单提交、连线、复制、删除、撤�
 
 新增测试文件：`tests/test_agent_ergonomics.py`（7 项）与质量/平窗口相关断言；控制操作从 29 增至 36，组件从 27 增至 28。
 
+## 第四轮：资产级留出与真实 3W 复算
+
+延续 `test_3w` 的三条平台限制与"下一步建议"，本轮改动与**在同一份真实数据上的复算结果**：
+
+| 反馈 | 改动 |
+| --- | --- |
+| 窗口 ID（`g3_w1080`）无法回溯到井/实例，只能自己拼映射 | 窗口组件新增 `asset_column`，资产随特征写入 `attrs["assets"]`（批量、频谱、流式、熵特征四条路径一致）；`feature.merge` 与验证器把 `assets` 纳入 provenance 校验 |
+| group 划分按实例、不等于按井留出 | 新增 `split_method=asset`（真正的留一井），并要求上游提供 `asset_column`；新增 `data.asset_key` 从实例名派生资产 |
+| `/api/data` 不列 Parquet，上传只收 CSV | 列表与上传均支持 `.csv/.parquet/.pq`，上传预览按格式解析 |
+| 类别不平衡任务需要成本敏感指标 | 指标新增 `balanced_accuracy`、`average_precision`（PR-AUC）、`per_class_recall`、`train/test_class_counts`（原始类别名）、`miss_rate`（可用 `positive_class` 指定故障类）与 `coverage`（实例/资产、未见资产数） |
+| 平窗口 NaN 无法进入模型 | 新增 `feature.imputation`（mean/median/zero/drop_columns）；模型遇到 NaN 时报错会点名具体列并提示插入该组件 |
+| 平窗口判定漏检"只在窗首尾变化"的窗口 | `feature.spectral` 的平窗口判定改为**加窗后能量**判定：Hann 窗在两端为 0，若窗口的起伏只出现在首尾采样点，加窗后能量恒为 0——此类窗口现在按 `flat_policy` 处理（默认 NaN），不再抛 `non-zero variance` |
+
+**真实 3W 数据复算**（`test_3w/data/3w_events.parquet`，489,456 行、28 个实例、10 口井；窗口 180 s / 步长 60 s，共 8,091 个窗口；统计 33 + 拟合 18 + 频域 21 = 72 个特征；随机森林 300 棵，`label_policy=mode`）：
+
+| 划分 | Accuracy | Balanced | ROC-AUC | PR-AUC | 漏报率 | 正常类召回 | 测试资产未见 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `group`（按实例，原设置） | 0.6379 | 0.6210 | 0.7159 | 0.8043 | 0.2306 | 0.4726 | **0 / 6**（测试井全部在训练集出现过） |
+| `asset`（留一井，新增） | 0.6062 | 0.5682 | **0.5275** | 0.6108 | 0.2700 | 0.4064 | **3 / 3** |
+
+解读：
+
+- 同一份数据、同一个模型，**按实例划分会把"同井不同事件"算进泛化能力**：AUC 0.716 里有相当一部分是"记住了这口井"。严格留一井后 AUC 掉到 0.528，接近随机——这正是报告里怀疑的问题，现在由平台直接给出并报告了未见资产数。
+- 频域分支这次跑通了：13.1% 的频域取值为 NaN（P-TPT 19.5% 的窗口无可用频谱，与 3W 报告独立统计的 19.4% 吻合），经 `feature.imputation` 后进入模型；各通道的平窗口数由组件随运行返回。
+- 资产级划分下最重要的特征从 `T-TPT` 统计量变为 `P-TPT__range/std/iqr`，说明井间差异主要体现在压力的波动幅度上。
+
+新增测试：`tests/test_asset_split.py`（7 项：资产派生、四条路径携带资产、资产划分 vs 实例划分、缺少资产列/单一资产的拒绝、特征缺失填充与"整列全 NaN"处理、指标语义与原类别名、`/api/data` 与上传的 Parquet 支持）。
+
+## 第五轮：组件规模（对应需求文档三十九～四十一）
+
+需求要求 Registry 支持分类/子分类/标签/搜索关键词/版本/兼容性，`list_components` 支持多维过滤，并为"组件检索"预留意图检索。逐条核对结果：
+
+| 需求 | 状态 | 证据 |
+| --- | --- | --- |
+| Category / Subcategory / Tags / Search Keywords / Version / Compatibility | ✅ 已实现 | `ComponentMetadata` 六个字段齐全；56 个组件的 subcategory 覆盖"统计/频域/时域/拟合/分类/表征学习/选择/组合/非线性"等 |
+| Registry 按上述维度查询 | ✅ 已实现 | `list(category, subcategory, tags, query, input_type, output_type, version, compatibility, limit, offset)` + `count()` + `facets()` |
+| `list_components` 支持 category/query/tags/input_type/output_type/limit | ✅ 已实现 | 服务层签名与 MCP 工具一致，另返回 `total/returned/offset/limit/has_more`；`include_schema=false` 用于只浏览不取 Schema |
+| Visualizer：分类筛选 / 搜索 / 收藏 / 最近使用 | ✅ 已实现 | 前端 `#category-filter`、搜索框、`libraryView`（全部/收藏/最近）、localStorage 持久化收藏与最近 12 个，并按子分类分组显示 |
+| 组件检索（Component Retrieval） | ✅ 已实现（词法排序 + 端口兼容） | `registry.retrieve(intent, category, tags, input_type, output_type, source_component_type, target_component_type)`：字段加权打分（名称 18、类型 15、关键词 14、标签 12、子分类 7、分类 5、描述 4）、中文 bigram 匹配、端口兼容 +12 并过滤不兼容项，返回 `score` 与 `match_reasons`；MCP 工具 `retrieve_components` |
+| Embedding 检索 | ⬜ 未实现 | 需求文档本身写作"未来可以增加"，当前为词法检索 |
+
+本轮补掉的三处缺口：
+
+1. `facets()` 原本是**死代码**（实现了但没有任何入口）。新增 `get_component_facets` 操作（返回 categories / subcategories / tags / versions / compatibility 与总数、平台版本），MCP 与 HTTP 都可调用。
+2. `compatibility` 原本只作为元数据与过滤条件，**从未被校验**。新增 `fault_platform/version.py`（版本比较 + 区间解析），执行前校验每个组件的兼容区间，不满足时报错并给出人名话的原因（`requires fault-platform>=9.0 but this platform is 0.1.0`）；同时把散落的 "0.1.0" 字面量统一为 `PLATFORM_VERSION`。
+3. skill 未教 Agent 使用 `retrieve_components` / `get_component_facets`，现在补上（含"用 source/target_component_type 找可插入的组件"这一用法）。
+
+实测（56 个组件）：`retrieve("统计特征")` → `feature.statistical`（71 分）；`retrieve("extract frequency content")` → `feature.spectral`；`retrieve("留一井 评估")` → `data.asset_key`；`retrieve("", category="feature", source_component_type="data.input", target_component_type="feature.merge")` → 只返回能"吃 Dataset、吐 FeatureDataset"的特征组件。新增测试 `tests/test_catalogue_scale.py`（4 项）覆盖 facets 一致性、过滤与分页、检索排序与端口兼容、版本区间校验。
+
 ## 第四轮：可持久化类别编码（2026-09-15）
 
 `feature.categorical` 现在输出训练特征和 `FeatureTransformer`。编码器保存训练类别、固定输出列、频率/计数/目标映射及 `handle_unknown` 策略；`feature.categorical_transform` 对新数据只做 transform。合并后的特征会保留编码器来源，验证器把它嵌入 `TrainedClassifier`，因此模型经过 pickle、Artifact 磁盘溢写或检查点恢复后，可以直接接收原始类别列。
@@ -160,6 +209,12 @@ DOM 测试覆盖组件库、参数表单提交、连线、复制、删除、撤�
 未知类别的默认策略为 `ignore`：one-hot 为全零、ordinal 为 `-1`、频率/计数为 `0`、目标编码为训练集全局均值；`error` 模式会列出未知值并拒绝预测。缺失类别继续使用 `<missing>`，且推理输出列严格按训练顺序重建。
 
 本轮验收结果：Python **104 passed, 1 skipped**；前端 DOM **4/4**；Chrome **9/9**（组件库 29 个）；部署/MCP **12/12**（36 个 MCP 工具，端到端方案成功）。`tests/test_categorical_encoder.py` 的 9 项测试覆盖 schema 固定、未知类别两种策略、五类编码语义、数值型类别、组件复用、完整 DAG 传递、模型内嵌和 pickle 往返。
+
+## 第五轮：完整组件清单接入 MCP（2026-09-15）
+
+Registry 从 29 个扩展到 54 个组件，补齐时间重采样、数据切分、邻近值、填充、二值化、分布/周期/漂移/异常探索、五种图形、滚动/差分/熵特征，以及线性回归、ARMA、KNN、隔离森林、Persist、决策树和水库机分类。列操作同时增加删除全空列、删除常量列和裁剪极值选项。MCP 仍保留 36 个高层控制工具，新增组件通过 `list_components`、`search_components`、`get_component_schema` 和图编辑工具发现与执行。
+
+本轮验收结果：Python **110 passed, 1 skipped**；前端 DOM **4/4**；Ruff 与前端 JavaScript 语法检查通过；真实 MCP stdio 会话可用中文“水库机”检索到 `validation.reservoir_classifier`。按本轮要求未执行部署、安装包和发布物校验。
 
 手工验收步骤：
 
@@ -169,6 +224,170 @@ DOM 测试覆盖组件库、参数表单提交、连线、复制、删除、撤�
 4. 验证缩放、平移、Shift 多选、复制、删除及撤销重做。
 5. 导出 XML，再导入，核对节点配置、位置和连接。
 6. 执行后保存检查点；修改并重跑；恢复检查点核对旧结果。
+
+## 第六轮：Agent Skill 重写（2026-09-15）
+
+触发原因：真实使用反馈指出 skill 太薄——只说"按这个顺序做"，没说每个阶段怎么配、有哪些坑。Agent 于是要猜数据路径、猜 `label_policy`、猜哪个组件能流式，而且 skill 内部还有自相矛盾的一处（装配一节让 `feature.score_select` 进模型，执行一节又说探索输出是终端分支）。
+
+改法：`SKILL.md` 从 84 行重写为 569 行的阶段手册，每个阶段固定回答四件事——**目标**、**怎么配（真实参数名）**、**注意事项（护栏与常见坑）**、**进入下一阶段的检查清单**；阶段为 recon → 数据准备 → 质量预检 → 窗口与标签 → 特征 → 验证 → 执行排错 → 读结果 → 持久化 → 汇报。另附三份参考：`references/recipes.md`（可照抄的调用序列：常规分类、onset 数据、资产留出、无监督、超大文件、失败后重跑、三模型对比）、`references/troubleshooting.md`（报错原文 → 原因 → 修法 + 每条护栏为什么存在）、`references/components.md`（56 个组件的用途、端口、关键参数与"什么时候不要用"）。矛盾处改为单一说法：`feature.score_select` / `feature.pca` 只在探索分支使用，或进模型但必须带着泄漏警告汇报。
+
+写文档时核对源码，纠正了三处常见误解并写进 skill：`/api/data/upload` 只接受 CSV/Parquet 且**上限 25 MB**（更大的文件必须由操作者放进 `data_root` 或用 `--data-root` 指过去）；流式只被 `feature.statistical`、`feature.fitting`、`feature.spectral`、`visual.overview`、`data.materialize` 接受，`data.quality` 与熵特征都要先物化；`validation.linear_regression` 的 `split_method` 是 `random/group/temporal`，**没有** asset 留出。
+
+防漂移：新增 `tests/test_skill_guide.py`（18 项），校验 38 个工具全部被文档化、技能里不得出现不存在的工具调用或组件名、附录 B 的分类计数与 Registry 一致、阶段章节与三份参考文件存在且体量达标（防止回退成薄摘要）。`scripts/export_release.py` 的发布清单改为列出 skill 目录下全部文件，避免只声明 `SKILL.md` 而漏掉参考文件。
+
+本轮验收：Python **140 passed, 1 skipped**；`ruff check` + `ruff format --check` 通过；`scripts/verify_deploy.py --from-config` **14/14**（其中 skill 检查项通过）；`scripts/mcp_smoke.py --from-config` 成功（38 工具、13 个 feature 组件可检索、XML 6157 字符）；发布包重新导出为 `dist/fault-prediction-platform-0.1.0-deploy.zip`（248 KB，含三份参考文件）。
+
+## 第七轮：源码注释补齐（2026-09-15）
+
+目标：把 `src` 下全部模块补成"可读、可维护"的状态。改动**只涉及注释与 docstring，没有修改任何一行逻辑**——测试数量与结果前后完全一致（140 passed, 1 skipped），可作为"零行为变更"的证据。
+
+做法分三层，避免把注释写成复述代码：
+
+1. **模块级 docstring**：这个模块负责什么、在整个数据流里的位置、有哪些贯穿全文的约定（例如 `fault_core` 的"索引即身份"、`fault_platform` 的"图只存配置"）。
+2. **函数／类 docstring**：参数语义、返回值形状、失败条件，以及"为什么这样设计"（例如窗口组件的四个参数必须一致才能合并；验证器为什么拒绝 `stratified` 处理重叠窗口）。
+3. **行内注释**：只写代码本身读不出来的信息——数值细节（Hann 窗相干增益归一化、MAD 的 1.4826 系数、区间双指针扫描）、护栏原因（为什么拒绝覆盖已有列、为什么要 purge 共享原始行的训练窗口）、以及性能取舍（流式覆盖用区间而不是行号列表，400 万行能省下数百 MB）。
+
+语言约定：保留原有英文 docstring 摘要（与既有代码风格、工具描述一致），新增的说明用中文；这样 IDE 悬浮提示仍是英文短句，深入阅读时得到中文解释。
+
+量化前后对比（`src` 下 33 个 `.py` 文件）：
+
+| 指标 | 改动前 | 改动后 |
+| --- | --- | --- |
+| 总行数 | 7,737 | 10,311 |
+| 行内注释行 | 43（集中在 4 个文件，21 个文件为 0） | 217（每个文件都有） |
+| docstring 段数 | ~100（多数模块只有一行） | 447 |
+| docstring 文本行 | ~600 | 5,022 |
+
+覆盖到的关键点举例：`fault_core/features.py` 的窗口/来源/标签三条不变量与流式区间算法；`models.py` 的四种切分语义与指标字段；`quality.py` 每类发现对应的动作；`fault_platform/runtime.py` 的指纹、增量复用、失败传播与取消；`workspace.py` 的按引用存储、LRU 淘汰/溢写与有界观测；`service.py` 的控制面契约、全局锁例外（`wait_for_pipeline`）与"编辑即失效"；`xml_io` 的 XXE 与端口一致性校验；`builtin.py` 每个组件的用途、端口与坑（56 个组件全部有类级说明）。
+
+配套更新：README 增加注释约定与目录说明，并把过期的"53 项通过"改为当前数字；发布包重新构建（wheel 与 deploy zip 均含带注释的源码）。
+
+本轮验收：pytest **140 passed, 1 skipped**；`ruff check` + `ruff format --check` 通过；`pip check` 干净；DOM 测试 **4/4**；`scripts/verify_deploy.py --from-config` **14/14**；`scripts/mcp_smoke.py --from-config` 退出码 0（38 工具、status=SUCCESS）。
+
+## 第八轮：组件库折叠与可调整布局（2026-09-15）
+
+触发原因：使用反馈指出组件库是"平铺"的——56 个组件全部直接展开，组件变多后很难找；而且左中右三栏宽度固定，画布或参数面板不能按需放大。
+
+改了什么：
+
+1. **两级折叠目录**。组件库按「分类 → 子分类」折叠：分类标题显示图标与数量，子分类标题显示数量；点击标题即折叠/展开。组件总数超过 24 时子分类默认折叠（先给目录），且折叠只加 `.collapsed` 隐藏内容，**组件节点仍留在 DOM 中**——收藏、拖拽、计数与前端测试都依赖它们存在。另有「▾ 折叠全部 / ▸ 展开全部」按钮，折叠状态存 `localStorage.fault-library-collapsed`。
+2. **搜索/筛选强制展开**。输入关键词、切换分类或切到收藏/最近视图时，命中的分组自动展开——避免"搜到了却看不见"这类折叠式目录最常见的坑。
+3. **三栏可拖拽**。左栏宽度、右栏宽度、结果面板高度各自有一条分隔条：拖动调整、方向键微调、双击（或「↺ 恢复布局」）复位；尺寸存 `localStorage.fault-layout`，刷新后保持。分隔条绝对定位在 `.workspace` 内并按其**实际渲染边界**定位，因此对 CSS 钳制与响应式断点同样成立（放进可滚动面板会随内容滚走）。
+4. **视口钳制**。侧栏不超过视口宽度的 34%、结果面板不超过高度的 45%，画布始终留得下可用空间；窄窗口下三栏都不会被挤没。
+
+本轮验收：Python **140 passed, 1 skipped**（本轮未改 Python）；`ruff` 通过；DOM 集成测试 **6/6**（新增 2 项：折叠/搜索/持久化、面板尺寸钳制与复位）；`scripts/browser_check.cjs` **13/13**（新增 3 项，均在真实 Chrome 里用真实指针事件驱动）：
+
+| 新增检查 | 实测 |
+| --- | --- |
+| 组件库折叠为目录且可搜索 | DOM 中仍是 56 个组件；默认 24 个分组折叠、仅 8 个可见；点开频域子分类后可见 9 个；搜索"频域"时 0 个分组折叠、计数 `1/56`；全部折叠后 0 个可见且目录**无需滚动**（`fitsWithoutScroll`）且无标题被裁切 |
+| 分隔条拖拽与持久化 | 左栏 235px → 326px（CSS 变量与 `localStorage` 一致），刷新后仍为 326px，画布保持 1054×471 |
+| 窄窗口（960×720）三栏 | 三栏均 ≥100px，横向溢出 0px，分隔条与面板边缘对齐误差 ≤4px |
+
+截图：`.fault-platform/screenshots/` 下的默认目录视图、全部展开视图，以及第九轮补的两张 3x 放大图。该轮只做了可量化的几何断言（尺寸、可见项数、滚动/裁切、溢出、对齐），**没有做人眼像素评审**——当时的会话不具备图像输入能力，这一点如实记录；下一轮补做了目视评审，并因此发现了一个真 bug。
+
+## 第九轮：人眼放大评审与拖拽方向修复（2026-09-15）
+
+触发原因：第八轮的可用性改动（折叠目录 + 可拖拽面板）只经过了可量化的几何断言，没有人真正看过渲染结果。本会话恢复图像输入能力后，用真实 Chrome 截图补做了目视评审，并把"把代表问题的区域放大 3 倍再看"固定成做法。
+
+方法：无头 Chrome + DevTools 协议，`Page.captureScreenshot` 带 `clip` 与 `scale=3`，只截关键区域（组件库目录、树形引导线、三块分隔条的静止与悬停态）。放大图已固化进 `scripts/browser_check.cjs`，每次跑验收都会重新生成：
+
+| 放大图 | 内容 |
+| --- | --- |
+| `01c-library-tree-zoom.png` | 分类标题、子分类引导线、数量徽标 |
+| `01d-panel-splitter-zoom.png` | 左栏与画布之间的分隔条（悬停高亮） |
+
+评审发现（按严重程度）：
+
+1. **真 bug：结果面板的分隔条方向反了。** 用真实指针把结果面板分隔条**向上**拖 160px，面板不但没变高，反而缩到了最小高度（实测 252 → 120px）。原因是 `startPanelDrag` 只对 `inspector` 做了方向取反，`results` 沿用了"坐标增大 = 变大"的公式，而结果面板的分隔条在面板**上沿**，方向本应相反。修复：把方向收敛成 `PANEL_KEYS.dragSign`（library `+1`、inspector `-1`、results `-1`）；键盘方向键本来就分开定义，现在指针与键盘一致。
+2. **观感缺陷：树形引导线被渲染成一对「(」。** 子分类行直接用 `border-left:2px`，而它又继承了 6px 圆角，Chrome 会把这条边框渲染成两端带弧的括号；6 行重复后视觉噪音很大。修复：改用 `::before` 画一条 2px 直线（`border-radius:1px`），逐行拼起来才是干净的树形引导线。
+3. **测试盲区：拖拽逻辑无法被 DOM 测试覆盖。** 分隔条用的是 `handle.onpointerdown = ...` 属性式监听，而 jsdom 不认这个 IDL 属性（实测 `"onpointerdown" in div === false`），于是 jsdom 里拖拽永远不会触发。改成 `addEventListener` 后，同一条逻辑可以同时被 jsdom 与真实浏览器覆盖。
+4. **两个"像 bug 但不是"的点，如实记录**：截图里的"灰色竖条 + ▲"是 Chrome 原生滚动条，只因为评审脚本没带 `--hide-scrollbars`；「↺ 恢复布局」按钮变蓝是 `:hover` 态（实测 `matches(":hover") === true`、`color: rgb(37,77,187)`），不是常驻高亮。
+
+本轮验收：Python **140 passed, 1 skipped**（本轮未改 Python）；`ruff check` 与 `ruff format --check src tests scripts` 通过；DOM 集成测试 **6/6**（面板用例新增 3 条拖拽方向断言）；`scripts/browser_check.cjs` **14/14**（新增 1 项方向检查，真实指针事件驱动）。
+
+| 新增断言 | 实测 |
+| --- | --- |
+| 三块分隔条的方向都跟手 | 往左拖右栏 278 → 358px；往上拖结果面板 252 → 392px；画布仍保有 974×331 |
+| 拖拽结果写回布局状态 | 向上拖 170px 后 `localStorage.fault-layout` 为 `{"library":236,"inspector":278,"results":422}`，画布高度仍有 301px |
+
+踩坑记录（写下来避免重复）：`scripts/verify_deploy.py` 必须用配置里的解释器跑（`.\.venv\Scripts\python.exe`）。用 Anaconda 基座 Python 跑会得到 13/14，唯一失败项是 `fault_platform import + registry`——因为 `fault_platform` 只装在这个 venv 里，不是脚本或平台的缺陷。同理，`ruff format --check` 只应作用于 `src tests scripts`：不加路径会连带检查文档里的代码块与 `test_3w/` 等实验目录。
+
+诚实边界：本轮仍然是**抽查**——只看了关键区域放大图与三个交互状态（默认、悬停、拖动后），没有逐屏、逐分辨率、逐浏览器做像素评审；没有做无障碍量化（对比度、色盲模拟、200% 缩放下的字体表现均未测量）；截图来自 1680×1050 的 headless Chrome，未覆盖 Windows 系统缩放下的 DPI 表现。
+## 第十轮：连线改为圆角正交折线（2026-09-15）
+
+触发原因：使用反馈指出连线是贝塞尔曲线，而 Simulink 是"直线 + 折线"，曲线看着不够工整。本平台的端口固定为"左侧输入、右侧输出"，是折线最容易做好的拓扑，因此把 `curve()` 的贝塞尔路径换成圆角正交折线。
+
+改了什么：
+
+1. **路由规则**（`orthogonalRoute()`）：出端口先水平走 16px stub，接一条竖直通道，再水平进入目标端口，形成 Simulink 那种 Z 形；两个端口同一高度时自然退化成一条直线。目标在左侧（回边，节点被拖到源节点左边）或两节点几乎重叠时改走 U 形绕行，避免横穿节点本体。
+2. **折角圆角**（`edgePathD()`）：折点用 7px 圆角（`Q` 命令），半径按相邻两段中较短的一段自适应收缩，短段也不会被切坏；共线点直接省略，因此 `d` 里只有 `M/L/Q`，没有一条 `C`。
+3. **并行分道**（`claimLane()`）：同一条竖直通道上、竖直区间又重叠的连线按 9px 依次错开，避免两条线叠成一条看不清的粗线。
+4. **点击热区**：折线只有 1.8px 宽不好点中，因此每条线额外叠一条 15px 宽的透明热区；悬停热区时高亮真正的那条线，热区本身永远透明。
+5. **顺带修掉一个真实隐患**：`portPosition()` 原来只要端口元素存在就直接用它的 `getBoundingClientRect()`，量不到尺寸时（尚未渲染、或环境不支持布局）会返回同一个点，导致所有连线退化成零长度路径。现在尺寸为 0 时回退到按节点位置与端口序号推算的坐标。
+
+本轮验收：Python **140 passed, 1 skipped**（本轮未改 Python）；`ruff check` 与 `ruff format --check src tests scripts` 通过；DOM 集成测试 **7/7**（新增 1 项：折线正交性、首尾落在端口、回边走位、并行分道、热区数量）；`scripts/browser_check.cjs` **15/15**（新增 1 项几何检查）。
+
+| 新增检查 | 实测 |
+| --- | --- |
+| 连线不含曲线命令 | 14 条边，`d` 中 `C/S/A` 命令数 **0** |
+| 除圆角外没有斜向行程 | 沿路径抽样累计斜向位移最差 **41.7px**（半径 7、一条边最多 4~6 个圆角，理论上限约 25px；换成贝塞尔会是 300px 量级），阈值 90px |
+| 端点落在端口圆心 | 最差偏差 **1.0px**（适应画布后缩放 0.35，约合 2.9 个画布单位），阈值 1.5px |
+| 每条线都有点击热区 | **14/14** |
+
+人工目视评审：`02b-edges-zoom.png`（2x 放大连线折角与端口接合处），与 `01c`/`01d` 一样每次跑浏览器验收都会重新生成。**本轮没有人看图**——当前会话的模型不支持图像输入（`view_image` 直接返回 "you do not support image inputs"），所以结论全部来自上述可量化的几何断言，这张放大图留给人工复核。
+
+诚实边界：折线只在"不绕障"的前提下正交——若两条连线必须跨过同一个节点，它们会从节点上压过去（Simulink 会绕开）。回边用固定的两行中线绕行，遇到上下都被节点占满时观感一般。修圆角后的折线在极密集区域仍可能重叠，分道只处理了同一竖直通道这一种情况。
+
+## 第十一轮：把"组件用不上"变成阶段自检（2026-09-15）
+
+触发原因：使用反馈指出 56 个组件里实际只用到了很少几个，"组件优势没发挥出来"。先量化：扫过所有落盘的方案 XML（`test_3w`、`test_mcp_skill` 加冒烟图），真正进过图的组件是 **14 / 56（25%）**；两轮真实使用分别是 9 个和 10 个；把会话记录里"提到过"的算上也只有 29 / 56。缺口集中在 `explore.*`（8 个一个都没进过图）和 `visual.*`（只用过 overview 与 line）。
+
+第一版设想被使用反馈否掉，理由成立：**逐项显式取舍会把任务撑爆**——56 个组件、每个阶段都权衡一遍，等于把组件目录塞进每一步。参照物是 MATLAB 那套 skill：它们全是"触发条件 → 读这个"，不是"把所有工具权衡一遍"。于是改成三条：
+
+1. **Recon 要产出能力清单**（§1）：环境事实之外，再交一份 3~6 行的"这次可能用得上的手段"清单，用 `get_component_facets()` 加 1~2 次 `retrieve_components` 得到；同时写明"不要枚举全部 56 个组件"。
+2. **每个问题多发的阶段末尾加一道 Stage gate**（§3~§6）：一张"自检问题 → 命中时用什么"的小表，最多 6 条；命中才动手，没命中就继续。四道闸门覆盖数据理解（`explore.*` 的落点）、窗口与标签、特征够不够、验证方式对不对，并明确写了"不要为了用组件而加节点"。
+3. **汇报里加 Stage checks**（§12）：交代哪些闸门触发过、做了什么，以及整场没触及的能力类别为什么可以接受。
+
+顺带修正两处会把 skill 写歪的事实：`explore.concept_drift` 是**双输入**（`reference`/`current` 两个 `Dataset`），单输入挂不上去，闸门里直接写明要用两个 `data.filter` 切早晚两段；`validation.*_detector` 三个无监督组件吃的是原始 `Dataset`、不需要 `LabelVector`，这条写进了验证闸门。
+
+本轮验收：Python **144 passed, 1 skipped**（`tests/test_skill_guide.py` 22 项，新增 4 项：闸门数量、闸门 ≤6 条且必须是自检表、汇报含 Stage checks、Recon 含能力清单）；`ruff check` 与 `ruff format --check src tests scripts` 通过。skill 经 junction 即时生效，`verify_deploy` 的 skill 检查项通过。
+
+刻意没做的事：**没有设"组件使用率"指标**。目标函数是"该问的问题有没有被问"，不是"用了多少个组件"——按覆盖率考核只会催生装饰性分支。量化覆盖率的脚本留在 `.fault-platform/component_coverage.py`（临时脚本），以后想知道又漏了哪类能力直接跑它。
+
+## 第十二轮：Skill 瘦身（2026-09-15）
+
+触发原因：skill-creator 的规范要求入口只放"改变决策、改善工作"的信息，条件性细节放进参考文件按需读取；而 SKILL.md 在第十一轮后涨到 626 行，把参数表、实测数字、检查清单和注意事项全堆在入口里。
+
+改了什么：
+
+- **入口 626 → 385 行**（-39%），只留决策、硬约束、路由、阶段自检闸门、38 个工具的用途表与 5 类能力索引。
+- **新增 `references/stages.md`（331 行）**：把每个阶段的参数表、实测数字（3W 的 0.716 → 0.528）、检查清单、「注意事项」与大数据边界搬过去，每节都标了对应 §号便于对照。
+- **Appendix B 从"列出全部 56 个组件名"改成"5 类能力 + 数量 + 输入端口"**：完整清单本来就在 `references/components.md`，重复列一遍正是规范点名的 duplication。
+- **§11 症状表从 14 行压到 5 行**（最常见的那几条），其余交给本来就更全的 `references/troubleshooting.md`。
+
+没丢内容（逐个抽查）：`Feature names overlap`、`cannot consume streamed input`、`data.asset_key` 资产留出配方、状态词表、3W 数字表、"重启后全空"的处置建议、"重复工具名"的处理，全部仍在 skill 目录内（`stages.md` 或 `troubleshooting.md`）。
+
+新增守卫（`tests/test_skill_guide.py` 22 → 23 项）：`stages.md` 纳入体积下限；每个 `references/*.md` 都必须能从入口被链接；入口行数上限 420 行——谁再把细节堆回 SKILL.md，测试直接红。同时修掉一条措辞脆弱的断言（原来按字面量比对一整句，改行宽就会失败），现在统一按空白规范化后比较，这也正是 skill-creator 明确反对的"只匹配措辞"的测试写法。
+
+本轮验收：Python **145 passed, 1 skipped**；`ruff check` + `ruff format --check src tests scripts` 通过；`skill-creator/scripts/quick_validate.py` 输出 **Skill is valid!**（该脚本在 Windows 上需要 `PYTHONUTF8=1`，否则按 GBK 读中文会崩，这是上游脚本的编码问题）；`verify_deploy` **14/14**（含 skill 检查项）。
+
+诚实边界：这轮只做了结构重排，没有做行为验证——"入口更短是否真的让 Agent 表现更好"没有实测，只符合官方规范并降低每次加载的上下文成本。真正的检验仍是下一轮真实使用：`explore.*` 有没有进图。
+
+## 第十三轮：让中间产物可检验（2026-09-15）
+
+触发原因：使用反馈指出——对真正的故障预测工程师来说，Agent 的产出必须可检验，否则 MCP + skill 就是个黑盒；最核心的是"中间产生的数据长什么样"，比如提取特征之后的表长什么样。而 `visual.overview` 当时只接受 `Dataset`，特征分支挂不上去。
+
+改的是机制，不是给某个组件打补丁：给输入端口加"兼容类型"能力，`accepts` 只写在接收端，输出端永远只有一个类型。
+
+1. **端口模型**：`InputPort.accepts` + `accepted_types`；`ComponentGraph.connect` 改为检查"上游类型是否落在目标端口可接受集合内"，运行时用 `validate_input` 按任一兼容类型校验。报错仍然给出完整集合，例如 `Incompatible port types: LabelVector -> Dataset | FeatureDataset`。
+2. **11 个检查类组件放宽**：`visual.overview`、`visual.line`、`visual.scatter`、`visual.subplot`、`visual.histogram`、`visual.relationship`、`explore.central_tendency`、`explore.dispersion`、`explore.correlation`、`explore.distribution`、`explore.anomaly` 现在同时接受 `Dataset` 与 `FeatureDataset`。数据转换类组件（`data.filter` 等）**没有**放宽——宽容只给"看数据"的组件。
+3. **可发现性**：`get_component_schema` / `list_components` 返回 `accepted_types`，`input_type=FeatureDataset` 能直接筛出这些检查类组件（Agent 走的正是这条检索）；组件目录 `docs/components.md` 相应显示为 `dataset : Dataset | FeatureDataset`。
+4. **网页端**：端口提示与节点检查器显示 `Dataset | FeatureDataset`，工程师一眼知道这个口还能接特征表。
+5. **skill**：Stage 4 自检闸门加了一行"说不出特征表长什么样 → 把概览挂上去"；汇报契约新增第 8 项 **Middle evidence**，要求把中间数据的概览作为证据交出来。
+
+本轮验收：Python **147 passed, 1 skipped**；`ruff check` + `ruff format --check src tests scripts` 通过；DOM 测试 **8/8**（新增 1 项：端口提示显示兼容类型）；`scripts/browser_check.cjs` **16/16**（新增 1 项端到端）：给 `stat.features` 挂一个概览节点 → 服务端接受 → 重跑 → 从 `get_node_result` 读出 **90 行 × 15 列**、列名以 `__mean/__std/__rms` 开头 → 浏览器结果面板确实画出了这份概览（截图 `04-feature-overview.png`）。
+
+诚实边界：放宽的只有检查类组件；`explore.periodicity`、`explore.cross_relation`、`explore.concept_drift`、`visual.compare`、`visual.anomaly` 仍只吃原始表，因为它们的语义绑在原始信号与时间上。`data.quality` 也仍然只针对原始窗口——特征表里的"恒零列"要靠 `visual.overview` + `explore.distribution` 人工判断。另外，往已有图上加节点会让该方案的结果失效并需要重跑，这是既有语义（图被编辑即失效），不是本轮引入的行为。
 
 ## 首版边界
 
