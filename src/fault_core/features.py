@@ -1,9 +1,14 @@
 """Window features with aligned labels and source coverage for validation.
 
-这是整个平台最核心的一层：把"一行一时刻"的原始数据变成"一行一个窗口"的特征表，
-同时把三样东西一起产出来，供下游验证器使用：
+这是整个平台最核心的一层：把**逐行采样**的原始数据变成**逐窗口**的特征表——
+一个窗口产出一行特征（不是每个采样点一行）。
 
-1. **窗口键**（``g3_w128``）：分组序号 + 组内起始行，用于人工定位；
+**特征行数由窗口大小与步长决定，与输入行数无关**：每组大约"组内时长 / 步长"个窗口，
+尾部不足一个窗口的部分丢弃；按行切窗时则是"组内行数 / 步长"。例如 48.9 万行的原始数据，
+窗口 `180s` / 步长 `60s` 得到 8081 行特征；把步长换成 `180s` 就只剩 2700 行。
+每个窗口同时产出三样东西，供下游验证器使用：
+
+1. **窗口键**（按行切窗为 ``g3_w128``，按时间切窗为 ``g3_t1577836800``）：分组序号 + 组内起始行/起始秒，用于人工定位；
 2. **窗口标签**：按 ``label_policy`` 从窗口内的行标签聚合，与特征逐行对齐；
 3. **来源行覆盖**（``source_rows``，流式下为 ``source_rows_ranges``）：
    每个窗口用了哪些原始行，用于"训练/测试是否共享原始行"的泄漏检查。
@@ -11,7 +16,7 @@
 因此下面的函数都围绕三条不变量：
 
 * **行对齐**：特征、标签、来源覆盖三者的行数与顺序严格一致；
-* **窗口完整**：只保留长度等于 ``window_size`` 的完整窗口，尾部不足的丢弃；
+* **窗口完整**：只保留完整的窗口（按行切窗时长度为 ``window_size``；按时间切窗时"起点 + 跨度"不超过组内最后一个采样时刻），尾部不足的丢弃；
 * **可追溯**：``attrs`` 里带着分组、窗口参数、资产、类别编码器与探索性警告，
   经过特征合并、缓存、检查点与磁盘溢写都不能丢。
 
@@ -21,6 +26,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Iterator
 
@@ -72,6 +78,182 @@ MISSING_CATEGORY = "<missing>"
 
 #: Shorter windows cannot resolve a usable spectrum, so they are rejected outright.
 MIN_SPECTRAL_SAMPLES = 8
+
+#: 时长文本的单位换算（秒）。只接受"数字 + 单位"，纯数字按秒解释。
+DURATION_UNITS = {"s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0, "w": 604800.0}
+_DURATION = re.compile(r"^([0-9]+(?:\.[0-9]+)?)\s*([smhdw])?$")
+#: 判断"窗口起点 + 跨度是否落在数据末尾之内"时允许的浮点误差（秒）。
+TIME_EPSILON = 1e-6
+
+
+def parse_duration(value: Any, *, name: str = "duration") -> float:
+    """把 ``"7d"``/``"12h"``/``"30m"``/``"180s"`` 解析成秒；空值返回 0。
+
+    只认"数字 + 单位"（``s`` 秒、``m`` 分、``h`` 时、``d`` 天、``w`` 周），纯数字按秒。
+    单位写错会**明确报错**，而不是悄悄退化成 0——那样"7 天窗口"会变成"整组一个窗口"，
+    是最安静也最贵的一类错。
+    """
+    if value is None or value == "":
+        return 0.0
+    text = str(value).strip().casefold()
+    match = _DURATION.match(text)
+    if not match:
+        raise ValueError(f"{name} must look like 7d / 12h / 30m / 180s, got {value!r}")
+    amount, unit = match.groups()
+    return float(amount) * DURATION_UNITS[unit or "s"]
+
+
+def order_by_time(frame: pd.DataFrame, time_column: str) -> tuple[pd.DataFrame, np.ndarray]:
+    """按时间稳定排序，并返回 ``(排好序的表, 秒数组)``。
+
+    预测任务里"未来"必须有定义，所以顺序在这里统一保证，而不是指望调用方先排好。
+    时间列支持两种：时间戳（datetime64 或可解析字符串）与数值（按**秒**解释）。
+    """
+    column = frame[time_column]
+    if pd.api.types.is_numeric_dtype(column) and not pd.api.types.is_bool_dtype(column):
+        seconds = column.to_numpy(dtype=float, copy=True)
+    else:
+        parsed = pd.to_datetime(column, errors="raise")
+        seconds = parsed.to_numpy(dtype="datetime64[ns]").astype("int64") / 1e9
+    if seconds.size > 1 and not np.all(np.diff(seconds) >= 0):
+        order = np.argsort(seconds, kind="stable")
+        return frame.iloc[order], seconds[order]
+    return frame, seconds
+
+
+def group_frames(data: pd.DataFrame, group_column: str | None) -> Iterator[tuple[int, str, pd.DataFrame]]:
+    """按分组列逐组产出 ``(组序号, 组标签, 数据)``；不给分组列时整表算一组。"""
+    groups = data.groupby(group_column, sort=False, dropna=False) if group_column else [("all", data)]
+    for group_number, (group, frame) in enumerate(groups):
+        yield group_number, str(group), frame
+
+
+def windows_in_frame_by_time(
+    frame: pd.DataFrame, seconds: np.ndarray, window_span: float, step_span: float
+) -> Iterator[tuple[int, pd.DataFrame, list[Any], float, float]]:
+    """在**已按时间排序**的组内按时间跨度切窗。
+
+    产出 ``(起始行号, 窗口数据, 来源行, 起点秒, 终点秒)``。与按行切窗的区别只在"完整"
+    的判定：这里要求窗口起点加跨度不超过组内最后一个采样时间——也就是这段时间的数据确实
+    存在；窗口内的行则是区间 ``[起点, 起点+跨度)`` 里的全部采样。采样不规则时每个窗口的
+    行数可以不同，这正是按时间切的意义。
+    """
+    if window_span <= 0 or seconds.size == 0:
+        return
+    last = float(seconds[-1])
+    stride = step_span or window_span
+    start = 0
+    while start < seconds.size:
+        begin = float(seconds[start])
+        end = begin + window_span
+        if end > last + TIME_EPSILON:
+            break
+        stop = int(np.searchsorted(seconds, end, side="left"))
+        chunk = frame.iloc[start:stop]
+        yield start, chunk, chunk.index.tolist(), begin, end
+        nxt = int(np.searchsorted(seconds, begin + stride, side="left"))
+        start = nxt if nxt > start else start + 1
+
+
+def time_windows(
+    data: pd.DataFrame,
+    group_column: str | None,
+    time_column: str,
+    window_span: float,
+    step_span: float,
+) -> Iterator[tuple[str, pd.DataFrame, str, list[Any], float, float]]:
+    """按时间跨度切窗（分组版），产出 ``(键, 窗口数据, 分组标签, 来源行, 起点秒, 终点秒)``。
+
+    与 :func:`windows` 的关系：同样的分组与键命名规则，只是按时间而不按行数切窗，
+    所以窗口内的行数可以不同——"用最近 7 天的数据"这种需求就该用它。
+    """
+    if not data.index.is_unique:
+        raise ValueError("Source row index must be unique")
+    for group_number, group_label, frame in group_frames(data, group_column):
+        ordered, seconds = order_by_time(frame, time_column)
+        for start, chunk, source_rows, begin, end in windows_in_frame_by_time(
+            ordered, seconds, window_span, step_span
+        ):
+            yield f"g{group_number}_t{int(begin)}", chunk, group_label, source_rows, begin, end
+
+
+def prediction_label(
+    seconds: np.ndarray,
+    labels: pd.Series,
+    window_end: float,
+    horizon: float,
+    gap: float,
+    normal_label: Any,
+) -> int | None:
+    """预测标签：窗口结束 + 间隔之后的视野内，有没有出现故障。
+
+    * ``1``：``(end+gap, end+gap+horizon]`` 这段里出现过不等于 ``normal_label`` 的标签；
+    * ``0``：这段区间有采样，而且全是正常；
+    * ``None``：视野超出可用数据，或这段区间压根没有采样——**不能诚实地标 0**，
+      由调用方丢弃并计数。宁可少几个窗口，也不要造标签。
+    """
+    start = window_end + gap
+    stop = start + horizon
+    if seconds.size == 0 or stop > float(seconds[-1]) + TIME_EPSILON:
+        return None
+    left = int(np.searchsorted(seconds, start, side="right"))
+    right = int(np.searchsorted(seconds, stop, side="right"))
+    if right <= left:
+        return None
+    return int(bool(np.any(labels.iloc[left:right].to_numpy() != normal_label)))
+
+
+def coerce_normal_label(labels: pd.Series, raw: Any) -> Any:
+    """``normal_label`` 在参数 schema 里是字符串；这里按标签列的真实类型对齐。"""
+    if raw is None or raw == "":
+        return 0
+    if pd.api.types.is_numeric_dtype(labels):
+        try:
+            value = float(raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"normal_label must be numeric for a numeric label column: {raw!r}") from exc
+        return int(value) if value.is_integer() else value
+    return str(raw)
+
+
+def _horizon_windows(
+    data: pd.DataFrame,
+    group_column: str | None,
+    time_column: str,
+    label_column: str,
+    span: float,
+    stride: float,
+    horizon: float,
+    gap: float,
+    normal_label: Any,
+    current_fault_policy: str,
+    counters: dict[str, int],
+) -> Iterator[tuple[str, pd.DataFrame, str, list[Any], int]]:
+    """预测任务的窗口流：按时间切窗，用未来视野打标签。
+
+    三种窗口会被**丢弃并计数**（``counters``）：窗口自身已经故障且策略为 ``drop``；
+    视野超出数据末尾；视野内没有任何采样。前两种必须计数后写进报告，否则"少了多少样本"
+    就没人知道了。
+    """
+    for group_number, group_label, frame in group_frames(data, group_column):
+        ordered, seconds = order_by_time(frame, time_column)
+        if seconds.size == 0:
+            continue
+        group_labels = ordered[label_column]
+        normal = coerce_normal_label(group_labels, normal_label)
+        for start, chunk, source_rows, begin, end in windows_in_frame_by_time(ordered, seconds, span, stride):
+            if bool(np.any(chunk[label_column].to_numpy() != normal)):
+                if current_fault_policy == "drop":
+                    counters["current_fault"] += 1
+                    continue
+                label = 1 if current_fault_policy == "positive" else 0
+            else:
+                label = prediction_label(seconds, group_labels, end, horizon, gap, normal)
+                if label is None:
+                    counters["unknown_future"] += 1
+                    continue
+            key = f"g{group_number}_t{int(begin)}"
+            yield key, chunk, group_label, source_rows, label
 
 
 def windows(
@@ -192,6 +374,8 @@ def _window_label(chunk: pd.DataFrame, label_column: str, label_policy: str) -> 
     y = chunk[label_column]
     if y.isna().any():
         raise ValueError("Labels contain missing values")
+    if label_policy not in {"strict", "mode", "last"}:
+        raise ValueError(f"Unknown label_policy: {label_policy}")
     if label_policy == "strict" and y.nunique() != 1:
         raise ValueError("Mixed labels in a window; reduce window or select an explicit label_policy")
     return y.mode().iloc[0] if label_policy == "mode" else y.iloc[-1]
@@ -272,6 +456,7 @@ def _assemble(
     window_size: int,
     step: int,
     coverage_as_ranges: bool = False,
+    overlapping: bool | None = None,
 ) -> dict[str, Any]:
     """把逐窗口结果拼成特征表与标签向量，并写全 provenance。
 
@@ -286,6 +471,11 @@ def _assemble(
     """
     if not rows:
         # 一个窗口都没切出来（例如窗口比任何分组都长），说明参数与数据不匹配。
+        if attrs.get("window_span_seconds"):
+            # 时间窗口最常见的错因：跨度比数据跨度还大，或时间列其实不是秒。
+            raise ValueError(
+                "No complete time windows; shorten window_span, or check that time_column is really in seconds"
+            )
         raise ValueError("No complete feature windows; reduce window_size")
     result = pd.DataFrame(rows, index=pd.Index(keys, name="window_id"))
     result.attrs = {
@@ -294,7 +484,10 @@ def _assemble(
         "grouped": bool(group_column),
         "window_size": window_size,
         "step": step,
-        "overlapping": bool(window_size and step and step < window_size),
+        # 按时间切窗时行数不固定，"是否重叠"由调用方按跨度给出；按行切窗在这里推导。
+        "overlapping": overlapping
+        if overlapping is not None
+        else bool(window_size and step and step < window_size),
     }
     # Streamed extraction records [start, stop) ranges; a full list of label objects
     # per window would cost ~36 bytes per source row and dominate memory.
@@ -307,6 +500,153 @@ def _assemble(
         outputs["labels"] = pd.Series(labels, index=result.index, name=label_column)
         outputs["labels"].attrs = dict(result.attrs)
     return outputs
+
+
+def window_arguments(
+    *,
+    window_size: int,
+    window_span: Any,
+    step_span: Any,
+    label_policy: str,
+    prediction_horizon: Any,
+    prediction_gap: Any,
+    current_fault_policy: str,
+    time_column: str | None,
+    label_column: str | None,
+) -> tuple[float, float, float, float]:
+    """校验并解析窗口/预测参数，返回 ``(span, stride, horizon, gap)``（秒）。
+
+    三条实现（statistical/fitting、spectral、entropy）共用这一份校验：参数组合写错时报一样
+    的错，也不会再出现"某个组件悄悄少支持一个参数"的漂移。
+    """
+    span = parse_duration(window_span, name="window_span")
+    stride = parse_duration(step_span, name="step_span")
+    horizon = parse_duration(prediction_horizon, name="prediction_horizon")
+    gap = parse_duration(prediction_gap, name="prediction_gap")
+    horizon_mode = label_policy == "horizon"
+    # 参数组合在这里一次说清楚：静默忽略一个写错的参数，比报错贵得多。
+    if span and window_size:
+        raise ValueError("window_span and window_size cannot both be set; pick one window definition")
+    if stride and not span:
+        raise ValueError("step_span needs window_span")
+    if not horizon_mode and (horizon or gap):
+        raise ValueError("prediction_horizon/prediction_gap need label_policy=horizon")
+    if not horizon_mode and current_fault_policy != "drop":
+        raise ValueError("current_fault_policy needs label_policy=horizon")
+    if horizon_mode:
+        if not label_column:
+            raise ValueError("label_policy=horizon needs label_column")
+        if not time_column:
+            raise ValueError("label_policy=horizon needs time_column")
+        if not span:
+            raise ValueError("label_policy=horizon needs window_span, e.g. 7d")
+        if not horizon:
+            raise ValueError("label_policy=horizon needs prediction_horizon, e.g. 2d")
+        if current_fault_policy not in {"drop", "positive", "negative"}:
+            raise ValueError("current_fault_policy must be drop, positive or negative")
+    return span, stride, horizon, gap
+
+
+def prepared_windows(
+    data: pd.DataFrame,
+    group_column: str | None,
+    label_column: str | None,
+    time_column: str | None,
+    window_size: int,
+    step: int,
+    label_policy: str,
+    span: float,
+    stride: float,
+    horizon: float,
+    gap: float,
+    current_fault_policy: str,
+    normal_label: str,
+    counters: dict[str, int],
+) -> Iterator[tuple[str, pd.DataFrame, str, list[Any], Any]]:
+    """统一的窗口流：``(键, 窗口数据, 分组标签, 来源行, 现成标签或 None)``。
+
+    ``None`` 表示标签由调用方按窗口内容聚合（``strict``/``mode``/``last``）；预测模式
+    （``horizon``）直接给出 0/1。窗口定义（按行 / 按时间）与标签语义只在这里定义一次，
+    三个组件实现共用——避免再出现"某个组件悄悄少支持一个参数"的漂移。
+    """
+    if label_policy == "horizon":
+        yield from _horizon_windows(
+            data,
+            group_column,
+            time_column,
+            label_column,
+            span,
+            stride or span,
+            horizon,
+            gap,
+            normal_label,
+            current_fault_policy,
+            counters,
+        )
+    elif span:
+        for key, chunk, group, source_rows, _, _ in time_windows(
+            data, group_column, time_column, span, stride or span
+        ):
+            yield key, chunk, group, source_rows, None
+    else:
+        for key, chunk, group, source_rows in windows(data, group_column, window_size, step, time_column):
+            yield key, chunk, group, source_rows, None
+
+
+def window_shape(span: float, stride: float, window_size: int, step: int) -> tuple[int, int, bool | None]:
+    """``_assemble`` 需要的 ``(window_size, step, overlapping)``。
+
+    按时间切窗时行数不固定，所以 ``window_size``/``step`` 记 0，是否重叠直接由跨度比较得出；
+    按行切窗时原样交回，让 ``_assemble`` 自己推导。
+    """
+    if span:
+        return 0, 0, bool(stride or span) < span
+    return window_size, step, None
+
+
+def window_attrs(
+    base: Any,
+    *,
+    label_policy: str,
+    span: float,
+    stride: float,
+    horizon: float,
+    gap: float,
+    current_fault_policy: str,
+    counters: dict[str, int],
+) -> dict[str, Any]:
+    """把时间窗口/预测视野的元数据与丢弃计数写进 attrs（三条实现共用）。
+
+    "丢了多少窗口、为什么丢"必须能汇报出去，否则样本为什么变少就没人知道。
+    """
+    attrs = dict(base)
+    horizon_mode = label_policy == "horizon"
+    if span or horizon_mode:
+        attrs.update(
+            {
+                "window_span_seconds": span or None,
+                "step_span_seconds": (stride or span) or None,
+                "prediction_horizon_seconds": horizon or None,
+                "prediction_gap_seconds": gap if horizon_mode else None,
+                "current_fault_policy": current_fault_policy if horizon_mode else None,
+            }
+        )
+    if horizon_mode:
+        dropped_current = counters["current_fault"]
+        dropped_unknown = counters["unknown_future"]
+        attrs["horizon_dropped_current_fault"] = dropped_current
+        attrs["horizon_dropped_unknown_future"] = dropped_unknown
+        notices = list(attrs.get("warnings", []))
+        if dropped_current:
+            notices.append(
+                f"{dropped_current} 个窗口自身已经包含故障，按 current_fault_policy={current_fault_policy} 处理："
+                "这些样本属于检测而不是预测"
+            )
+        if dropped_unknown:
+            notices.append(f"{dropped_unknown} 个窗口的预测视野超出了可用数据，已丢弃，而不是标成 0")
+        if notices:
+            attrs["warnings"] = notices
+    return attrs
 
 
 def extract_features(
@@ -324,12 +664,28 @@ def extract_features(
     degree: int = 2,
     fitting_method: str = "linear",
     asset_column: str | None = None,
+    window_span: str | float = "",
+    step_span: str | float = "",
+    prediction_horizon: str | float = "",
+    prediction_gap: str | float = "",
+    current_fault_policy: str = "drop",
+    normal_label: str = "0",
 ) -> dict[str, Any]:
     """批处理入口：一次读完整表，输出窗口特征与对齐标签。
 
-    ``kind`` 决定走统计还是拟合分支（``_feature_row``），其余参数是窗口定义
-    与标签策略。返回 ``{"features": DataFrame, "labels": Series}``（没有标签列时只有 features），
-    两者的 ``attrs`` 携带分组、窗口参数与来源行，供后续合并与验证使用。
+    ``kind`` 决定走统计还是拟合分支（``_feature_row``）。窗口有两种定义：
+
+    * **按行**（默认）：``window_size`` / ``step``，适合固定采样率的短窗；
+    * **按时间**：``window_span``（如 ``"7d"``）/ ``step_span``，适合"用最近 7 天的数据"
+      这种说法，也天然处理采样不规则或带缺口的数据；每个窗口的行数可以不同。
+
+    标签有两种来源：窗口内聚合（``strict``/``mode``/``last``），或**未来视野**
+    （``label_policy="horizon"``）：窗口结束加 ``prediction_gap`` 之后、``prediction_horizon``
+    之内出现过故障就标 1。后者才是"预测未来会不会故障"，也是把检测任务变成预测任务的那一步。
+    窗口自身已经故障、或视野超出数据末尾的样本会被丢弃并计数，写进 attrs 与 warnings。
+
+    返回 ``{"features": DataFrame, "labels": Series}``（没有标签列时只有 features），
+    两者的 ``attrs`` 携带分组、窗口参数、来源行与预测视野，供合并与验证使用。
     """
     cols = numeric_columns(data, columns)
     # 标签列与分组列不能同时当特征输入，否则等于把答案（或身份）喂给模型。
@@ -339,26 +695,68 @@ def extract_features(
         raise ValueError("Feature extraction requires finite numeric values")
     chosen = features or ["mean", "std", "rms"]
     asset_of = group_assets(data, group_column, asset_column) if asset_column and group_column else None
+    span, stride, horizon, gap = window_arguments(
+        window_size=window_size,
+        window_span=window_span,
+        step_span=step_span,
+        label_policy=label_policy,
+        prediction_horizon=prediction_horizon,
+        prediction_gap=prediction_gap,
+        current_fault_policy=current_fault_policy,
+        time_column=time_column,
+        label_column=label_column,
+    )
+    counters = {"current_fault": 0, "unknown_future": 0}
     rows, labels, keys, group_ids, coverage = [], [], [], [], []
-    for key, chunk, group, source_rows in windows(data, group_column, window_size, step, time_column):
-        row = _feature_row(chunk, cols, kind, chosen, quantile, degree, fitting_method, time_column)
+    for key, chunk, group, source_rows, ready_label in prepared_windows(
+        data,
+        group_column,
+        label_column,
+        time_column,
+        window_size,
+        step,
+        label_policy,
+        span,
+        stride,
+        horizon,
+        gap,
+        current_fault_policy,
+        normal_label,
+        counters,
+    ):
+        rows.append(_feature_row(chunk, cols, kind, chosen, quantile, degree, fitting_method, time_column))
         if label_column:
-            labels.append(_window_label(chunk, label_column, label_policy))
-        rows.append(row)
+            label = (
+                ready_label if ready_label is not None else _window_label(chunk, label_column, label_policy)
+            )
+            labels.append(label)
         keys.append(key)
         group_ids.append(group)
         coverage.append(source_rows)
+
+    assemble_size, assemble_step, overlapping = window_shape(span, stride, window_size, step)
+    attrs = window_attrs(
+        data.attrs,
+        label_policy=label_policy,
+        span=span,
+        stride=stride,
+        horizon=horizon,
+        gap=gap,
+        current_fault_policy=current_fault_policy,
+        counters=counters,
+    )
     outputs = _assemble(
         rows,
         keys,
         labels,
         group_ids,
         coverage,
-        dict(data.attrs),
+        attrs,
         group_column,
         label_column,
-        window_size,
-        step,
+        assemble_size,
+        assemble_step,
+        overlapping=overlapping,
     )
     attach_assets(outputs, asset_of, group_ids)
     return outputs
@@ -683,6 +1081,12 @@ def extract_features_stream(
     degree: int = 2,
     fitting_method: str = "linear",
     asset_column: str | None = None,
+    window_span: str | float = "",
+    step_span: str | float = "",
+    prediction_horizon: str | float = "",
+    prediction_gap: str | float = "",
+    current_fault_policy: str = "drop",
+    normal_label: str = "0",
     attrs: dict[str, Any] | None = None,
     on_progress: Callable[[int], None] | None = None,
 ) -> dict[str, Any]:
@@ -692,6 +1096,18 @@ def extract_features_stream(
     并用 ``streaming``/``streamed_rows`` 标注来源。数值结果由测试逐位校验为相同。
     """
     chosen = features or ["mean", "std", "rms"]
+
+    # 时间窗口与未来视野标签都需要"整组 + 它的未来"，而流式是按块看的，看不到未来。
+    # 与其给出一个看起来能跑、标签却是错的流式结果，不如在这里明确拒绝。
+    if label_policy == "horizon" or parse_duration(window_span, name="window_span"):
+        raise ValueError(
+            "window_span / label_policy=horizon need the whole group and its future: "
+            "turn streaming off on data.input, or insert data.materialize"
+        )
+    if parse_duration(prediction_horizon, name="prediction_horizon") or parse_duration(
+        prediction_gap, name="prediction_gap"
+    ):
+        raise ValueError("prediction_horizon/prediction_gap need label_policy=horizon")
 
     def build_row(window: pd.DataFrame, cols: list[str]) -> dict[str, float]:
         return _feature_row(window, cols, kind, chosen, quantile, degree, fitting_method, time_column)
@@ -947,6 +1363,12 @@ def spectral(
     window_size: int = 0,
     step: int = 0,
     label_policy: str = "strict",
+    window_span: str | float = "",
+    step_span: str | float = "",
+    prediction_horizon: str | float = "",
+    prediction_gap: str | float = "",
+    current_fault_policy: str = "drop",
+    normal_label: str = "0",
 ) -> dict[str, Any]:
     """频域特征提取：每个窗口做一次加窗 FFT，产出的标签与其它窗口组件同构。
 
@@ -983,10 +1405,37 @@ def spectral(
         raise ValueError("Label/group columns cannot be feature inputs")
     if not np.isfinite(data[cols].to_numpy(dtype=float, copy=False)).all():
         raise ValueError("Spectral extraction requires finite numeric values")
+    span, stride, horizon, gap = window_arguments(
+        window_size=window_size,
+        window_span=window_span,
+        step_span=step_span,
+        label_policy=label_policy,
+        prediction_horizon=prediction_horizon,
+        prediction_gap=prediction_gap,
+        current_fault_policy=current_fault_policy,
+        time_column=time_column,
+        label_column=label_column,
+    )
+    counters = {"current_fault": 0, "unknown_future": 0}
     rows, labels, keys, group_ids, coverage = [], [], [], [], []
     flat_counts = {col: 0 for col in cols}
     window_count = 0
-    for key, chunk, group, source_rows in windows(data, group_column, window_size, step, time_column):
+    for key, chunk, group, source_rows, ready_label in prepared_windows(
+        data,
+        group_column,
+        label_column,
+        time_column,
+        window_size,
+        step,
+        label_policy,
+        span,
+        stride,
+        horizon,
+        gap,
+        current_fault_policy,
+        normal_label,
+        counters,
+    ):
         if len(chunk) < MIN_SPECTRAL_SAMPLES:
             # 样本太少的窗口分辨不出有意义的频谱，直接拒绝而不是给出噪声结果。
             raise ValueError(f"Spectral extraction needs at least {MIN_SPECTRAL_SAMPLES} samples per window")
@@ -1023,22 +1472,37 @@ def spectral(
                 }
             )
         if label_column:
-            labels.append(_window_label(chunk, label_column, label_policy))
+            labels.append(
+                ready_label if ready_label is not None else _window_label(chunk, label_column, label_policy)
+            )
         rows.append(row)
         keys.append(key)
         group_ids.append(group)
         coverage.append(source_rows)
+    assemble_size, assemble_step, overlapping = window_shape(span, stride, window_size, step)
+    attrs = window_attrs(
+        data.attrs,
+        label_policy=label_policy,
+        span=span,
+        stride=stride,
+        horizon=horizon,
+        gap=gap,
+        current_fault_policy=current_fault_policy,
+        counters=counters,
+    )
+    attrs["warnings"] = _flat_warnings(flat_counts, window_count)
     outputs = _assemble(
         rows,
         keys,
         labels,
         group_ids,
         coverage,
-        dict(data.attrs),
+        attrs,
         group_column,
         label_column,
-        window_size,
-        step,
+        assemble_size,
+        assemble_step,
+        overlapping=overlapping,
     )
     outputs["warnings"] = _flat_warnings(flat_counts, window_count)
     attach_assets(outputs, asset_of, group_ids)

@@ -95,11 +95,11 @@ def test_catalogue_counts_match_the_registry() -> None:
         counts[item["category"]] = counts.get(item["category"], 0) + 1
     text = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
     labels = {
-        "data": "Data",
-        "feature": "Feature",
-        "explore": "Explore",
-        "visual": "Visual",
-        "validation": "Validation",
+        "data": "数据",
+        "feature": "特征",
+        "explore": "探索",
+        "visual": "可视化",
+        "validation": "验证",
     }
     for category, label in labels.items():
         assert f"**{label} ({counts[category]}):**" in text, (
@@ -110,15 +110,15 @@ def test_catalogue_counts_match_the_registry() -> None:
 @pytest.mark.parametrize(
     "required",
     [
-        "## 2. Stage 1 — Workspace and data preparation",
-        "## 3. Stage 2 — Quality pre-check",
-        "## 4. Stage 3 — Windows, groups and labels",
-        "## 5. Stage 4 — Features",
-        "## 6. Stage 5 — Validation",
-        "## 7. Stage 6 — Execute and debug",
-        "## 8. Stage 7 — Read the results",
-        "## 9. Stage 8 — Persist and hand off",
-        "## 12. Reporting contract",
+        "## 2. 阶段 1 — 工作区与数据准备",
+        "## 3. 阶段 2 — 质量预检",
+        "## 4. 阶段 3 — 窗口、分组与标签",
+        "## 5. 阶段 4 — 特征",
+        "## 6. 阶段 5 — 验证",
+        "## 7. 阶段 6 — 执行与排错",
+        "## 8. 阶段 7 — 读取结果",
+        "## 9. 阶段 8 — 持久化与交接",
+        "## 12. 汇报契约",
         "references/recipes.md",
         "references/troubleshooting.md",
         "references/components.md",
@@ -130,7 +130,7 @@ def test_stage_sections_survive_edits(required: str) -> None:
 
 
 #: 闸门是一个小标题 + 一张自检表；正文里提到「Stage gate」（§0.1、Appendix B）不算闸门。
-GATE_INTRO = "**Stage gate —"
+GATE_INTRO = "**阶段自检 —"
 
 
 def _stage_gate_blocks(text: str) -> list[list[str]]:
@@ -175,16 +175,16 @@ def test_stage_gates_stay_small_and_trigger_based() -> None:
 
 def test_reporting_contract_asks_for_stage_checks() -> None:
     text = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
-    reporting = text.split("## 12. Reporting contract", 1)[1].split("## Appendix A", 1)[0]
-    assert "Stage checks" in _flatten(reporting)
+    reporting = text.split("## 12. 汇报契约", 1)[1].split("## 附录 A", 1)[0]
+    assert "阶段自检" in _flatten(reporting)
 
 
 def test_recon_demands_a_capability_shortlist() -> None:
     """Recon 的产物不只是环境事实，还要有"这次可能用得上的手段"清单，且不能是组件全集。"""
     text = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
-    recon = text.split("## 1. Recon", 1)[1].split("## 2. Stage 1", 1)[0]
-    assert "capability shortlist" in _flatten(recon)
-    assert "enumerate all 56 components" in _flatten(recon)
+    recon = text.split("## 1. 侦察", 1)[1].split("## 2. 阶段 1", 1)[0]
+    assert "能力清单" in _flatten(recon)
+    assert "不要枚举全部 56 个组件" in _flatten(recon)
 
 
 def test_entrypoint_stays_lean_and_links_every_reference() -> None:

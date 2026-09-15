@@ -99,7 +99,38 @@ WINDOW = (
     P("time_column", "column", None),
     P("window_size", "integer", 0, min=0, description="0 = entire group; otherwise complete windows"),
     P("step", "integer", 0, min=0, description="0 = non-overlapping windows"),
-    enum("label_policy", "strict", ("strict", "last", "mode")),
+    P(
+        "window_span",
+        "string",
+        "",
+        description="Time window such as 7d / 12h / 30m; use instead of window_size, needs time_column",
+    ),
+    P("step_span", "string", "", description="Time step such as 1d; empty = non-overlapping"),
+    P(
+        "prediction_horizon",
+        "string",
+        "",
+        description="With label_policy=horizon: a fault inside this time after the window makes the label 1",
+    ),
+    P(
+        "prediction_gap",
+        "string",
+        "",
+        description="Embargo between the window end and the horizon; keeps the label from leaking the onset",
+    ),
+    enum(
+        "current_fault_policy",
+        "drop",
+        ("drop", "positive", "negative"),
+        "Windows that already contain a fault: drop them (they belong to detection), or label them 1/0",
+    ),
+    P(
+        "normal_label",
+        "string",
+        "0",
+        description="Label value that counts as normal; anything else counts as a fault in the horizon",
+    ),
+    enum("label_policy", "strict", ("strict", "last", "mode", "horizon")),
 )
 #: 监督验证器的公共参数：切分方式、留出比例、随机种子，以及"哪一类算故障"。
 VALIDATION_PARAMS = (
@@ -1017,10 +1048,28 @@ class StatisticalFeatureComponent(BaseComponent):
         "feature.statistical",
         "统计特征",
         "feature",
-        "Grouped/windowed statistics and aligned window labels",
+        "Grouped/windowed statistics with aligned labels; window_span/step_span cut windows by time, label_policy=horizon predicts whether a fault happens inside the prediction horizon",
         subcategory="统计 Statistical",
-        tags=("window", "rms", "时序"),
-        search_keywords=("statistical features", "feature extraction", "统计特征", "窗口特征"),
+        tags=("window", "rms", "时序", "时间窗口", "预测", "prediction"),
+        search_keywords=(
+            "statistical features",
+            "feature extraction",
+            "统计特征",
+            "窗口特征",
+            "时间窗口",
+            "滑窗",
+            "预测",
+            "预测性维护",
+            "故障预警",
+            "预警",
+            "未来",
+            "prediction",
+            "horizon",
+            "forecast",
+            "lead time",
+            "early warning",
+            "prognostics",
+        ),
     )
     accepts_streaming = True
     input_ports = DATA_IN
@@ -1048,9 +1097,24 @@ class FittingFeatureComponent(BaseComponent):
         "feature.fitting",
         "拟合特征",
         "feature",
-        "Linear, polynomial or exponential trends with residual and R² features",
+        "Linear, polynomial or exponential trends with residual and R² features; the degradation workhorse, and with label_policy=horizon it feeds failure prediction",
+        tags=("trend", "退化", "预测", "prediction"),
         subcategory="拟合 Fitting",
-        search_keywords=("curve fitting", "trend features", "趋势拟合", "拟合特征"),
+        search_keywords=(
+            "curve fitting",
+            "trend features",
+            "趋势拟合",
+            "拟合特征",
+            "退化",
+            "时间窗口",
+            "预测",
+            "故障预警",
+            "预警",
+            "prediction",
+            "horizon",
+            "forecast",
+            "early warning",
+        ),
     )
     accepts_streaming = True
     input_ports = DATA_IN
@@ -1144,10 +1208,20 @@ class EntropyFeatureComponent(BaseComponent):
         "feature.entropy",
         "熵特征",
         "feature",
-        "Windowed approximate entropy and histogram-based information entropy",
+        "Windowed approximate entropy and histogram-based information entropy; with window_span/step_span windows can be cut by time and label_policy=horizon predicts failure inside the horizon",
         subcategory="非线性 Nonlinear",
-        tags=("entropy", "approximate entropy", "近似熵", "信息熵"),
-        search_keywords=("nonlinear features", "complexity", "熵特征"),
+        tags=("entropy", "approximate entropy", "近似熵", "信息熵", "预测", "prediction"),
+        search_keywords=(
+            "nonlinear features",
+            "complexity",
+            "熵特征",
+            "时间窗口",
+            "预测",
+            "故障预警",
+            "prediction",
+            "horizon",
+            "early warning",
+        ),
     )
     input_ports = DATA_IN
     output_ports = (Out("features", T.FEATURE_DATASET), Out("labels", T.LABEL_VECTOR, False))
@@ -1233,10 +1307,21 @@ class SpectralFeatureComponent(BaseComponent):
         "feature.spectral",
         "频域特征",
         "feature",
-        "FFT amplitude features per window: dominant frequency, centroid, entropy, band and harmonic ratios",
+        "FFT amplitude features per window: dominant frequency, centroid, entropy, band and harmonic ratios; window_span/step_span cut windows by time and label_policy=horizon supports failure prediction",
         subcategory="频域 Frequency",
-        tags=("fft", "spectrum", "时序"),
-        search_keywords=("frequency features", "frequency domain", "频率特征", "频域特征"),
+        tags=("fft", "spectrum", "时序", "时间窗口", "预测", "prediction"),
+        search_keywords=(
+            "frequency features",
+            "frequency domain",
+            "频率特征",
+            "频域特征",
+            "时间窗口",
+            "预测",
+            "故障预警",
+            "prediction",
+            "horizon",
+            "early warning",
+        ),
     )
     accepts_streaming = True
     input_ports = DATA_IN

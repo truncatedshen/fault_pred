@@ -484,7 +484,7 @@ Shape, dtypes, missing rates, summary and time range
 
 ## feature.statistical · 统计特征
 
-Grouped/windowed statistics and aligned window labels
+Grouped/windowed statistics with aligned labels; window_span/step_span cut windows by time, label_policy=horizon predicts whether a fault happens inside the prediction horizon
 
 **输入**：dataset : Dataset
 
@@ -499,13 +499,19 @@ Grouped/windowed statistics and aligned window labels
 | time_column | column | null | 否 |  |
 | window_size | integer | 0 | 否 |  min=0, max=None |
 | step | integer | 0 | 否 |  min=0, max=None |
-| label_policy | enum | "strict" | 否 | strict, last, mode |
+| window_span | string | "" | 否 |  |
+| step_span | string | "" | 否 |  |
+| prediction_horizon | string | "" | 否 |  |
+| prediction_gap | string | "" | 否 |  |
+| current_fault_policy | enum | "drop" | 否 | drop, positive, negative |
+| normal_label | string | "0" | 否 |  |
+| label_policy | enum | "strict" | 否 | strict, last, mode, horizon |
 | features | feature_list | ["mean", "std", "rms"] | 是 | mean, std, variance, min, max, median, rms, skewness, kurtosis, quantile, range, iqr, mad, peak, crest_factor |
 | quantile | float | 0.75 | 否 |  min=0, max=1 |
 
 ## feature.fitting · 拟合特征
 
-Linear, polynomial or exponential trends with residual and R² features
+Linear, polynomial or exponential trends with residual and R² features; the degradation workhorse, and with label_policy=horizon it feeds failure prediction
 
 **输入**：dataset : Dataset
 
@@ -520,7 +526,13 @@ Linear, polynomial or exponential trends with residual and R² features
 | time_column | column | null | 否 |  |
 | window_size | integer | 0 | 否 |  min=0, max=None |
 | step | integer | 0 | 否 |  min=0, max=None |
-| label_policy | enum | "strict" | 否 | strict, last, mode |
+| window_span | string | "" | 否 |  |
+| step_span | string | "" | 否 |  |
+| prediction_horizon | string | "" | 否 |  |
+| prediction_gap | string | "" | 否 |  |
+| current_fault_policy | enum | "drop" | 否 | drop, positive, negative |
+| normal_label | string | "0" | 否 |  |
+| label_policy | enum | "strict" | 否 | strict, last, mode, horizon |
 | fitting_method | enum | "linear" | 否 | linear, polynomial, exponential |
 | degree | integer | 2 | 否 |  min=1, max=5 |
 
@@ -559,7 +571,7 @@ Row-aligned first/second differences or rolling autocorrelation
 
 ## feature.entropy · 熵特征
 
-Windowed approximate entropy and histogram-based information entropy
+Windowed approximate entropy and histogram-based information entropy; with window_span/step_span windows can be cut by time and label_policy=horizon predicts failure inside the horizon
 
 **输入**：dataset : Dataset
 
@@ -574,7 +586,13 @@ Windowed approximate entropy and histogram-based information entropy
 | time_column | column | null | 否 |  |
 | window_size | integer | 0 | 否 |  min=0, max=None |
 | step | integer | 0 | 否 |  min=0, max=None |
-| label_policy | enum | "strict" | 否 | strict, last, mode |
+| window_span | string | "" | 否 |  |
+| step_span | string | "" | 否 |  |
+| prediction_horizon | string | "" | 否 |  |
+| prediction_gap | string | "" | 否 |  |
+| current_fault_policy | enum | "drop" | 否 | drop, positive, negative |
+| normal_label | string | "0" | 否 |  |
+| label_policy | enum | "strict" | 否 | strict, last, mode, horizon |
 | methods | feature_list | ["approximate_entropy", "information_entropy"] | 是 | approximate_entropy, information_entropy |
 | bins | integer | 16 | 否 |  min=2, max=200 |
 | embedding_dimension | integer | 2 | 否 |  min=1, max=5 |
@@ -609,7 +627,7 @@ Apply a fitted categorical encoder without learning from inference data
 
 ## feature.spectral · 频域特征
 
-FFT amplitude features per window: dominant frequency, centroid, entropy, band and harmonic ratios
+FFT amplitude features per window: dominant frequency, centroid, entropy, band and harmonic ratios; window_span/step_span cut windows by time and label_policy=horizon supports failure prediction
 
 **输入**：dataset : Dataset
 
@@ -624,7 +642,13 @@ FFT amplitude features per window: dominant frequency, centroid, entropy, band a
 | time_column | column | null | 否 |  |
 | window_size | integer | 0 | 否 |  min=0, max=None |
 | step | integer | 0 | 否 |  min=0, max=None |
-| label_policy | enum | "strict" | 否 | strict, last, mode |
+| window_span | string | "" | 否 |  |
+| step_span | string | "" | 否 |  |
+| prediction_horizon | string | "" | 否 |  |
+| prediction_gap | string | "" | 否 |  |
+| current_fault_policy | enum | "drop" | 否 | drop, positive, negative |
+| normal_label | string | "0" | 否 |  |
+| label_policy | enum | "strict" | 否 | strict, last, mode, horizon |
 | sampling_rate | float | null | 是 |  |
 | features | feature_list | ["dominant_frequency", "spectral_centroid", "spectral_entropy", "band_energy_ratio"] | 是 | dominant_frequency, dominant_amplitude, spectral_centroid, spectral_spread, spectral_entropy, spectral_rms, high_frequency_ratio, harmonic_ratio, band_energy_ratio |
 | band_edges | list | [0.25, 0.5] | 否 |  |

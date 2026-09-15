@@ -432,6 +432,7 @@ ComponentRegistry ────────────────────�
 - 组件是**薄适配层**：`execute` 只做参数整理 + 调用 `fault_core`，把返回值包装成 `ComponentResult`。
 - 需要外部资源的组件（数据输入）覆盖 `preflight`（提前发现缺文件）与 `external_fingerprint`（文件内容 sha256，用于失效判断）。
 - 窗口类组件统一复用 `fault_core.features.windows`，因此窗口索引（`g{i}_w{start}`）、来源覆盖（`source_rows`）、分组信息（`groups`）在所有特征分支中语义一致，这是 `feature.merge` 能安全合并的前提。
+- **窗口可以按时间切，也可以做预测**：`window_span`/`step_span`（如 `7d`/`1d`）把"用最近 7 天的数据"直接写进参数，采样不规则时每个窗口行数可以不同（`attrs["window_span_seconds"]` 记录跨度，`window_size` 记 0）；`label_policy=horizon` 配合 `prediction_horizon`/`prediction_gap` 让标签取自窗口**之后**的视野，`current_fault_policy` 决定"窗口自身已故障"的样本是丢弃还是标 1/0，丢弃数量写入 `attrs` 与 warnings。窗口定义与标签语义集中在 `fault_core.features` 的 `window_arguments / prepared_windows / window_shape / window_attrs`，统计、频域、熵三个组件共用同一份实现，避免各自漂移。 无论哪种切法，**特征行数 = 窗口数**（每组约"组内时长 / 步长"），与输入行数无关：48.9 万行原始数据配 `180s`/`60s` 得到 8081 行特征，步长换成 `180s` 只剩 2700 行。
 - 组件返回值中的 `warnings` 会写入 Workspace 警告与节点警告；数据属性里的 `evaluation_warnings` 会随 DataFrame 传播到模型指标。
 
 ### 5.3 注册期校验

@@ -97,6 +97,30 @@ def test_compatibility_requirements_are_checked():
     assert "future" in message and "fault-platform>=9.0" in message and PLATFORM_VERSION in message
 
 
+def test_prediction_capability_is_discoverable() -> None:
+    """新能力必须能被 Agent 的检索入口找到，否则等于不存在。
+
+    这条守的是"接口对 Agent 可用"：当用户说"预测未来 7 天会不会故障""故障预警"时，
+    `retrieve_components` / `list_components` 要把窗口生产者排到前面，而不是只找到
+    `validation.arma` 这类时序基线；参数名与 `label_policy` 的取值也要能从 schema 读出来。
+    """
+    registry = default_registry()
+    producers = {"feature.statistical", "feature.fitting", "feature.spectral", "feature.entropy"}
+    for intent in ("预测未来是否故障", "未来 7 天 故障", "prediction horizon", "故障预警", "滑动时间窗口"):
+        found = {item["component_type"] for item in registry.retrieve(intent=intent, limit=3)}
+        assert found & producers, f"intent {intent!r} found {sorted(found)}"
+    for query in ("时间窗口", "预测", "horizon", "window_span", "故障预警"):
+        found = {item["component_type"] for item in registry.list(query=query, limit=5)}
+        assert found & producers, f"query {query!r} found {sorted(found)}"
+    tagged = {item["component_type"] for item in registry.list(tags=["prediction"])}
+    assert producers <= tagged
+    schema = registry.get("feature.statistical").schema()
+    names = {p["name"] for p in schema["parameter_schema"]}
+    assert {"window_span", "step_span", "prediction_horizon", "prediction_gap"} <= names
+    policy = next(p for p in schema["parameter_schema"] if p["name"] == "label_policy")
+    assert "horizon" in policy["options"]
+
+
 def workspace_path():
     from pathlib import Path
 

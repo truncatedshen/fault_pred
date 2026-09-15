@@ -18,7 +18,16 @@ import numpy as np
 import pandas as pd
 
 from fault_core.data import numeric_columns
-from fault_core.features import _assemble, _window_label, attach_assets, group_assets, windows
+from fault_core.features import (
+    _assemble,
+    _window_label,
+    attach_assets,
+    group_assets,
+    prepared_windows,
+    window_arguments,
+    window_attrs,
+    window_shape,
+)
 
 
 def _ordered(data: pd.DataFrame, group_column: str | None, time_column: str | None) -> pd.DataFrame:
@@ -190,6 +199,12 @@ def entropy_features(
     embedding_dimension: int = 2,
     tolerance_ratio: float = 0.2,
     asset_column: str | None = None,
+    window_span: str | float = "",
+    step_span: str | float = "",
+    prediction_horizon: str | float = "",
+    prediction_gap: str | float = "",
+    current_fault_policy: str = "drop",
+    normal_label: str = "0",
 ) -> dict[str, Any]:
     """按窗口计算熵特征，返回与统计/频域特征同构的输出字典。
 
@@ -209,12 +224,39 @@ def entropy_features(
     selected = methods or ["approximate_entropy", "information_entropy"]
     if any(method not in {"approximate_entropy", "information_entropy"} for method in selected):
         raise ValueError("Unknown entropy feature method")
+    span, stride, horizon, gap = window_arguments(
+        window_size=window_size,
+        window_span=window_span,
+        step_span=step_span,
+        label_policy=label_policy,
+        prediction_horizon=prediction_horizon,
+        prediction_gap=prediction_gap,
+        current_fault_policy=current_fault_policy,
+        time_column=time_column,
+        label_column=label_column,
+    )
+    counters = {"current_fault": 0, "unknown_future": 0}
     rows: list[dict[str, float]] = []
     labels: list[Any] = []
     keys: list[str] = []
     groups: list[str] = []
     coverage: list[list[Any]] = []
-    for key, chunk, group, source_rows in windows(data, group_column, window_size, step, time_column):
+    for key, chunk, group, source_rows, ready_label in prepared_windows(
+        data,
+        group_column,
+        label_column,
+        time_column,
+        window_size,
+        step,
+        label_policy,
+        span,
+        stride,
+        horizon,
+        gap,
+        current_fault_policy,
+        normal_label,
+        counters,
+    ):
         row = {}
         for column in cols:
             values = chunk[column].to_numpy(dtype=float)
@@ -235,18 +277,32 @@ def entropy_features(
         groups.append(group)
         coverage.append(source_rows)
         if label_column:
-            labels.append(_window_label(chunk, label_column, label_policy))
+            labels.append(
+                ready_label if ready_label is not None else _window_label(chunk, label_column, label_policy)
+            )
+    assemble_size, assemble_step, overlapping = window_shape(span, stride, window_size, step)
+    attrs = window_attrs(
+        data.attrs,
+        label_policy=label_policy,
+        span=span,
+        stride=stride,
+        horizon=horizon,
+        gap=gap,
+        current_fault_policy=current_fault_policy,
+        counters=counters,
+    )
     outputs = _assemble(
         rows,
         keys,
         labels,
         groups,
         coverage,
-        dict(data.attrs),
+        attrs,
         group_column,
         label_column,
-        window_size,
-        step,
+        assemble_size,
+        assemble_step,
+        overlapping=overlapping,
     )
     attach_assets(outputs, asset_of, groups)
     return outputs

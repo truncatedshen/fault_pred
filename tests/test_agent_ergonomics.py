@@ -193,3 +193,80 @@ def test_every_operation_is_reachable_through_dispatch(service):
     assert unknown["success"] is False and "Unknown operation" in unknown["summary"]
     bad = service.dispatch("add_components", {"pipeline_id": "missing", "components": []})
     assert bad["success"] is False
+
+
+def test_bulk_edits_are_all_or_nothing(service: PipelineService) -> None:
+    """批量操作要么全成、要么全不成：一次被拒的调用必须留下原样的图。
+
+    这条曾经是真的缺陷：add_components 半途失败会留下已加的节点，报错也不说第几条，
+    于是调用方以为整批都没进去。
+    """
+    pipeline_id = service.create_pipeline("atomic")["pipeline_id"]
+    version_before = service.get_pipeline(pipeline_id)["graph"]["version"]
+
+    with pytest.raises(ValueError) as add_error:
+        service.add_components(
+            pipeline_id,
+            [
+                {"component_type": "data.input", "node_id": "source", "parameters": {"path": "x.csv"}},
+                {
+                    "component_type": "feature.statistical",
+                    "node_id": "stats",
+                    "parameters": {"columns": ["v"]},
+                },
+                # data.quality 不接受 label_policy：第三条被拒，前两条必须回滚
+                {
+                    "component_type": "data.quality",
+                    "node_id": "quality",
+                    "parameters": {"label_policy": "mode"},
+                },
+            ],
+        )
+    message = str(add_error.value)
+    assert "entry 3 of 3" in message
+    assert "data.quality" in message
+    assert "Nothing was added" in message
+    graph = service.get_pipeline(pipeline_id)["graph"]
+    assert graph["nodes"] == []
+    assert graph["version"] == version_before  # 版本号也不许漂：否则客户端会凭空遇到并发冲突
+
+    service.add_components(
+        pipeline_id,
+        [
+            {"component_type": "data.input", "node_id": "source", "parameters": {"path": "x.csv"}},
+            {"component_type": "feature.statistical", "node_id": "stats", "parameters": {"columns": ["v"]}},
+        ],
+    )
+    with pytest.raises(ValueError) as configure_error:
+        service.configure_components(
+            pipeline_id,
+            [
+                {"node_id": "stats", "parameters": {"label_policy": "mode"}},
+                {"node_id": "missing", "parameters": {}},
+            ],
+        )
+    assert "entry 2 of 2" in str(configure_error.value)
+    nodes = {node["id"]: node["parameters"] for node in service.get_pipeline(pipeline_id)["graph"]["nodes"]}
+    assert nodes["stats"]["label_policy"] == "strict"  # 第一条也要还原
+
+    with pytest.raises(ValueError) as connect_error:
+        service.connect_many(
+            pipeline_id,
+            [
+                {
+                    "source_node": "source",
+                    "source_port": "dataset",
+                    "target_node": "stats",
+                    "target_port": "dataset",
+                },
+                # 同一个输入口连第二次：第二条被拒，第一条必须撤掉
+                {
+                    "source_node": "source",
+                    "source_port": "dataset",
+                    "target_node": "stats",
+                    "target_port": "dataset",
+                },
+            ],
+        )
+    assert "entry 2 of 2" in str(connect_error.value)
+    assert service.get_pipeline(pipeline_id)["graph"]["edges"] == []

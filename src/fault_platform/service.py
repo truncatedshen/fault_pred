@@ -20,6 +20,7 @@ from __future__ import annotations
 import sys
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
+from copy import deepcopy
 from dataclasses import asdict
 from pathlib import Path
 from threading import Event, RLock
@@ -30,7 +31,7 @@ from pydantic import ValidationError, validate_call
 
 from fault_platform.events import EventBus, Subscription
 from fault_platform.examples import create_dataset, example_graph
-from fault_platform.graph import ComponentGraph
+from fault_platform.graph import ComponentGraph, Connection
 from fault_platform.registry import ComponentRegistry, default_registry
 from fault_platform.runtime import ExecutionContext, ExecutionEngine
 from fault_platform.version import PLATFORM_VERSION
@@ -240,6 +241,25 @@ class PipelineService:
         if include_graph:
             payload["graph"] = graph.serialize()
         return payload
+
+    @staticmethod
+    def _describe_entry(entry: Any, keys: tuple[str, ...]) -> str:
+        """给批量报错用的条目摘要；条目根本不是字典时也不能再炸一次。"""
+        if not isinstance(entry, dict):
+            return repr(entry)[:80]
+        return ", ".join(f"{key}={entry.get(key)!r}" for key in keys)
+
+    @staticmethod
+    def _rollback_nodes(graph: ComponentGraph, node_ids: list[str], version_before: int) -> None:
+        """回滚一次批量新增：删掉已加的节点，并把版本号退回调用前。
+
+        版本号也要退：否则一次被拒的调用会留下"版本涨了但内容没变"的状态，
+        让持有旧 ``expected_version`` 的客户端凭空收到并发冲突。
+        """
+        for node_id in reversed(node_ids):
+            if node_id in graph.nodes:
+                graph.remove_node(node_id)
+        graph.version = version_before
 
     def delete_pipeline(self, pipeline_id: str) -> dict[str, Any]:
         """删除方案及其全部运行痕迹：workspace、产物、溢写文件与检查点。"""
@@ -478,22 +498,27 @@ class PipelineService:
     ) -> dict[str, Any]:
         """Add many components in one call.
 
-        Each entry: ``{"component_type": ..., "node_id": ..., "parameters": {...}, "position": {...}}``.
-        Returns counts by default; pass ``include_graph=true`` for the full graph.
-
-        中文说明：批量新增是"用几次调用搭好一张图"的关键——默认不回吐整图，
-        只返回版本号、节点/边计数与新增节点列表（每个只有 id 与类型）。
+        中文说明：批量新增是"用几次调用搭好一张图"的关键——默认不回吐整图，只返回版本号、
+        节点/边计数与新增节点列表。**要么全部成功，要么一条都不落**：任何一条被拒都会把已加
+        的节点回滚干净（版本号一起退回），并在报错里点名是第几条、哪个组件，以及"什么都没加"。
         """
         if not components:
             raise ValueError("components must contain at least one entry")
         graph = self._graph(pipeline_id, editable=True)
-        added = []
-        for spec in components:
-            if "component_type" not in spec:
-                raise ValueError("Every component entry needs component_type")
-            node = graph.add_node(
-                spec["component_type"], spec.get("node_id"), spec.get("parameters"), spec.get("position")
-            )
+        version_before = graph.version
+        added: list[dict[str, Any]] = []
+        for position, spec in enumerate(components, start=1):
+            detail = self._describe_entry(spec, ("component_type", "node_id"))
+            try:
+                node = graph.add_node(
+                    spec["component_type"], spec.get("node_id"), spec.get("parameters"), spec.get("position")
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                self._rollback_nodes(graph, [entry["node_id"] for entry in added], version_before)
+                raise ValueError(
+                    f"add_components rejected entry {position} of {len(components)} ({detail}): {exc}. "
+                    "Nothing was added: the graph is exactly as it was before the call."
+                ) from exc
             added.append({"node_id": node.id, "component_type": node.component.component_type})
         self._invalidate(pipeline_id)
         self._changed(pipeline_id, "add_components")
@@ -538,13 +563,30 @@ class PipelineService:
         Each entry: ``{"source_node": ..., "source_port": ..., "target_node": ..., "target_port": ...}``.
 
         中文说明：批量连线同样默认不回吐整图，只返回连线数与回执。
-        任意一条连线失败会让整个调用报错（前面的连线已生效，可用 ``get_pipeline`` 核对）。
+        **要么全部成功，要么一条都不连**：任何一条被拒都会把已经连上的边删掉，
+        并在报错里点名是第几条、哪条边。
         """
         if not connections:
             raise ValueError("connections must contain at least one entry")
         graph = self._graph(pipeline_id, editable=True)
-        for edge in connections:
-            graph.connect(edge["source_node"], edge["source_port"], edge["target_node"], edge["target_port"])
+        version_before = graph.version
+        applied: list[Connection] = []
+        for position, edge in enumerate(connections, start=1):
+            detail = self._describe_entry(edge, ("source_node", "source_port", "target_node", "target_port"))
+            try:
+                applied.append(
+                    graph.connect(
+                        edge["source_node"], edge["source_port"], edge["target_node"], edge["target_port"]
+                    )
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                for done in reversed(applied):
+                    graph.disconnect(done.source_node, done.source_port, done.target_node, done.target_port)
+                graph.version = version_before
+                raise ValueError(
+                    f"connect_many rejected entry {position} of {len(connections)} ({detail}): {exc}. "
+                    "No connections were made."
+                ) from exc
         self._invalidate(pipeline_id)
         self._changed(pipeline_id, "connect_many")
         return {**self._revision(pipeline_id, include_graph), "connected_count": len(connections)}
@@ -567,18 +609,34 @@ class PipelineService:
     def configure_components(
         self, pipeline_id: str, updates: list[dict[str, Any]], include_graph: bool = False
     ) -> dict[str, Any]:
-        """Update several nodes' parameters in one call.
+        """Update several nodes parameters in one call.
 
         Each entry: ``{"node_id": ..., "parameters": {...}}``.
 
         中文说明：修改后重新执行时，只有"参数变了的节点及其下游"会重算（指纹机制），
-        因此改一个阈值不需要重跑整张图。
+        因此改一个阈值不需要重跑整张图。**要么全部成功，要么一条都不改**：任何一条被拒
+        都会把已经改过的节点恢复回原参数，并在报错里点名是第几条、哪个节点。
         """
         if not updates:
             raise ValueError("updates must contain at least one entry")
         graph = self._graph(pipeline_id, editable=True)
-        for update in updates:
-            graph.configure(update["node_id"], update["parameters"])
+        version_before = graph.version
+        applied: list[tuple[str, dict[str, Any]]] = []
+        for position, update in enumerate(updates, start=1):
+            detail = self._describe_entry(update, ("node_id",))
+            try:
+                node_id = update["node_id"]
+                previous = deepcopy(graph.get_node(node_id).component.parameters)
+                graph.configure(node_id, update["parameters"])
+            except (KeyError, TypeError, ValueError) as exc:
+                for applied_id, previous_parameters in reversed(applied):
+                    graph.configure(applied_id, previous_parameters)
+                graph.version = version_before
+                raise ValueError(
+                    f"configure_components rejected entry {position} of {len(updates)} ({detail}): {exc}. "
+                    "Nothing was changed: every node keeps its previous parameters."
+                ) from exc
+            applied.append((node_id, previous))
         self._invalidate(pipeline_id)
         self._changed(pipeline_id, "configure_components")
         return {**self._revision(pipeline_id, include_graph), "updated_count": len(updates)}

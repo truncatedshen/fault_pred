@@ -310,7 +310,14 @@ equipment,time,label,vibration,temperature,pressure
 | `label_column` | 生成与窗口对齐的标签 |
 | `window_size` | 窗口长度，`0` 表示整组一段 |
 | `step` | 滑动步长，`0` 表示不重叠 |
-| `label_policy` | 混标签窗口的处理：`strict` 拒绝、`last` 取最后一个、`mode` 取众数 |
+| `window_span` | **时间窗口**，如 `7d`/`12h`/`180s`；与 `window_size` 二选一，按时间切窗（采样不规则时行数可不固定） |
+| `step_span` | 时间步长，如 `1d`；留空表示不重叠 |
+| `prediction_horizon` | **预测视野**，如 `2d`：配合 `label_policy=horizon`，窗口结束之后这么久内出现故障就标 1 |
+| `prediction_gap` | 预测间隔（禁入带），把视野整体推后，避免贴着故障起始的样本过易 |
+| `current_fault_policy` | 窗口自身已故障时：`drop`（默认，属于检测任务）/`positive`/`negative`；丢弃数量会写进 `attrs` 与警告 |
+| `normal_label` | 哪个标签值算正常（默认 `0`），其它取值都算故障 |
+| `label_policy` | 混标签窗口的处理：`strict` 拒绝、`last` 取最后一个、`mode` 取众数；`horizon` 表示**预测**——标签取自窗口之后的未来视野 |
+`window_size`/`step`（或 `window_span`/`step_span`）决定的是**特征行数**：每组大约"组内时长 ÷ 步长"行，尾部不足一个窗口的丢弃；与输入行数无关。48.9 万行原始数据配 `180s`/`60s` 得到 8081 行特征，步长改成 `180s` 只剩 2700 行。
 | `sampling_rate` | 仅频域特征：原始样本采样率（Hz），必填，窗口至少 8 个样本 |
 
 频域特征说明：使用 Hann 窗与相干增益归一化，`dominant_frequency` / `dominant_amplitude` / `spectral_rms` 对单音准确；`band_edges` 用 Nyquist 比例表示，`band_energy_ratio_i` 之和为 1；`harmonic_ratio` 统计 2–5 倍主频附近的能量占比。谱质心、谱展宽、谱熵受窗主瓣宽度影响，适合在同一流程内比较样本。
@@ -406,7 +413,7 @@ get_pipeline_xml(...)
 
 把它复制到 Agent 的技能目录，或让 Agent 直接读取（`docs/deploy.md` 的安装脚本会一并安装整个目录）。
 
-从第十一轮起，skill 里多了三样专门对付"有组件却用不上"的东西：Recon 阶段要求产出一份 3~6 行的**能力清单**（这次任务可能用得上的手段，而不是 56 个组件的目录）；每个问题多发的阶段末尾有一道 **Stage gate** 自检闸门（逐条自问，命中才动手，最多 6 条）；汇报时必须交代闸门结论和整场没触及的能力类别。这三处由 `tests/test_skill_guide.py` 的 22 项检查守住，其中一条专门防止闸门膨胀成组件清单。
+skill 的正文（含四份参考文件）现在**全中文**，只有工具名、组件类型、参数名与平台报错原文保持英文——它们是接口标识符。第十四轮又补了三件事：Recon 阶段要求产出一份 3~6 行的**能力清单**（这次任务可能用得上的手段，而不是 56 个组件的目录）；每个问题多发的阶段末尾有一道 **阶段自检**（逐条自问，命中才动手，最多 6 条）；汇报契约里有「中间产物证据」一项，要求把概览挂在真正建模的特征分支上并把行列引用出来。另外两处运营性内容：§0.5 讲清「等待超时 ≠ 服务死了，绝不要因此重启服务」，§0.6 要求用用户的语言回答。这些约束由 `tests/test_skill_guide.py`（23 项）与 `tests/test_mcp_bridge.py`（5 项）守住，包括「闸门不许膨胀成组件清单」「入口不许再长回手册」和「每个工具都必须有描述」。
 
 也可以用原始 HTTP：
 

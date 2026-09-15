@@ -1,12 +1,12 @@
 # 实施与验证记录
 
-环境：Windows、Python 3.11.7、Node.js 24.15.0。验证日期：初版 2026-09-14，最后一轮（第十三轮）2026-09-15。
+环境：Windows、Python 3.11.7、Node.js 24.15.0。验证日期：初版 2026-09-14，最后一轮（第十六轮）2026-09-15。
 
 ## 结果
 
 | 检查 | 结果 |
 | --- | --- |
-| Python / pytest | 147 项通过（1 项按可选依赖跳过） |
+| Python / pytest | 161 项通过（1 项按可选依赖跳过） |
 | 前端 DOM 集成测试 | 8 项通过，连接真实临时 HTTP 服务 |
 | 真实浏览器验收 | Google Chrome headless + DevTools 协议，16 组检查通过（含实时同步、三块分隔条方向、连线正交性与"特征分支挂概览可检验"，见下） |
 | 实时同步（SSE） | Agent 改动 74 ms 内出现在打开的页面；Agent 触发执行时页面看到 RUNNING→SUCCESS 与节点耗时（见下） |
@@ -16,7 +16,7 @@
 | XML | XSD、Registry 语义验证、Graph → XML → Graph 等价 |
 | Ruff | 静态检查通过 |
 | JavaScript | node --check 通过 |
-| Agent Skill | 	ests/test_skill_guide.py 23 项通过（工具面、组件引用、闸门不膨胀、入口不膨胀、参考可达），skill-creator quick_validate 通过 |
+| Agent Skill | `tests/test_skill_guide.py` 23 项 + `tests/test_mcp_bridge.py` 5 项通过（工具描述、组件引用、闸门与入口不膨胀、参考可达、等待类超时与错误分类），skill-creator quick_validate 通过 |
 | Python wheel 构建 | dist/fault_prediction_platform-0.1.0-py3-none-any.whl |
 | 依赖一致性 | pip check 无冲突 |
 
@@ -388,6 +388,83 @@ Registry 从 29 个扩展到 54 个组件，补齐时间重采样、数据切分
 本轮验收：Python **147 passed, 1 skipped**；`ruff check` + `ruff format --check src tests scripts` 通过；DOM 测试 **8/8**（新增 1 项：端口提示显示兼容类型）；`scripts/browser_check.cjs` **16/16**（新增 1 项端到端）：给 `stat.features` 挂一个概览节点 → 服务端接受 → 重跑 → 从 `get_node_result` 读出 **90 行 × 15 列**、列名以 `__mean/__std/__rms` 开头 → 浏览器结果面板确实画出了这份概览（截图 `04-feature-overview.png`）。
 
 诚实边界：放宽的只有检查类组件；`explore.periodicity`、`explore.cross_relation`、`explore.concept_drift`、`visual.compare`、`visual.anomaly` 仍只吃原始表，因为它们的语义绑在原始信号与时间上。`data.quality` 也仍然只针对原始窗口——特征表里的"恒零列"要靠 `visual.overview` + `explore.distribution` 人工判断。另外，往已有图上加节点会让该方案的结果失效并需要重跑，这是既有语义（图被编辑即失效），不是本轮引入的行为。
+
+## 第十四轮：P0–P3 修复 + skill 中文化（2026-09-15）
+
+触发原因：一次自查发现四类问题（P0 长跑误报、P1 工具描述缺失、P2 skill 缺口、P3 闸门有效性未验证），使用反馈要求全部修复，并把 skill 换成中文。
+
+### P0 —— 阻塞式等待在第 60 秒必然误报"服务不可达"（实测）
+
+- 桥对所有工具固定 `httpx.AsyncClient(timeout=60)`，而 `wait_for_pipeline` 服务端默认等 300 秒，skill 的配方还写着 600。
+- **修复前实测**（3W 真实数据：489,456 行 → 8091 个窗口 → 统计+拟合+频域 → merge → 插补 → RF-300，进程内 149.5 秒）：`execute_pipeline -> RUNNING (0.2s)`，`wait_for_pipeline returned after 60.2 s: {"success": false, "error_code": "CONTROL_API_UNAVAILABLE", "summary": "Start fault-platform serve at ..."}`，而服务端 `status: RUNNING`。
+- **修复后实测**（`scripts/mcp_wait_probe.py`）：`wait_for_pipeline returned after 155.1 s` → `{"success": true, "status": "SUCCESS"}`。
+- 改动：`call_timeout_seconds()` 让等待类工具的客户端超时跟着 `timeout_seconds` 走；传输层错误拆成 `CONTROL_API_TIMEOUT`（服务可能还在算 → 先查 `get_pipeline_status`，**不要重启**）与 `CONTROL_API_UNAVAILABLE`（桥确实连不上）；非 JSON 响应单独报 `CONTROL_API_BAD_RESPONSE`。
+- 新增穿过桥的测试 `tests/test_mcp_bridge.py`（5 项）与手册脚本 `scripts/mcp_wait_probe.py`——这一层此前完全没有测试覆盖。
+
+### P1 —— 38 个工具里 18 个没有描述
+
+补全到 38/38（批量工具明确写出"用我替代逐个调用"），并新增守卫：每个控制操作都必须有描述，且描述不能过短。
+
+### P2 —— skill 全量中文化 + 补两处缺口
+
+- 五个文件中文化：`SKILL.md`（305 行）、`references/stages.md`（253）、`components.md`（223）、`recipes.md`（240）、`troubleshooting.md`（125）。工具名、组件类型、参数名与平台报错原文保留英文——它们是接口标识符。
+- 新增 §0.5「服务与桥的故障」（超时 ≠ 服务死了，绝不因此重启）与 §0.6「用用户的语言回答」（默认中文）。
+- front-matter 的 `description` 从 493 字符压成一段可读中文，仍保留 `MCP` 关键词供技能路由。
+- 守卫测试同步改为中文标记（阶段标题、阶段自检、能力清单、汇报契约、组件计数）。
+
+### P3 —— 闸门有效性：用真实 MCP 走一遍
+
+用真实 MCP 工具按新 skill 的闸门在 3W 数据上建图（`.fault-platform/gate_probe.py`）：阶段 2 自检命中"通道冗余／分布形状"→ 加 `explore.correlation`、`explore.distribution`；阶段 4 自检要求中间产物证据 → 把 `visual.overview` 挂到 `merge.features` 上。覆盖率对比：
+
+| 指标 | 之前 | 现在 |
+| --- | --- | --- |
+| 落盘方案里用到的组件 | 14 / 56（25%） | **18 / 56（32%）** |
+| `explore.*` | 0 / 8 | **2 / 8** |
+| 特征分支上的概览 | 无 | `visual.overview` 接在 `merge.features` 上 |
+| `data.quality` | 未进任何落盘方案 | 已进图 |
+
+诚实边界：这一轮是**同一个 Agent**（我）按闸门走的，不是另一个独立模型跑出来的；它证明的是"闸门用现有工具可执行、且能带来覆盖"，**不能**证明"换个模型也会这么走"。
+
+### 顺带发现（记录在案，本轮未修）
+
+`add_components` 与 `configure_components` **都不是原子的**：批量中途某条非法时，前面已成功的条目会留下，报错也不说哪一条、已经改了什么（实测：一次批量里 `data.quality` 传了它不接受的 `label_policy`，结果只落了第一个节点，但 `validate_pipeline` 仍然返回 valid=True）。本轮先把新写的工具描述改成实话（不再声称会回滚）并提示失败后先 `get_pipeline` 复核；要做成原子操作需要给 `ComponentGraph` 加快照/回滚，属于行为变更，留待下一轮决定。
+
+本轮验收：Python **152 passed, 1 skipped**；`ruff check` + `ruff format --check src tests scripts` 通过；`quick_validate.py` 输出 **Skill is valid!**（中文 skill 同样通过）；`scripts/browser_check.cjs` **16/16**；`verify_deploy` **14/14**；`mcp_smoke` 成功；`scripts/mcp_wait_probe.py` PASS。
+
+## 第十五轮：批量编辑改为原子操作（2026-09-15）
+
+触发原因：第十四轮的自查发现 `add_components`/`configure_components` **不是原子的**——批量中途某条非法时，前面已成功的条目会留下，报错也不说哪一条、已经改了什么。实测中一次批量里 `data.quality` 传了它不接受的 `label_policy`，结果只落了第一个节点，调用方却以为整批都没进去。使用反馈要求修掉。
+
+改了什么（三条批量操作一起改，`connect_many` 是同一类缺陷）：
+
+1. **全成或全不成**。`add_components` 失败时删掉本次已加的节点，并**把 `graph.version` 退回调用前**——否则一次被拒的调用会留下"版本涨了但内容没变"的状态，让持有旧 `expected_version` 的客户端凭空收到并发冲突。`configure_components` 失败时把已改节点恢复成调用前的参数（`deepcopy` 快照）。`connect_many` 失败时删掉本次已连的边。
+2. **报错点名**。统一形如：报错里写明 `entry 3 of 3`（第几条）、括号里给出这一条的组件类型与节点 id、冒号后是平台给出的具体原因，最后一句固定为 `Nothing was added: the graph is exactly as it was before the call.`（另外两条分别是 `Nothing was changed…` 与 `No connections were made.`）
+3. **工具描述改成实话**。三条批量工具的 MCP 描述现在明确写 "All or nothing …"；第十四轮临时写的"不会回滚，请自行核对"到此撤销。
+4. **skill 同步**。`SKILL.md` §0.3 增加一条：批量是全成或全不成，失败后按报错点名的那条改即可，不必再 `get_pipeline` 猜哪些已生效；`references/troubleshooting.md` 的图编辑一节加了对应症状行。
+
+本轮验收：Python **153 passed, 1 skipped**（新增 `tests/test_agent_ergonomics.py::test_bulk_edits_are_all_or_nothing`：三条批量在失败后节点、参数、边与 `version` 都回到原样）；`ruff check` + `ruff format --check src tests scripts` 通过；浏览器验收 **16/16**、`verify_deploy` **14/14**、`mcp_smoke` 成功、`quick_validate` 通过。
+
+补充说明：第十四轮我顺口提到"`validate_pipeline` 还返回 valid=True"——复核后这一点**不是缺陷**：图里只有一个 `data.input` 节点时结构上确实没有违规（必填输入满足、无环、无重复生产者），`validate_pipeline` 只查结构不查完整性。真正的问题只是"调用方不知道批量被部分应用"，现在这条已经消除。
+
+## 第十六轮：时间窗口与"预测未来故障"（2026-09-15）
+
+触发原因：使用反馈指出，做真正的故障预测需要"用前面几天的数据预测未来是否发生故障"——也就是按**时间**切窗口（例如 7 天），标签来自**未来**，而不是窗口自身。此前窗口只能按行数切（`window_size`/`step`），标签也只能从窗口内部聚合。
+
+改了什么：
+
+1. **时间窗口**：新增 `window_span`/`step_span`（`"7d"`/`"12h"`/`"180s"`），与 `window_size` 互斥。按时间切窗，采样不规则时每个窗口的行数可以不同；时间列支持时间戳与数值（数值按秒解释），组内自动按时间稳定排序。窗口"完整"的判定改为"起点 + 跨度不超过组内最后一个采样时刻"，窗口内的行仍是半开区间 `[起点, 起点+跨度)` 里的全部采样。
+2. **未来视野标签**：`label_policy` 新增 `horizon`，配合 `prediction_horizon`/`prediction_gap`/`normal_label`：窗口结束加间隔之后、视野之内出现非正常标签就标 1。`current_fault_policy` 决定"窗口自身已故障"的样本怎么处理（默认 `drop`，它们属于检测任务）。
+3. **诚实丢弃**：视野超出可用数据、或视野内压根没有采样的窗口**不标 0**，而是丢弃并计数；连同"已故障窗口"的数量一起写进 `attrs` 与 warnings，汇报时必须带出来。
+4. **一份实现**：窗口定义与标签语义收敛到 `fault_core.features` 的 `window_arguments / prepared_windows / window_shape / window_attrs`，`feature.statistical`/`feature.fitting`、`feature.spectral`、`feature.entropy` 三条实现共用。这正是本轮踩到的漂移点：新参数最初只加进了一条实现，另外两个组件直接 `TypeError`——现在由共用函数兜住。
+5. **流式明确拒绝**：时间窗口与预测视野需要"整组 + 它的未来"，流式按块看不到未来，因此直接报错让用户关掉 `streaming` 或插 `data.materialize`，而不是给一个标签错了的结果。
+
+真实数据验证（3W：489,456 行 / 28 个实例；窗口 `180s`、步长 `60s`、视野 `1h`、`current_fault_policy=drop`）：**得到 3370 个窗口、正类 905 个（26.9%）**，同时丢弃 **4380 个"自身已故障"**与 **331 个"视野超出数据"**的窗口，特征提取用时 1.0 秒。
+
+本轮验收：Python **160 passed, 1 skipped**（新增 `tests/test_prediction_windows.py` 7 项：视野标签、间隔带、未知未来丢弃、不规则采样与时间窗口、参数组合校验、字符串标签、端到端图跑通）；`ruff check` + `ruff format --check src tests scripts` 通过；skill 守卫 **23 项**通过；浏览器验收 **16/16**；`verify_deploy` **14/14**；`mcp_smoke` 成功。
+
+边界：时间窗口仍假设组内按时间连续（不跨组）；流式不支持预测模式；频域仍要求每个窗口至少 8 个采样点（按行数判断，与时间跨度无关）。
+补充（同轮）：使用反馈指出模块文档里"一行一个窗口"的表述有歧义，容易被读成"每个采样点一个窗口"。已改成明确的表述并把这条语义写成回归测试：**特征行数 = 窗口数**，每组约"组内时长 / 步长"（按行切窗则是"组内行数 / 步长"），与输入行数无关。实测同一份 48.9 万行数据：`180s`/`30s` → 16154 行、`180s`/`60s` → 8081 行、`180s`/`180s` → 2700 行、`180s`/`600s` → 818 行、`1h`/`1h` → 114 行。`tests/test_prediction_windows.py::test_feature_row_count_follows_the_window_and_step` 钉住这一点（步长 1d/2d/5d → 8/4/2 行，而输入是 240 行）。
+补充（同轮，MCP 接口面）：能力做出来了，但**对 Agent 不可发现**——修复前实测检索结果："未来 7 天 故障"与"滑动时间窗口"返回 0 个组件；"预测未来是否故障"只找到 `validation.arma`（时序基线，不是窗口预测）；关键词 "时间窗口" / "horizon" / "window_span" / "未来" 全部 0 结果。根因是四个窗口生产者的 `description` / `tags` / `search_keywords` 还停留在"窗口统计"。修复后（在同一层 HTTP/MCP 控制面复测）："预测未来是否故障" → `feature.statistical` / `feature.entropy` / `feature.fitting`；"故障预警" → `feature.fitting` / `feature.statistical` / `feature.entropy`；"prediction horizon" → `feature.statistical` / `feature.fitting` / `feature.spectral`；"时间窗口" / "预测" / "horizon" / "window_span" 都能命中四个窗口生产者；`tags=["prediction"]` 返回全部四个。新增守卫 `tests/test_catalogue_scale.py::test_prediction_capability_is_discoverable`（5 条意图 + 5 条关键词 + 标签 + schema 参数与 `label_policy` 枚举），元数据漂移会直接让测试变红。
 
 ## 首版边界
 

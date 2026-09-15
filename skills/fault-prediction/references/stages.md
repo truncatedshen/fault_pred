@@ -1,340 +1,267 @@
-# Stage handbook (the detail behind SKILL.md)
+# 阶段手册（`SKILL.md` 背后的细节）
 
-`SKILL.md` keeps the decisions, the invariants and the stage gates. This file keeps the
-parameter tables, the worked numbers and the "before moving on" checklists behind each stage.
-Read only the section for the stage you are in; a smoke test needs none of it.
+`SKILL.md` 只放决策、硬约束与阶段自检；这个文件放每个阶段背后的参数表、实测数字和检查清单。
+**只读你当前所在的那一节**，快速冒烟一次不需要它。章节编号与 `SKILL.md` 的 §号一一对应。
 
-## Stage 1 — Workspace and data preparation (§2)
+## 阶段 1 — 工作区与数据准备（§2）
 
-### Formats the platform accepts
+### 平台接受哪些格式
 
-Only `.csv`, `.parquet` and `.pq`. Everything else must be converted **before** the platform
-sees it, and you must say that you converted it:
+只有 `.csv`、`.parquet`、`.pq`。其它格式必须在平台**之外**先转换，而且你要说明你转换过：
 
-| Source | Convert with |
+| 来源 | 用什么转 |
 | --- | --- |
-| `.mat` (CWRU, SEU) | `scipy.io.loadmat` → DataFrame → `to_parquet` |
-| `.txt` (C-MAPSS) | `pandas.read_csv(sep=r"\s+", header=None)` → `to_parquet` |
-| MDF/BLF (vehicle logs) | MATLAB `mdfRead`/`blfread`, or Python `asammdf`/`python-can` |
-| historian / database | export a columnar slice to Parquet |
+| `.mat`（CWRU、SEU） | `scipy.io.loadmat` → DataFrame → `to_parquet` |
+| `.txt`（C-MAPSS） | `pandas.read_csv(sep=空白, header=None)` → `to_parquet` |
+| MDF/BLF（车载日志） | MATLAB `mdfRead`/`blfread`，或 Python `asammdf`/`python-can` |
+| 历史库／数据库 | 导出一段列式切片成 Parquet |
 
-While converting, aim for **one row per sample**: `asset_id`, `instance_id`, `time`, the
-measurement columns and the label. Windowing assumes that shape.
+转换时目标是**一行一个采样**：`asset_id`、`instance_id`、`time`、测量列、标签。窗口组件就认这个形状。
 
-### Checklist
+### 检查清单
 
- - [ ] `data_root` known; the file is visible in `list_datasets` or explicitly requested from the operator
- - [ ] instance / asset / time / label / measurement columns identified (asked, or inferred and the inference stated)
- - [ ] `data.input.path` is relative and parses (run `data.input` alone if unsure)
- - [ ] file above ~1 GB? choose a bounded read (`columns`, `max_rows`, Parquet `filters`) or `streaming`
+ - [ ] 已经知道 `data_root`；文件能在 `list_datasets` 里看到，或者你已明确请操作者放进来
+ - [ ] 实例／资产／时间／标签／测量列都已确认（问出来的，或推断出来并说明了推断依据）
+ - [ ] `data.input.path` 是相对路径且能解析（不确定就单独跑一下 `data.input`）
+ - [ ] 文件超过约 1 GB？先选有界读取（`columns`、`max_rows`、Parquet `filters`）或 `streaming`
 
-### Watch out for
+### 注意事项
 
- - Guessing the path. Every wrong path is a wasted run; `list_datasets` costs one call.
- - Assuming the file needs no conversion. `.mat`/`.txt`/MDF are not accepted, and a
-   half-converted file (a `.mat` renamed to `.csv`) fails later with confusing dtypes.
- - Confusing an instance with an asset. Record both columns now, while the raw data is in
-   front of you.
+ - 猜路径。每条错的路径都是一次白跑的运行；`list_datasets` 只要一次调用。
+ - 以为文件不用转换。`.mat`/`.txt`/MDF 都不被接受；把 `.mat` 改名成 `.csv` 这种半成品会在后面以莫名其妙的 dtype 报错。
+ - 把实例当成资产。趁原始数据还在眼前，把两列都记下来。
 
-## Stage 2 — Quality pre-check (§3)
+## 阶段 2 — 质量预检（§3）
 
-### What `data.quality` reports
+### `data.quality` 报告什么
 
-| Finding | Meaning | Action |
+| 发现 | 含义 | 处理 |
 | --- | --- | --- |
-| `all_nan_columns` | a column with no data | drop it from `columns` |
-| `constant_columns` | constant overall | drop it — zero variance, zero information |
-| `groups_with_constant_columns` | constant *inside* an asset while varying across assets | the classic held/quantised point; dropping it is usually right, keeping it is a decision you must state |
-| duplicate rows | repeated samples | investigate before trusting metrics — duplicates leak across splits |
-| mixed-label windows, label transitions | windows whose label changes inside | tells you whether `label_policy=strict` can survive |
-| flat-window ratio per column | fraction of windows with no variation | `feature.spectral` yields NaN there by default; keep the ratio in your report |
+| `all_nan_columns` | 整列没有数据 | 从 `columns` 里去掉 |
+| `constant_columns` | 整列恒定 | 去掉——零方差零信息 |
+| `groups_with_constant_columns` | 在某个资产内部恒定，但跨资产会变 | 典型的"保持值/未投用"点位；通常该丢，保留就必须说明理由 |
+| 重复行 | 重复采样 | 先查清楚再信指标——重复会跨切分泄漏 |
+| 混合标签窗口、标签跳变 | 窗口内标签发生变化 | 直接告诉你 `label_policy=strict` 能不能活 |
+| 每列平窗口比例 | 窗口内完全没有变化的比例 | `feature.spectral` 在那里默认输出 NaN；把这个比例写进汇报 |
 
-Run it with **the same** `columns`, `group_column`, `time_column`, `window_size` and `step` you
-will use for window features, so its counts describe the real thing.
+用**与窗口特征完全一致**的 `columns`、`group_column`、`time_column`、`window_size`、`step` 去跑，这样它的计数才描述真实的东西。
 
-### Worked example
+### 实测例子
 
-On a 3W-style industrial dataset `P-TPT` was 19.4 % flat and `T-TPT` 7.8 % flat **with
-`missing_rate = 0`**. `visual.overview` shows nothing; `data.quality` shows it immediately.
+在一份 3W 风格的工业数据上，`P-TPT` 有 19.4% 的窗口完全平直、`T-TPT` 7.8%，而它们的
+`missing_rate = 0`。`visual.overview` 什么也看不出来，`data.quality` 一眼就看出来了。
 
-### Checklist
+### 检查清单
 
- - [ ] `data.quality` ran with the final window parameters
- - [ ] dead/constant/flat columns are dropped, or kept with a stated reason
- - [ ] the intended label policy is consistent with the mixed-label count
- - [ ] the user was told what the pre-check found
+ - [ ] `data.quality` 用最终窗口参数跑过
+ - [ ] 死列／常数列／平窗口列已丢弃，或保留并写明理由
+ - [ ] 打算用的标签策略与混合标签计数不矛盾
+ - [ ] 已经告诉了用户这次预检发现了什么
 
-### Watch out for
+### 注意事项
 
- - `missing_rate = 0` does not mean "usable".
- - Global statistics hide per-group constants: a column can be 0 % missing, non-constant
-   overall, and constant inside every well.
- - Skipping this stage does not fail the run; it fails the *conclusion*.
+ - `missing_rate = 0` 不等于"可用"。
+ - 全局统计会掩盖组内恒定：一列可以缺失率 0%、整列非常数，但在每一口井里都是常数。
+ - 跳过这一阶段不会让运行失败，但会让**结论**失败。
 
-## Stage 3 — Windows, groups and labels (§4)
+## 阶段 3 — 窗口、分组与标签（§4）
 
-The window producers are `feature.statistical`, `feature.fitting`, `feature.spectral` and
-`feature.entropy`. They share these parameters:
+窗口生产者是 `feature.statistical`、`feature.fitting`、`feature.spectral`、`feature.entropy`。它们共享这些参数：
 
-| Parameter | Meaning | Notes |
+| 参数 | 含义 | 说明 |
 | --- | --- | --- |
-| `columns` | measurement columns | **required**; measurements only — never the id/time/label columns |
-| `group_column` | window group (instance or run) | windows never straddle two groups; without it, `window_size=0` means "the whole table" |
-| `label_column` | emits labels for the windows | connect that `labels` output to every validator |
-| `time_column` | ordering | keep it set whenever rows are time ordered |
-| `asset_column` | owning asset (well, machine) | required for `split_method=asset` |
-| `window_size` | rows per window | `0` = the entire group (one row out) |
-| `step` | stride | `0` = non-overlapping; `step < window_size` = overlapping windows |
-| `label_policy` | `strict` (default) / `last` / `mode` | see below |
+| `columns` | 测量列 | **必填**；只放测量值，绝不要放 id／时间／标签列 |
+| `group_column` | 窗口分组（实例或一次运行） | 窗口永不跨组；不设时 `window_size=0` 等于"整张表" |
+| `label_column` | 为窗口生成标签 | 把它的 `labels` 输出接到每个验证器 |
+| `time_column` | 排序依据 | 只要行是按时间排列的，就设上它 |
+| `asset_column` | 所属资产（井、机器） | `split_method=asset` 必需 |
+| `window_size` | 每个窗口多少行 | `0` = 整组（每组只出一行） |
+| `step` | 步长 | `0` = 不重叠；`step < window_size` = 重叠窗口 |
+| `window_span` | 时间窗口，如 `7d`/`12h`/`180s` | 与 `window_size` 二选一；按**时间**切窗，采样不规则时每个窗口行数可以不同 |
+| `step_span` | 时间步长，如 `1d`/`60s` | 留空 = 不重叠；小于窗口跨度就是重叠窗口 |
+| `prediction_horizon` | 预测视野，如 `2d` | 只在 `label_policy=horizon` 下有效：窗口结束之后这么久内出现故障就标 1 |
+| `prediction_gap` | 预测间隔（禁入带） | 把视野整体推后，避免贴着故障起始的样本过易 |
+| `current_fault_policy` | 窗口自身已故障时怎么办：`drop`/`positive`/`negative` | 默认 `drop`：这些样本属于检测而不是预测，丢弃**并计数** |
+| `normal_label` | 哪个标签值算正常（默认 `0`） | 其它取值都算故障；标签是字符串时按字符串比较 |
+| `label_policy` | `strict`（默认）/ `last` / `mode` | 见下表 |
+特征行数 = **窗口数**：每组约"组内时长 / 步长"（按行切窗则是"组内行数 / 步长"），最后一个不完整的窗口丢弃。这与输入行数无关——48.9 万行原始数据配 `180s`/`60s` 得到 8081 行特征，步长换成 `180s` 就只剩 2700 行。
 
 ### `label_policy`
 
-| Policy | Behaviour | Use when |
+| 策略 | 行为 | 什么时候用 |
 | --- | --- | --- |
-| `strict` | a window whose label changes **inside** it fails the whole run | labels are constant per window by construction |
-| `mode` | majority label of the window | onset/degradation data — the normal real case |
-| `last` | label at the end of the window | you deliberately predict the state at the window end |
+| `strict` | 窗口内标签**变化**就让整次运行失败 | 按构造标签在每个窗口内恒定 |
+| `mode` | 取窗口内多数标签 | 起始点／退化数据——真实场景的常态 |
+| `last` | 取窗口末端标签 | 你明确要预测窗口结束时刻的状态 |
+| `horizon` | 用**未来视野**打标签：窗口结束加 `prediction_gap` 之后、`prediction_horizon` 之内出现故障就标 1 | 预测任务（故障发生前报警）——需要 `time_column`、`label_column`、`window_span` 与 `prediction_horizon` |
 
-If labels change over time (nearly every real fault dataset), `strict` **will** fail — that is
-correct behaviour, not a bug, and it happens exactly at the fault onset, which is usually the
-most interesting place in the data. Switch to `mode` (or `last`) and say which you chose.
+如果标签随时间变化（几乎每一份真实故障数据都是），`strict` **一定**会失败——这是正确行为不是 bug，而且它恰好发生在故障起始处，通常还是数据里最有意思的位置。改用 `mode`（或 `last`），并说明你选了哪个。
 
-### Checklist
+### 检查清单
 
- - [ ] every window component (and `data.quality`) shares identical `columns`, `group_column`, `time_column`, `window_size`, `step`
- - [ ] every validator is wired to both `features` **and** `labels` from the same window component
- - [ ] `window_size`/`step` chosen against the real sampling rate, not copied from an example
- - [ ] label policy stated with its reason
+ - [ ] 每个窗口组件（以及 `data.quality`）的 `columns`、`group_column`、`time_column`、`window_size`、`step` 完全一致
+ - [ ] 每个验证器的 `features` **与** `labels` 都来自同一个窗口组件
+ - [ ] `window_size`/`step` 是按真实采样率定的，不是从示例抄来的
+ - [ ] 标签策略与所选理由都写出来了
 
-### Watch out for
+### 注意事项
 
- - Row-level labels are not window labels. `data.labels` returns one label per raw row; feeding
-   it to a model alongside windowed features mismatches lengths and fails.
- - `window_size=0` silently collapses each group to a single row — right for whole-run
-   classification, wrong for onset detection.
- - Fan-out from one window component to several consumers is fine; joining two window
-   components back together requires `feature.merge` and matching provenance.
+ - 行级标签不是窗口标签。`data.labels` 给的是每原始行一个标签；和窗口特征一起喂给模型会长度不匹配而失败。
+ - `window_size=0` 会把每组悄悄压成一行——整段分类正确，起始点检测错误。
+ - 一个窗口组件扇出给多个消费者没问题；把两条窗口分支合起来必须走 `feature.merge`，且来源一致。
 
-## Stage 4 — Features (§5)
+### 预测任务长什么样
 
-### Which branch answers which question
+按时间窗口加未来视野：窗口 `[t, t+span)` 是"手上的证据"，标签取自 `(t+span+gap, t+span+gap+horizon]` 这段未来。真实 3W 数据实测（489,456 行 / 28 个实例，窗口 `180s`、步长 `60s`、视野 `1h`）：得到 **3370 个窗口、正类占 26.9%**，同时丢弃 **4380 个"自身已故障"**与 **331 个"视野超出数据"**的窗口。两个丢弃数必须写进汇报，否则"样本为什么变少、为什么不能用"就没人知道。
 
-| Question about the signal | Branch |
+两条硬规矩：视野超出可用数据的窗口**不能标 0**（"没看到故障"不等于"没有故障"）；窗口自身已经故障的样本也不属于预测任务。两者都由平台丢弃并计数，写进 `attrs` 并以警告形式给出。
+
+## 阶段 4 — 特征（§5）
+
+### 哪类问题用哪个分支
+
+| 关于信号的问题 | 用哪个分支 |
 | --- | --- |
-| level and shape (mean, std, variance, RMS, skewness, kurtosis, quantiles, range, IQR, MAD, peak, crest factor) | `feature.statistical` |
-| trend / degradation rate | `feature.fitting` (`linear`, `polynomial` + `degree`, `exponential`) |
-| rotation, resonance, periodicity | `feature.spectral` — needs `sampling_rate` and real variation |
-| complexity and irregularity | `feature.entropy` (`approximate_entropy`, `information_entropy`) |
-| short-term dynamics without windowing | `feature.temporal` (differences, rolling autocorrelation) |
-| rolling summary kept row-aligned | `feature.rolling_statistics` |
-| discrete attributes (category, mode, grade) | `feature.categorical` → `encoder` port |
-| features already computed in the table | `feature.select` |
+| 水平与形状（mean、std、variance、RMS、偏度、峰度、分位数、极差、IQR、MAD、峰值、波峰因数） | `feature.statistical` |
+| 趋势／退化速率 | `feature.fitting`（`linear`、`polynomial` + `degree`、`exponential`） |
+| 旋转、共振、周期性 | `feature.spectral`——需要采样率，且通道真有变化 |
+| 复杂度与不规则性 | `feature.entropy`（`approximate_entropy`、`information_entropy`） |
+| 不切窗的短时动态 | `feature.temporal`（差分、滚动自相关） |
+| 保持行对齐的滚动汇总 | `feature.rolling_statistics` |
+| 离散属性（类别、模式、等级） | `feature.categorical` → `encoder` 端口 |
+| 特征已经算好在表里 | `feature.select` |
 
-### Rules that are enforced, not stylistic
+### 被强制执行的规则
 
- - **Merging requires identical provenance.** `feature.merge` needs exactly equal feature
-   indices, identical source rows, identical `groups`/`assets`/`source_path`/`source_id`, and
-   **disjoint column names** (overlap fails with `Feature names overlap; rename before
-   merging`). Two branches built from the same columns/window/step/group always merge; a branch
-   that filtered, resampled or changed the window will not.
- - **NaN features cannot enter a model.** Sources of NaN: flat windows in spectral output
-   (`flat_policy=nan`), short groups, missing raw values. Insert `feature.imputation`
-   (`mean`, `median`, `zero`, `drop_columns`; `fill_value` for a constant) between the features
-   and the model. If you forget, the model error names the offending columns. Report how much
-   was filled.
- - **Categorical is a fitted pair.** `feature.categorical` fits and emits an `encoder`; reuse it
-   through `feature.categorical_transform` instead of refitting on new data. Validators embed
-   upstream categorical encoders in the trained model.
- - **Exploration outputs are terminal.** `visual.*`, `explore.*` and the
-   `report`/`plot`/`StatisticsResult`/`CorrelationMatrix` ports are for the human, not model
-   inputs.
- - **`feature.score_select` and `feature.pca` are fitted on all rows**, so they see the holdout.
-   Two acceptable uses: (a) on an inspection branch, to understand structure; (b) before a
-   model, only while reporting the leakage warning as a caveat. Their ranking is never
-   validated evidence.
- - **`feature.spectral` needs a known sampling rate.** `sampling_rate` is required and has no
-   default; if nobody knows it, ask instead of guessing. A channel that holds or quantises
-   values produces flat windows: with `flat_policy=nan` (default) those rows keep alignment and
-   get NaN spectra (impute afterwards), `skip` drops the windows (only safe when nothing must
-   merge with them), `error` restores the hard failure. Variation that exists only at the window
-   edges also counts as flat, because a Hann taper is zero there.
+ - **合并要求来源完全一致。** `feature.merge` 需要索引完全相同、来源行相同、`groups`/`assets`/`source_path`/`source_id` 相同，并且**列名不相交**（重叠会报 `Feature names overlap; rename before merging`）。用同样的 columns/window/step/group 建出来的分支永远能合；被过滤、重采样或改过窗口的那条合不了。
+ - **NaN 不能进模型。** NaN 的来源：频域平窗口（`flat_policy=nan`）、过短的组、原始缺失值。在特征与模型之间插 `feature.imputation`（`mean`、`median`、`zero`、`drop_columns`，常数用 `fill_value`）。忘了插的话，模型报错会点名具体列。填了多少要报出来。
+ - **类别特征是拟合出来的配对。** `feature.categorical` 会拟合并输出 `encoder`；新数据上通过 `feature.categorical_transform` 复用它，不要重新拟合。验证器会把上游的类别编码器内嵌进训练好的模型。
+ - **探索类输出是终端。** `visual.*`、`explore.*` 以及 `report`/`plot`/`StatisticsResult`/`CorrelationMatrix` 端口是给人看的，不是模型的输入。
+ - **`feature.score_select` 与 `feature.pca` 在全部行上拟合**，因此见过留出集。两种可接受的用法：在检查分支上理解结构；或在模型前使用，但把泄漏警告当作前提条件一起汇报。它们的排序永远不是验证过的证据。
+ - **`feature.spectral` 需要已知采样率。** `sampling_rate` 必填且无默认值；没人知道就问，不要猜。保持值或量化值的通道会产生平窗口：默认 `flat_policy=nan` 会保住行对齐、给出 NaN 频谱（之后再填补），`skip` 会丢掉这些窗口（只有当没有东西必须与它们合并时才安全），`error` 恢复硬失败。只在窗口两端出现的波动也算平窗口，因为 Hann 窗在两端为零。
 
-### Checklist
+### 检查清单
 
- - [ ] every feature branch shares window parameters and merges without rename conflicts
- - [ ] `feature.imputation` sits before every model whenever a NaN source exists
- - [ ] exploration/visual nodes hang off as terminal branches
- - [ ] you can name the columns the model will actually see
+ - [ ] 每条特征分支窗口参数一致，合并时没有列名冲突
+ - [ ] 只要存在 NaN 来源，模型前就有 `feature.imputation`
+ - [ ] 探索／可视化节点都挂在终端分支上
+ - [ ] 你能说出模型真正会看到哪些列
 
-### Inspecting the intermediate table
+### 检查中间产物
 
-Feature branches are inspectable in place: `visual.overview` (rows, columns, dtypes, missing
-rates), `visual.histogram` (distributions), `visual.line` (a few channels) and
-`explore.correlation` (redundancy) all accept a `FeatureDataset` as well as a raw `Dataset`.
-Hanging one of them on the branch you actually model costs a single node and turns "the agent
-says the features are fine" into something a fault engineer can look at; quote its numbers in
-the report.
+特征分支可以直接检查：`visual.overview`（行数、列名、类型、缺失率）、`visual.histogram`（分布）、`visual.line`（看几路通道）、`explore.correlation`（冗余度）都同时接受 `FeatureDataset` 与原始 `Dataset`。往你真正建模的那条分支上挂一个，只花一个节点，就把"Agent 说特征没问题"变成故障工程师能直接看的东西；把它的数字写进汇报。
 
-## Stage 5 — Validation (§6)
+## 阶段 5 — 验证（§6）
 
-`split_method` on `validation.random_forest`, `validation.svm`, `validation.decision_tree` and
-`validation.reservoir_classifier` (`stratified` default; `asset` supported). Regression is the
-exception: `validation.linear_regression` offers `random` (default), `group` and `temporal` —
-there is no asset holdout for it, so state that limitation instead of pretending otherwise:
+`split_method` 出现在 `validation.random_forest`、`validation.svm`、`validation.decision_tree`、`validation.reservoir_classifier` 上（默认 `stratified`，支持 `asset`）。回归是例外：`validation.linear_regression` 只有 `random`（默认）、`group`、`temporal`，没有资产留出——如实说明这个限制，而不是假装有。
 
-| Method | Holds out | Use when |
+| 方式 | 留出什么 | 什么时候用 |
 | --- | --- | --- |
-| `stratified` | random rows, class-proportional | rows are independent: no windows, no repeated instances |
-| `group` | whole values of `group_column` (**instances**) | overlapping windows, or one instance per asset |
-| `asset` | whole assets (needs `asset_column` upstream) | "will this work on equipment we have never seen?" |
-| `temporal` | later rows, purging training rows that share raw data with test | forecasting and real deployment order |
+| `stratified` | 随机行，按类别比例 | 行彼此独立：没有窗口、没有重复实例 |
+| `group` | `group_column` 的整组（**实例**） | 有重叠窗口，或一个资产只有一个实例 |
+| `asset` | 整个资产（上游需要 `asset_column`） | "这套东西在没见过的设备上管用吗？" |
+| `temporal` | 靠后的行，并清洗掉与测试集共享原始数据的训练行 | 预测未来、按真实部署顺序评估 |
 
-`stratified` refuses overlapping or repeated data (`Overlapping windows require group or
-temporal split`) — a guardrail, not an obstacle.
+`stratified` 会拒绝重叠或重复的数据（`Overlapping windows require group or temporal split`）——护栏，不是障碍。
 
-### Asset-level holdout recipe
+### 资产留出配方
 
-1. `data.asset_key(column="<instance key>", target="asset", mode="split", separator="_",
-   index=0)` — or `mode="regex"` with one capture group. It derives the asset from the instance
-   key (`WELL-00001_20170201…` → `WELL-00001`).
-2. Set `asset_column="asset"` on **every** window component and on `data.quality`.
-3. Set `split_method="asset"` on every classifier. It requires the asset attribute and at least
-   two assets; the error messages name the missing piece.
+1. `data.asset_key(column="<实例键>", target="asset", mode="split", separator="_", index=0)`，或用 `mode="regex"` 配一个捕获组。它从实例键推出资产（`WELL-00001_20170201…` → `WELL-00001`）。
+2. 在**每一个**窗口组件以及 `data.quality` 上设 `asset_column="asset"`。
+3. 在每个分类器上设 `split_method="asset"`。它要求资产属性且至少两个资产；报错会点名缺哪一块。
 
-### Why `group` is not an asset holdout
+### 为什么 `group` 不是资产留出
 
-One asset usually contributes several instances, so a held-out "group" still leaks that asset
-behaviour into training. Measured on real 3W data (28 instances, 10 wells, 8 091 windows, 72
-features, RF-300):
+一个资产通常贡献多个实例，所以被留出的"组"仍会把该资产的行为泄漏进训练。真实 3W 数据实测（28 个实例、10 口井、8091 个窗口、72 个特征、RF-300）：
 
-| split | accuracy | balanced acc. | ROC-AUC | PR-AUC | miss rate | unseen test assets |
+| 切分 | accuracy | balanced | ROC-AUC | PR-AUC | miss rate | 测试集未见资产 |
 | --- | --- | --- | --- | --- | --- | --- |
-| `group` (instance) | 0.638 | 0.621 | **0.716** | 0.804 | 0.231 | 0 / 6 |
-| `asset` (leave-one-well-out) | 0.606 | 0.568 | **0.528** | 0.611 | 0.270 | 3 / 3 |
+| `group`（按实例） | 0.638 | 0.621 | **0.716** | 0.804 | 0.231 | 0 / 6 |
+| `asset`（留一井） | 0.606 | 0.568 | **0.528** | 0.611 | 0.270 | 3 / 3 |
 
-The same model and features lose ~0.19 AUC once the split becomes honest. Report coverage that
-way; never present the instance-level number as deployment performance.
+同一套模型与特征，在切分变诚实之后掉了约 0.19 AUC。汇报时必须这样给：**永远不要把实例级的数字说成部署性能**。
 
-### Reading a metrics payload
+### 指标字典
 
-| Key | Why you care |
+| 键 | 为什么要看 |
 | --- | --- |
-| `accuracy` | headline, misleading under imbalance |
-| `balanced_accuracy` | class-size-corrected accuracy — prefer it when faults are rare |
-| `roc_auc`, `average_precision` | ranking quality; PR-AUC is the one that matters for rare faults |
-| `per_class_recall`, `train_class_counts`, `test_class_counts` | which class is silently missing (original labels, not encoded) |
-| `confusion_matrix` | where the errors are |
-| `positive_class`, `miss_rate` | miss rate for the fault class; set `positive_class` when the label order is unclear |
-| `coverage` | `train_instances`/`test_instances`/`test_instances_unseen` and the asset equivalents |
-| `warnings` | leakage, unavailable AUC, flat windows, evictions |
+| `accuracy` | 头条数字，类别不平衡时会骗人 |
+| `balanced_accuracy` | 按类别规模校正过的准确率——故障稀少时优先看它 |
+| `roc_auc`、`average_precision` | 排序质量；稀有故障看 PR-AUC |
+| `per_class_recall`、`train_class_counts`、`test_class_counts` | 哪个类被悄悄漏掉了（是原始标签，不是编码后的） |
+| `confusion_matrix` | 错在哪里 |
+| `positive_class`、`miss_rate` | 故障类的漏报率；标签顺序不明确时显式指定 `positive_class` |
+| `coverage` | `train_instances`/`test_instances`/`test_instances_unseen` 及对应的资产口径 |
+| `warnings` | 泄漏、AUC 不可用、平窗口、缓存驱逐 |
 
-Always fetch `coverage` and quote it next to the score: "3 of 3 test wells were unseen" is the
-sentence that makes the number mean something.
+永远把 `coverage` 和分数一起报："3 个测试井全是训练时没见过的"这句话才让那个数字有意义。
 
-`validation.compare` compares up to three metrics payloads on **identical holdout rows** and
-refuses mismatched test indices, so only compare runs sharing features, labels, split method,
-`test_size` and `random_state`.
+`validation.compare` 比较最多三份指标载荷，前提是**留出行完全相同**，测试索引不一致会直接拒绝；所以只有特征、标签、切分方式、`test_size`、`random_state` 都一致的运行才能互相比较。
 
-### Checklist
+### 检查清单
 
- - [ ] the split method matches the data structure (windows → group/asset/temporal)
- - [ ] asset-level question? `asset_column` set everywhere and `split_method=asset`
- - [ ] `coverage` read and quoted
- - [ ] models compared with identical everything except the estimator
- - [ ] warnings surfaced with the numbers
+ - [ ] 切分方式与数据结构匹配（有窗口 → group/asset/temporal）
+ - [ ] 要回答资产级问题？`asset_column` 到处都设了，且 `split_method=asset`
+ - [ ] `coverage` 读了并且引用了
+ - [ ] 对比的模型除估计器之外完全一致
+ - [ ] 警告都和它的数字一起报出来了
 
-## Stage 6 — Execute and debug (§7)
+## 阶段 6 — 执行与排错（§7）
 
-### Status vocabulary
+### 状态词表
 
-Pipeline: `CREATED`, `VALIDATING`, `READY`, `RUNNING`, `SUCCESS`, `FAILED`, `CANCELLED`.
-Node: `PENDING`, `READY`, `RUNNING`, `SUCCESS`, `FAILED`, `SKIPPED` (skipped = an upstream
-result was unavailable).
+方案级：`CREATED`、`VALIDATING`、`READY`、`RUNNING`、`SUCCESS`、`FAILED`、`CANCELLED`。
+节点级：`PENDING`、`READY`、`RUNNING`、`SUCCESS`、`FAILED`、`SKIPPED`（skipped = 上游产物不可用）。
 
-There are two layers of "success": the *control* call succeeding (`success: true`) and the
-*run* succeeding (`status`). Querying a `FAILED` run is a successful query.
+"成功"有两层：控制调用成功（`success: true`）与运行成功（`status`）。查询一次 `FAILED` 的运行本身是一次成功的查询。
 
-### Iterating without recomputing everything
+### 不整图重算的迭代
 
- - `incremental=true` (default) reuses nodes whose fingerprint is unchanged, so editing one
-   parameter recomputes only it and its descendants.
- - `retry_node(pipeline_id, node_id)` (= `execute_from_node`) re-runs that node and everything
-   downstream, reusing valid upstream artifacts. Use it after fixing the failing node.
- - `execute_node` runs exactly one node.
- - `cancel_pipeline` stops a run; `get_history` lists per-node attempts with timings and the
-   `cached` flag.
- - Editing the graph invalidates the workspace: results are dropped and nodes read `PENDING`
-   ("Graph changed; run to refresh results").
+ - `incremental=true`（默认）复用指纹未变的节点，所以改一个参数只会重算它和它的下游。
+ - `retry_node(pipeline_id, node_id)`（等价 `execute_from_node`）重跑该节点及其下游，复用有效的上游产物。修好失败节点后用这个。
+ - `execute_node` 只跑一个节点。
+ - `cancel_pipeline` 停止运行；`get_history` 列出每个节点的尝试次数、耗时与 `cached` 标记。
+ - 编辑图会让工作区失效：结果被丢弃，节点回到 `PENDING`（"Graph changed; run to refresh results"）。
 
-### Reading a failure
+### 读懂一次失败
 
-`get_node_result` on the failed node returns `error` with the exception type, message, traceback
-lines and a parameter snapshot; the `input_summary` preview shows the first rows the component
-actually received. That preview is usually the answer — a constant column, a wrong dtype, a
-filter that matched nothing. Fix with `configure_components`, then `retry_node`.
+`get_node_result` 会返回失败节点的 `error`（异常类型、消息、traceback 行、参数快照），其中的 `input_summary` 预览显示组件真正收到的前几行。**答案通常就在预览里**——一整列常数、类型不对、过滤条件什么都没匹配到。改完用 `configure_components`，再 `retry_node`。
 
-### Checklist
+### 检查清单
 
- - [ ] `validate_pipeline` clean before executing
- - [ ] the run reached `SUCCESS`, or you can explain every `SKIPPED`/`FAILED` node
- - [ ] stack traces read, not just re-run
+ - [ ] 执行前 `validate_pipeline` 是干净的
+ - [ ] 运行到达 `SUCCESS`，或者你能解释每一个 `SKIPPED`/`FAILED` 节点
+ - [ ] 读了 traceback，而不是直接重跑
 
-## Stage 7 — Read the results (§8)
+## 阶段 7 — 读取结果（§8）
 
-Shapes by artifact type:
+各 `kind` 的载荷形状：
 
-| `kind` | Contents |
+| `kind` | 内容 |
 | --- | --- |
-| `table` | `shape`, `columns`, `dtypes`, preview rows, `missing_rate` over the preview |
-| `vector` | length, name, head |
-| `array` | shape, head |
-| `streamed` | the streamed dataset description (rows stay on disk) |
-| `model` | class name, feature list, number of embedded categorical encoders |
-| `transformer` | encoder description |
-| `object` | the mapping itself, with long arrays collapsed to `*_count` |
+| `table` | `shape`、`columns`、`dtypes`、预览行、预览范围内的 `missing_rate` |
+| `vector` | 长度、名字、前几个值 |
+| `array` | 形状、前几个值 |
+| `streamed` | 流式数据集的描述（行仍在磁盘上） |
+| `model` | 类名、特征列表、内嵌的类别编码器数量 |
+| `transformer` | 编码器描述 |
+| `object` | 映射本身，长数组折叠成 `*_count` |
 
-Read metrics from the validator `metrics` port and keep `include_indices=false`. The metrics
-payload already carries the confusion matrix, per-class recall and class counts, so you never
-need `train_indices`/`test_indices` to describe a result; pulling them is what previously flooded
-an agent context with 8 000 row numbers. Expand indices only when the rows themselves are the
-deliverable.
+指标从验证器的 `metrics` 端口读，并保持 `include_indices=false`。载荷里已经有混淆矩阵、每类召回与类别计数，所以描述一个结果根本不需要 `train_indices`/`test_indices`；把它们拉出来曾经把 8000 个行号灌进上下文。只有"行本身就是交付物"时才展开索引。
 
-## Stage 8 — Persist and hand off (§9)
+## 阶段 8 — 持久化与交接（§9）
 
- - `save_pipeline(pipeline_id, filename="...xml")` writes the graph under `storage_root` (XML
-   only, path confined to the storage directory). `get_pipeline_xml` returns the same document
-   inline; `load_pipeline(xml)` imports a new pipeline (a fresh id on collision);
-   `replace_pipeline(graph, expected_version=...)` overwrites with optimistic concurrency and
-   refuses stale versions (`Graph changed in another client; reload before editing`).
- - `save_checkpoint` / `load_checkpoint` / `list_checkpoints` snapshot graph **and** workspace
-   state (in memory; gone with the process). Restoring a checkpoint whose payloads were released
-   warns and recomputes the affected nodes.
- - `delete_pipeline(pipeline_id)` removes the pipeline, its workspaces, spilled files and
-   checkpoints. Use it after abandoning a failed attempt so the service does not accumulate
-   state.
- - Hand-off sentence: pipeline id, XML path, data path, split method, label policy, headline
-   metrics with coverage.
+ - `save_pipeline(pipeline_id, filename="...xml")` 把图写到 `storage_root` 下（只写 XML，路径被限制在存储目录内）。`get_pipeline_xml` 直接返回同一份文档；`load_pipeline(xml)` 导入为新方案（id 冲突时生成新 id）；`replace_pipeline(graph, expected_version=...)` 是带乐观并发的覆盖，版本过期会被拒绝（`Graph changed in another client; reload before editing`）。
+ - `save_checkpoint` / `load_checkpoint` / `list_checkpoints` 快照图**与**工作区（在内存里，随进程消失）。恢复一个产物已被释放的检查点会给出警告并重算受影响节点。
+ - `delete_pipeline(pipeline_id)` 删除方案、工作区、溢出文件与检查点。放弃一次失败尝试后用它，别让服务一直背着。
+ - 交接时说清楚：方案 id、XML 路径、数据路径、切分方式、标签策略、带覆盖情况的头条指标。
 
-## Large data and memory (§10)
+## 大数据与内存（§10）
 
-The workspace stores artifacts **by reference** (storing and previewing do not copy), can spill
-to disk under a byte budget, and streams when asked — but the bounds are real:
+工作区**按引用**存产物（存储与预览都不复制），可以在字节预算内溢写到磁盘，也可以按要求流式处理——但边界是真的：
 
- - **Bound the read first:** `columns` (projection) and `max_rows`, or Parquet `filters`
-   (predicate pushdown, e.g. `[["equipment", ">", 10]]`).
- - **Streaming above ~1 GB:** `data.input.streaming=true` + `chunk_rows`. Rows must be grouped
-   **contiguously** (sorted by the group column) and time-ordered inside each group. Exactly
-   these components accept a streamed dataset: `feature.statistical`, `feature.fitting`,
-   `feature.spectral`, `visual.overview` and `data.materialize`. Everything else — including
-   `data.quality`, entropy features, filters and plots — refuses with
-   `… cannot consume streamed input; insert data.materialize or turn streaming off on
-   data.input`. Plan the quality pre-check **before** switching streaming on, or accept a
-   materialized run and keep its warning.
- - A **single huge group** (one well, millions of rows) is still buffered whole. Split it into
-   instances or shrink the window.
- - The cache budget may evict results. With a spill directory (the server default) evicted
-   payloads are reloaded on demand; without one, the owning node is invalidated and the pipeline
-   drops to `READY` — re-run instead of assuming the numbers still exist. `get_server_info`
-   reports `evictions` and `spills` honestly.
- - If you analysed a bounded subset, the conclusion is about that subset: name the rows, columns
-   and filters that produced the number.
+ - **先给读取加边界：** `columns`（投影）与 `max_rows`，Parquet 还可以用 `filters`（谓词下推，例如 `[["equipment", ">", 10]]`）。
+ - **超过约 1 GB 用流式：** `data.input.streaming=true` + `chunk_rows`。行必须按组**连续**排列（先按组列排序），组内按时间有序。只有 `feature.statistical`、`feature.fitting`、`feature.spectral`、`visual.overview` 与 `data.materialize` 接受流式数据集；其它组件——包括 `data.quality`、熵特征、过滤与绘图——会以 `… cannot consume streamed input; insert data.materialize or turn streaming off on data.input` 拒绝。所以质量预检要么在打开流式之前先做，要么接受一次物化并保留那条警告。
+ - **单个超大组**（一口井、上百万行）仍会被整体载入。拆成实例，或者缩短窗口。
+ - 缓存预算会驱逐结果。有溢出目录时（服务默认如此）被驱逐的载荷按需重载；没有时拥有它的节点会失效、方案退回 `READY`——这时要重跑，而不是假设数字还在。`get_server_info` 会如实报告 `evictions` 与 `spills`。
+ - 如果你只分析了有界子集，结论就只关于这个子集：把产生该数字的行、列与过滤条件写出来。
