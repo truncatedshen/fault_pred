@@ -192,6 +192,45 @@ def _average_precision(estimator: Any, holdout: pd.DataFrame, y: np.ndarray, cla
         return None
 
 
+def _class_balance(y: np.ndarray, classes: np.ndarray) -> tuple[dict[str, int], dict[str, float]]:
+    """一侧样本（训练集或测试集）的类别构成：**计数 + 占比**。
+
+    为什么两样都要给：故障预测里正类常常只占几个百分点，光看 ``test_count=228``
+    看不出"这 228 行里只有 13 行是故障"。占比才是让 accuracy 可被正确解读的那个数字——
+    这也是为什么它是和 count 一起算、一起返回，而不是留给调用方自己除。
+    """
+    counted = {str(classes[label]): int(count) for label, count in zip(*np.unique(y, return_counts=True))}
+    total = int(len(y))
+    rates = {name: (count / total if total else 0.0) for name, count in counted.items()}
+    return counted, rates
+
+
+def _split_balance_findings(
+    train_counts: dict[str, int], test_counts: dict[str, int], positive_class: str | None
+) -> list[str]:
+    """切分本身是否还剩下两类样本——没有故障样本的测试集，指标全是假象。"""
+    notes: list[str] = []
+    only_train = [name for name in train_counts if name not in test_counts]
+    only_test = [name for name in test_counts if name not in train_counts]
+    if only_train:
+        notes.append(
+            f"Holdout split has no {', '.join(sorted(only_train))} rows: train {train_counts}, "
+            f"test {test_counts}. accuracy/balanced_accuracy/per_class_recall on this split say "
+            "nothing about that class — do not read them as a score."
+        )
+    if only_test:
+        notes.append(
+            f"Training split has no {', '.join(sorted(only_test))} rows: train {train_counts}, "
+            f"test {test_counts}. The model cannot have learned this class."
+        )
+    if positive_class is not None and not test_counts.get(positive_class):
+        notes.append(
+            f"The test set contains no positive ({positive_class}) rows; every metric here measures "
+            "the negative class only."
+        )
+    return notes
+
+
 def _positive_index(encoder: LabelEncoder, positive_class: str | None) -> int | None:
     """确定哪个类别算"故障类"，用于计算漏报率。
 
@@ -442,6 +481,16 @@ def validate_model(
         },
         index=features.index[test],
     )
+    # 训练/测试各自的类别构成：计数与占比一起给，"228 行测试集"才不是个没信息量的数字。
+    train_class_counts, train_class_rates = _class_balance(y[train], encoder.classes_)
+    test_class_counts, test_class_rates = _class_balance(y[test], encoder.classes_)
+    warnings.extend(
+        _split_balance_findings(
+            train_class_counts,
+            test_class_counts,
+            str(encoder.classes_[_positive_index(encoder, positive_class)]),
+        )
+    )
     metrics = {
         "algorithm": algorithm,
         "accuracy": float(accuracy_score(y[test], predicted)),
@@ -467,14 +516,10 @@ def validate_model(
                 ),
             )
         },
-        "test_class_counts": {
-            str(encoder.classes_[label]): int(count)
-            for label, count in zip(*np.unique(y[test], return_counts=True))
-        },
-        "train_class_counts": {
-            str(encoder.classes_[label]): int(count)
-            for label, count in zip(*np.unique(y[train], return_counts=True))
-        },
+        "test_class_counts": test_class_counts,
+        "train_class_counts": train_class_counts,
+        "test_class_rates": test_class_rates,
+        "train_class_rates": train_class_rates,
         "positive_class": str(encoder.classes_[_positive_index(encoder, positive_class)]),
         "miss_rate": _miss_rate(y[test], predicted, encoder, positive_class),
         "split_method": split_method,

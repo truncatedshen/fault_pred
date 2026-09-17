@@ -466,6 +466,266 @@ Registry 从 29 个扩展到 54 个组件，补齐时间重采样、数据切分
 补充（同轮）：使用反馈指出模块文档里"一行一个窗口"的表述有歧义，容易被读成"每个采样点一个窗口"。已改成明确的表述并把这条语义写成回归测试：**特征行数 = 窗口数**，每组约"组内时长 / 步长"（按行切窗则是"组内行数 / 步长"），与输入行数无关。实测同一份 48.9 万行数据：`180s`/`30s` → 16154 行、`180s`/`60s` → 8081 行、`180s`/`180s` → 2700 行、`180s`/`600s` → 818 行、`1h`/`1h` → 114 行。`tests/test_prediction_windows.py::test_feature_row_count_follows_the_window_and_step` 钉住这一点（步长 1d/2d/5d → 8/4/2 行，而输入是 240 行）。
 补充（同轮，MCP 接口面）：能力做出来了，但**对 Agent 不可发现**——修复前实测检索结果："未来 7 天 故障"与"滑动时间窗口"返回 0 个组件；"预测未来是否故障"只找到 `validation.arma`（时序基线，不是窗口预测）；关键词 "时间窗口" / "horizon" / "window_span" / "未来" 全部 0 结果。根因是四个窗口生产者的 `description` / `tags` / `search_keywords` 还停留在"窗口统计"。修复后（在同一层 HTTP/MCP 控制面复测）："预测未来是否故障" → `feature.statistical` / `feature.entropy` / `feature.fitting`；"故障预警" → `feature.fitting` / `feature.statistical` / `feature.entropy`；"prediction horizon" → `feature.statistical` / `feature.fitting` / `feature.spectral`；"时间窗口" / "预测" / "horizon" / "window_span" 都能命中四个窗口生产者；`tags=["prediction"]` 返回全部四个。新增守卫 `tests/test_catalogue_scale.py::test_prediction_capability_is_discoverable`（5 条意图 + 5 条关键词 + 标签 + schema 参数与 `label_policy` 枚举），元数据漂移会直接让测试变红。
 
+## 第十七轮：批次 1 + 批次 2 —— 把《完整组件》清单变成真实能力（2026-09-16）
+
+触发原因：`docs/完整组件1.md` 是逐条列出的能力清单，`docs/完整组件.md` 把它对账成 123 条，其中 28 条已是独立组件、24 条是已有组件的枚举取值、52 条零依赖可实现、19 条需要新依赖或语义澄清。用户要求把**批次 1 与批次 2 一起做**：打开已有枚举 + 补齐 12 个零依赖组件。
+
+改动（全部零新依赖）：
+
+| 类别 | 改动 |
+| --- | --- |
+| 打开已有枚举（组件数不变） | `feature.statistical` 的 `features` 由 15 项扩到 **35** 项（新增 20 个结构类：计数、位置、最长连续段、均值变化、二阶导、重复率、时间反转不对称、四个字面比较项）；`feature.rolling_statistics` 加 `variance`/`max`/`min`；`feature.temporal` 加 `sum_abs_change`/`peak_count`（带 `prominence` 过滤量化台阶）；`feature.entropy` 加 `binned_entropy` 别名 |
+| 新增组件（12 个） | `explore.peaks`、`explore.normality`、`explore.kl_divergence`、`explore.acf`、`explore.isotonic`、`explore.gbr_fit`、`data.polynomial_features`、`data.discretize`、`validation.ridge`、`validation.dbscan_detector`、`validation.pca_detector`、`validation.min_cluster_detector` |
+| 顺带扩展 | `data.imputation` 加 `method=max`/`min`（组内极值 → 整列极值回退）；`data.transformation` 加 `quantile_uniform`/`quantile_normal` |
+
+组件数 **56 → 68**（data 18 / feature 13 / validation 15 / explore 14 / visual 8）。所有新组件都带中文 `tags` 与 `search_keywords`——上一轮的教训是"能力做出来但检索不到等于不存在"。
+
+设计上刻意的取舍（都会出现在返回值或 metrics 里，不靠文档口头约定）：
+
+- **位置类特征按 0..1 归一化**（`argmax_first` 等除以 `len-1`），否则窗口长度不同的分支无法合并比较。
+- **`value_counts` 里的四个"比较型"特征**（`std_gt_range`、`variance_gt_std`、`max_repeated`、`min_repeated`）按清单字面实现为 0/1，并在文档里写明"是否对模型有用需要单独评估"，不假装它们已经被验证。
+- **数据质量与拟合范围**：`data.discretize` 的箱边界、`data.polynomial_features` 的列结构都在整表上决定，前者带探索性警告（`mark_fitted`），后者明确要求放在窗口切分之前。
+- **结论强度分层**：`explore.normality` 明确回报"p > alpha 只是没有拒绝正态"；`explore.isotonic` 声明 R² 是样本内且单调阶梯比直线灵活，不可与其他模型比 R²；`explore.gbr_fit` 默认 `test_size=0` 并警告样本内，给了留出集也会说明随机切分无视窗口重叠；`explore.kl_divergence` 明确方向 `KL(current ‖ reference)`。
+- **DBSCAN 的异常率不来自 `contamination`**：由 `eps`/`min_samples` 决定，这是与其他四种检测器**不同**的假设，metrics 里直接写明；`validation.pca_detector` 与 `validation.min_cluster_detector` 仍用 `contamination` 分位数，并声明那是预算假设。
+- **`validation.ridge` 与线性回归共用同一条流程**（`_regression_report`），切分语义、指标字段、系数表完全一致，否则"换个模型再比"就失去意义。
+- **`validation.min_cluster_detector` 的 `n_clusters=0`** 用轮廓系数自动选簇数（子样本上限 `silhouette_sample`），也顺带覆盖了清单里的"自动给出合理聚类"，并回报 `silhouette` 供判断簇结构是否真实存在。
+- **不重复实现**：清单里"数据重复数之和"与统计特征的 `duplicate_sum` 是同一件事，只在统计特征实现一次，`feature.temporal` 不再提供第二个同义特征。
+- **分组边界不许被跨过**：`explore.peaks` 与 `explore.acf` 都提供可选 `group_column`。没有它时，"设备 A 结尾 + 设备 B 开头"的拼接处会被数成一个峰、被算成一段长程相关——这两类结论都是假的，正是本项目一直在防的静默错误。分组后 `peaks` 的键是 `"<组>:<列>"`，ACF 的置信带按各组样本量单独计算，`max_lag` 取最短组的可用上限。
+
+验收：
+
+- Python **189 passed, 1 skipped**（新增 `tests/test_component_gap_closure.py` 27 项：数值正确性、中文检索可达性、图内端到端）。
+- `ruff check` 与 `ruff format --check src tests scripts` 通过。
+- `docs/components.md` 与 `docs/component-registry.json` 由 `scripts/export_catalog.py` 重新生成。
+- README / `docs/design.md` / skill（`SKILL.md` 附录 B 与 `references/components.md`）的清单与计数同步到 68；`tests/test_skill_guide.py` 的计数守卫与 `tests/test_catalogue_scale.py` 的门槛断言同步更新。
+
+未做（留给批次 3 与批次 4）：LevelShift / VolatilityShift / Seasonal / AutoRegression / ESD / Nsigma / 均值漂移等时序结构变化检测器（批次 3，零依赖但每条的判定口径需要先定）；ARIMA/SARIMAX/指数平滑/ADF/HP（statsmodels）、LSTM/AE/VAE（torch）、Prophet、小波（pywavelets）、ROCKA，以及"大数定理""请求量 VS 成功率""非线性属性""同比口径"等语义待澄清项（批次 4，需先决定依赖）。
+
+## 第十八轮：批次 3 + 批次 4 —— 结构变化检测与其余缺口（2026-09-16）
+
+触发原因：`docs/完整组件.md` 里的批次 3 与批次 4 还没落地，用户要求"继续批次三和批次四，删除依赖 torch 的组件，不实现这个"。
+
+组件数 **68 → 87**（data 19 / feature 14 / validation 27 / explore 19 / visual 8），无新的**强制**依赖。
+
+批次 3：七个时序结构变化检测器，全部零依赖，共同纪律是"把判定口径写进返回值"。
+
+| 组件 | 判定量 | 阈值来源 |
+| --- | --- | --- |
+| `validation.level_shift_detector` | 候选点前后各 window 点的均值差的 Welch t | `threshold`（t 量纲，默认 4） |
+| `validation.volatility_shift_detector` | 前后两段方差之比的对数，除以原假设抽样标准差 | `threshold`（与上一行同量纲） |
+| `validation.seasonal_detector` | 偏离参考段季节剖面的稳健 z 分数 | `threshold` |
+| `validation.autoregression_detector` | 参考段之外的 AR(p) 一步预测残差 z 分数 | `threshold` |
+| `validation.esd_detector` | Rosner 广义 ESD 的 R 统计量 | `alpha` + t 分布临界值 λ |
+| `validation.nsigma_detector` | 偏离中心 k 倍尺度（global/group/rolling） | `sigma` |
+| `validation.mean_drift_detector` | Page 的 CUSUM 累积偏差 | `slack` + `decision` |
+
+批次 4：零依赖部分全部实现，`statsmodels` 按 XGBoost 的既有先例做成**可选 extra**。
+
+- 零依赖：`validation.exponential_smoothing`（手写 Holt / Holt–Winters）、`validation.grid_search`（小网格 + 三种交叉验证）、`validation.kmeans`、`validation.one_class_svm`、`explore.hp_filter`、`explore.stationarity`（自建 ADF 回归 + MacKinnon 渐近临界值）、`explore.dtw`、`explore.sbd`、`explore.slope_cosine`、`data.seasonal_difference`、`feature.wavelet`（滚动 Haar 多尺度 + 细节峰个数）。
+- 可选依赖：`validation.arima`（`pip install 'fault-prediction-platform[statsmodels]'`；未安装时报错并给出这条命令，不回退到别的模型）。
+- **不实现**：LSTM / AE / VAE（torch，按要求删除）、Prophet（cmdstan 依赖链在 Windows 上不可靠）、ROCKA（论文定义未确认）、"大数定理 / 请求量 VS 成功率 / 基于 DTM 的朵 KPI / 非线性属性 / 基本可检测性"（语义待澄清），以及口径与已有组件重合的 Outlier / Regression 检测器。理由都写进了 `docs/完整组件.md` §8。
+
+过程中发现并修正的三处"看起来对、其实会误导"的问题（都属于口径问题，不是崩溃）：
+
+1. **波动率比不能当阈值用**。最初把 `|log(var_after/var_before)|` 直接比阈值，窗口 20 时它的原假设抽样标准差就有 `sqrt(2/19) ≈ 0.32`，于是 `threshold=0.5` 会把 39% 的行标成异常。改成按原假设归一化成 z 量纲后，同一个阈值在 LevelShift 与 VolatilityShift 里含义一致（实测：标准差放大 4 倍 → 方差放大 16 倍 → z ≈ 8.5；两段同分布时的误报回到 4σ 水平）。
+2. **`seasonal_strength` 不能在后半段算**。第一版在整条序列上算 `1 − var(残差)/var(原序列)`，结果一次后期阶跃把强度压到 0.24，看起来像"信号不季节"。改成只在参考段上算——它回答"这条序列本身有多季节"，"后来变没变"由分数与标记负责。
+3. **HP 的 λ 必须跟着报告走**。实测周期 24 的正弦在 λ=1600 处的高通增益只有约 0.77，即约 1/4 的周期方差会被算进趋势；`cycle_share` 因此不会接近 1。这条写进了 docstring 与返回值里的 `caveat`，避免"用了别人的 1600 却不说明"。
+
+分组纪律的回归测试：人造阶跃**正好落在两组数据的拼接处**，按 `group_column` 检测时七个检测器的告警数必须是 0（`tests/test_structural_detection.py::test_change_detectors_never_cross_group_boundaries`）。这条与 ACF / 山峰检测的同类测试一起，把"统计量绝不跨设备"从口号变成断言。
+
+验收：新增 `tests/test_structural_detection.py`（38 项）；全量 `pytest` **228 passed / 1 skipped**；`ruff check` + `ruff format --check src tests scripts` 通过；`docs/components.md`/`component-registry.json` 重生成；README / `docs/design.md` / skill 附录 B 与 `references/components.md` 的清单与计数同步到 87（实测 facets：data 19 / feature 14 / validation 27 / explore 19 / visual 8）。
+
+## 第十九轮：界面字号整体上调（2026-09-16）
+
+触发原因：使用反馈"前端字体整体有点偏小，特别是组件的那部分"。
+
+改法：`src/fault_platform/web/style.css` 末尾新增一段集中管理的**字号基线**，而不是去改文件上半部分那些压缩成一行、彼此耦合的规则。以后调字号只动这一段。原则：
+
+- 正文类统一 +1~1.5px；
+- **组件库（左栏）单独放大**：组件名 11 → 13px、分类标题 11 → 13px、子分类标题 9 → 11.5px、展开箭头 8 → 10px、分组计数 9 → 11px、左栏标签页 10 → 12px；
+- 画布与右栏：节点标题 12 → 13px、端口 10 → 11.5px、节点状态 8 → 10px、参数标签 10 → 11.5px、参数输入 11 → 12px、参数提示 9 → 11px、节点宽度 218 → 232px（字号变大后端口名需要更多横向空间）；
+- 结果面板：表格 10 → 11.5px、指标卡标签 9 → 10.5px、数值 22 → 23px、图例 10 → 11.5px、图表刻度 9 → 10.5px；
+- `remote.css` 的实时同步提示条 11 → 12px（它加载在 `style.css` 之后，必须单独改）。
+
+配套的两处取舍：
+
+1. **左栏垂直内边距收 1px**（子分类行 `padding:5px→4px`、`margin:4px→3px`；分类标题 `margin:14px→10px`）。字号变大行高必然涨，不收一点就会破坏"全部折叠后目录无需滚动"那条验收。
+2. **窄屏例外写在文件末尾**。原媒体查询里 `.brand{font-size:12px}`（≤850px）与我的 `.brand{font-size:16px}` 同选择器，后写者胜，所以末尾补了一条 `@media(max-width:850px)` 把窄屏收缩重新声明一次（13px / 9px，各比原来留 1px）。同理 `button{font-size:13px}` 不会盖掉 ≤1150px 里 `.toolbar button`（0,1,1 比 0,0,1 具体）。
+
+**为什么这次必须用脚本验收，而不是"看一眼截图"**：本会话不支持图像输入（`view_image` 被拒：`you do not support image inputs`），我看不到截图。所以 `scripts/browser_check.cjs` 新增三处**实测计算样式**的断言与数值上报：
+
+| 检查 | 实测值 |
+| --- | --- |
+| 组件库字号与裁切 | 组件名 13、分类头 13、子分类头 11.5、分组计数 11、左栏标签 12、筛选下拉 12、搜索框 13；行高 43px；**名字被裁切 0 个** |
+| 画布/右栏字号 | 节点标题 13、节点副标题 10、端口 11.5、节点状态 10、检查器正文 12、参数标签 11.5、参数提示 11、参数控件 12、节点宽度 232（用 `offsetWidth` 取未缩放的布局宽度） |
+| 结果面板字号 | 表格/表头/单元格 11.5、指标标签 10.5、指标数值 23、指标脚注 11.5、图例 11.5、图表刻度 10.5、结果说明 11 |
+
+断言的是**下限**（例如组件名不得 < 13px、名字不得被裁切），所以以后谁把字号改回去，验收会直接红。同时确认放大后布局没被撑坏：`fitsWithoutScroll: true`、`clippedHeaders: 0`、窄窗口三栏钳制检查仍然通过。
+
+验收：`node scripts/browser_check.cjs` 成功（新增 3 条检查）；`node --test tests/frontend.test.cjs` 8/8；全量 `pytest` 228 passed / 1 skipped；`ruff check` 与 `ruff format --check` 通过。
+
+## 第二十轮：skill 的"阶段作用"与新能力路由（2026-09-16）
+
+触发原因：使用反馈问"skill 有没有更新、需要说明各个阶段的作用"。查完之后发现的问题比预期严重：
+
+**批次 1~4 的 31 个新组件，只出现在 `references/components.md`，`SKILL.md` 的阶段正文与 `references/stages.md` 完全没提到它们。** 也就是说：组件做出来了、能被 `retrieve_components` 检索到，但一个**照阶段指引办事**的 Agent 永远走不到它们——它会在阶段 2 挂 `explore.periodicity`，不会想到 `explore.stationarity`/`hp_filter`/`acf`；在阶段 5 用 KNN/隔离森林，不会想到七个结构变化检测器。这是"能力存在但流程不路由"的断层，比组件缺失更难发现。
+
+这一轮补两件事：
+
+**1）把"每个阶段的作用"写到能看见的地方。**
+
+- `SKILL.md` 新增 §0.7 **阶段地图**：一张表列出侦察 + 八个阶段各自的「作用（它替你做的决定）／产出／敷衍它的代价」。三条读法写在表下：阶段 2/3/5 是诚实的三个关口，阶段 4 是唯一"越多越好"的阶段，阶段 6~8 是运维。
+- 八个阶段各自的正文前面补一行 `**作用：**`（比原来的 `**目标：**` 更靠前）：目标说"这一步要得到什么"，作用说"这个决定为什么重要、错了会怎样"。例如阶段 3 的作用是"决定一行特征代表哪段时间、标签从哪来——这是唯一无法事后补救的决定"。
+- `references/stages.md` 的八节同样各加一条 `**这个阶段的作用：**`。
+
+**2）把 31 个新能力路由进对应的阶段。**
+
+| 阶段 | 补进去的东西 |
+| --- | --- |
+| 1 数据准备 | 窗口之前的数据层变换：`data.polynomial_features`、`data.discretize`（箱边界整表拟合，带警告）、`data.seasonal_difference`（同比口径，每组前 `period` 行必然 NaN） |
+| 2 质量预检 | 自检表加一行"平稳吗/有趋势吗/记忆多长" → `explore.stationarity`/`hp_filter`/`acf`；stages.md 新增「这一步还能回答的问题（探索面）」表，收了 `peaks`/`normality`/`kl_divergence`/`dtw`/`sbd`/`slope_cosine`/`isotonic`/`gbr_fit`，每条都写明**结果里必须一起报的东西**（λ、caveat、best_lag、样本内 R² 等） |
+| 4 特征 | 新增「枚举值在两轮里扩过」表（`feature.statistical` 35 项、rolling 的 variance/max/min、temporal 的 sum_abs_change/peak_count、entropy 的 binned_entropy）；自检表加 `feature.wavelet`（并点明它是逐行对齐、不能与窗口分支合并） |
+| 5 验证 | 自检表加一行七个结构变化检测器；正文补 11 个新验证器的选择依据（ridge / 四个新无监督检测器 / one_class_svm / kmeans / exponential_smoothing / arima / grid_search）；stages.md 新增「先按问题挑方法，再按参数调」与「结构变化检测」两张表，把阈值口径（t 量纲 / z 量纲 / σ 倍数 / ESD 的 λ）逐条写清 |
+
+守卫测试当场抓到一个真实错误：我在 stages.md 里写了 `validation.gbr_fit`，实际组件是 `explore.gbr_fit`——`test_component_references_exist_in_the_registry` 直接报红。这正是"skill 不允许与代码漂移"的价值，也说明这批断言不是形式主义。
+
+覆盖复查（脚本逐条比对 31 个组件名）：现在**全部**出现在 `components.md` + `stages.md`，其中 17 个还出现在 `SKILL.md` 的决策/闸门里。分工是刻意的：`SKILL.md` 放决策与闸门，`stages.md` 放路由细节，`components.md` 放完整目录。
+
+验收：skill 守卫 **28 项**全过（含入口 ≤420 行、闸门 ≤6 条、无幽灵组件/工具、附录 B 计数与 Registry 一致）；官方 `quick_validate.py` 报 **Skill is valid!**；全量 `pytest` 228 passed / 1 skipped；`ruff check` 与 `ruff format --check` 通过。规模：`SKILL.md` 353 行、`stages.md` 350 行（均在上限内）。
+
+## 第二十一轮：把方案导出成 Python（封装好的图 API）（2026-09-16）
+
+触发原因：使用反馈"方案停留在 MCP 里，需要把当前方案导出为 Python 文件，是封装好的图 API 的文件"。此前只有 XML——XML 是给平台自己再导入用的，人改不了、也进不了版本管理。
+
+新增第 **39** 个控制操作 `export_python(pipeline_id, filename=None, include_code=False)`，MCP 桥自动生成同名工具。生成的 `.py`：
+
+* 把节点（id / 类型 / 参数 / 画布位置）与连线渲染成 `NODES` / `EDGES` 两个字面量元组；
+* 用 `ComponentGraph` + `ExecutionEngine` + `FaultWorkspace` 在本地重建并执行同一张图，**不连服务**；
+* `--data-root` 参数化（默认写死导出时服务的 `data_root`，换机器改一个参数）、`--no-execute` 只重建+校验、`--xml` 顺带导出 XML；
+* 默认只回路径（省 token），`include_code=true` 才回源码；路径规则与 `save_pipeline` 一致（限制在 `storage_root`、后缀 `.py`、先写临时文件再原子替换）；
+* 返回值带 `validation_problems`：未完成的图也能导出，但会列出"跑不起来"的原因。
+
+实现过程中修掉三个**只有真跑才会暴露**的问题，每个都补了回归测试（`tests/test_python_export.py`，7 项）：
+
+1. **Windows 路径把导出文件写成语法错误**。第一版把 `storage_root` 塞进模块 docstring，于是 `C:\Users\...` 里的 `\U` 被当成 unicode 转义 → `SyntaxError: (unicode error) 'unicodeescape' ... truncated \UXXXXXXXX escape`。这不只是边界情况：**Windows 上每个用户都会拿到一个打不开的 .py**。修法：路径只进注释（注释不解析转义），自由文本进 docstring 前把 `\` 加倍。
+2. **`--no-execute` 把 `--xml` 跳过了**。保真测试因此拿不到文件才发现：`--xml` 应该只在"重建图"这一步，跟要不要执行无关——重建出来的图本身就是要交付的东西。
+3. **`validation_problems` 用了 `require_complete=False`**，而那个档位按设计会放过"缺参数、必填输入没连线"，于是未完成的图报"没问题"。改成 `require_complete=True`（编辑态检查不是这里要的语义）。
+
+保真与可执行性是这一轮的验收核心，测试盯三件事：**保真**（脚本用 `--xml` 重建的图与源图做指纹比对：节点 id/类型/参数/位置 + 边，完全相等）、**可执行**（子进程里独立跑完，节点全 SUCCESS 且出指标）、**边界**（空方案拒绝、路径逃逸与错后缀拒绝、未完成图报出问题）。
+
+实战演示（HBM 方案，19 节点 / 25 边）：
+
+```
+1) MCP 工具 39 个；含 export_python = True
+2) load_pipeline 从 XML 恢复方案：pipeline_50b673fd1f1b（19 节点）
+3) export_python → .fault-platform/pipelines/HBM.py（397 行 / 11967 字符 / 0 校验问题）
+4) 服务端重跑：[服务] rf_time auc=0.966444841827394 miss=0.49333333333333335
+5) 子进程直接跑 HBM.py：exit=0，status: SUCCESS
+   [rf_time] balanced_accuracy=0.7378460424915911（与服务端**逐位一致**）
+```
+
+第 5 步是关键：导出的文件在**没有服务**的子进程里复现了同一批数字，说明它是真的"封装好的图 API"，而不是一份需要服务才能读的配置文件。
+
+验收：`pytest` **236 passed / 1 skipped**（新增 7 项）；`ruff check` + `ruff format --check src tests scripts` 通过；`verify_deploy --from-config` **14/14**（MCP 端到端已按 39 工具运行）；`mcp_smoke --from-config` 退出码 0。文档同步：README §6.3、`docs/design.md` §11.2、`docs/mcp.md`、skills 附录 A 的工具数与分组，以及 `SKILL.md` §9 新增"XML 与 Python 怎么选"。`tests/test_skill_guide.py::test_every_control_operation_is_documented` 在补文档前是红的——这类漂移依旧由守卫测试拦住。
+
+## 第二十二轮：多数据源（入口合并 + 运行期整组替换）（2026-09-16）
+
+触发原因：使用反馈"又有新的数据，和原来的数据是一样的，想加入已经生成的方案，直接运行就可以；希望 MCP 支持多个数据源"，随后补充"其实你就在最开始把数据合并一下就行"。
+
+两条路分开做，语义不混：
+
+| 路径 | 机制 | 特点 |
+| --- | --- | --- |
+| **入口合并**（持久） | `data.input` 新增 `paths`（`path` 之后按顺序追加）与 `source_column` | 多份同构数据在**入口拼成一份 `Dataset`**，下游窗口/特征/验证器零改动 |
+| **运行期整组替换**（临时） | `execute_pipeline(dataset_overrides={node: str \| list[str]})` | 同一张图换一批数据跑：**是执行参数不是编辑**——图不变、已有结果不失效；文件指纹跟着变，增量复用不会拿旧数据冒充 |
+
+刻意定死的规则（每条都有测试）：列集合必须一致（缺列/多列报错并点名 —— 静默补 NaN 会让"两台机器数据结构不同"一路漂到模型里）；列顺序按第一份对齐；合并后索引重排 `0..N-1`（各文件索引都从 0 开始，不重排会重复）；`source_id` 是各文件摘要**按顺序**再哈希（改任意一份或换顺序都会重算；**单源时返回值与旧版逐字一致**，已有方案缓存不失效）；`streaming=true` 与多源互斥（流式描述符只描述一个文件，静默只读第一个是错的）；覆盖一律**整组替换**，不做"覆盖第一个、保留其余"的混合语义。
+
+本轮修掉两个真问题：
+
+1. **运行期覆盖的类型注解与实现不一致**：签名写的是 `dict[str, str]`，多文件要传列表 → pydantic 在桥这一层就拒了。改成 `dict[str, str | list[str]]`。这个错误被演示脚本暴露出来时还绕了一下——因为 MCP 桥在校验失败时返回的是**文本**而不是 JSON，脚本里的 `json.loads` 只抛出 "Expecting value: line 1 column 1"，真正的报错被吞了；修法是让脚本先带出原文再解析。
+2. **`get_node_result` 从来没返回节点自身的 warnings**（真 bug）：运行时一直把组件返回的 warnings 收进 `ws.node_warnings`，但服务层只回方案级提示，于是"这次读的是覆盖数据源""输入被裁剪过"这类警告在节点级**读不到**——而 `SKILL.md` §8 明确写着这个接口返回 `{status, outputs, error, warnings}`。改成"节点警告 + 方案级提示"两者拼接，并补了回归测试。
+
+真实数据演示（HBM 方案：把 62,930 行拆成两个 31,465 行的同构分片，图参数不改）：
+
+```
+2) 从 XML 恢复方案；source.path='hbm/data_for_row-level_prediction.csv' paths=[]
+3) 基线（图里的单个源）：[62930, 23]
+4) 覆盖为两份：dataset_overrides={'source': ['hbm/part1.csv', 'hbm/part2.csv']}；状态=SUCCESS
+   合并后 shape=[62930, 23]                 ← 31,465 × 2，与单源逐行一致
+   [影响下游] rf_time: balanced=0.7378460424915911 miss=0.49333333333333335 test=15733
+5) 图有没有被改：path='hbm/data_for_row-level_prediction.csv' paths=[]   ← 与步骤 2 相同
+```
+
+模型指标与单源运行**逐位一致**，说明拼接是忠实的；`rf_time` 的 `metrics["warnings"]` 里能看到两条：`Reading ['hbm/part1.csv', 'hbm/part2.csv'] from a dataset override; the graph says [...]` 与 `Combined 2 sources into one dataset (62930 rows, index renumbered)` —— "这次读的是哪几份"进了结论，而不是留在过程里。
+
+验收：新增 `tests/test_multi_source_input.py`（8 项：拼接行数/索引重排、列顺序对齐与 schema 不一致拒绝、`source_column`、指纹覆盖每个文件且单源不变、流式互斥、运行期整组替换且图参数不变、坏覆盖被拒、节点警告可见）；全量 `pytest` **244 passed / 1 skipped**；`ruff check` + `format --check` 通过；`docs/components.md` 重生成（`data.input` 的 `paths`/`source_column` 进 schema）。文档同步：README 新增 §6.3a、`docs/design.md` §11.2a、skill `SKILL.md` 阶段 1、`references/stages.md` 阶段 1。
+
+## 第二十三轮：`data.concat`（画布上的多数据源合并）（2026-09-16）
+
+触发原因：使用反馈"增加数据合并组件，这样我可以在前端自己增加数据源之类的"。上一轮的多源入口有两个是"参数/调用"（`data.input.paths`、`execute_pipeline(dataset_overrides=…)`），但前端用户希望**在画布上自己拉几条输入线再接起来**。
+
+新增第 **88** 个组件 `data.concat · 数据拼接`（data 20 / feature 14 / validation 27 / explore 19 / visual 8）：
+
+```
+data.input(a.csv) ─┐
+data.input(b.csv) ─┼─► data.concat ──► 下游窗口/特征/验证器（零改动）
+data.input(c.csv) ─┘   first / second（必填）+ third / fourth（可选）
+```
+
+设计要点与理由：
+
+| 决定 | 理由 |
+| --- | --- |
+| 固定 4 个输入端口（2 必填 + 2 可选），超过就串联 | 端口是类级声明，不能动态增减；`first`/`second` 必填 → 半接线的图在 `validate_pipeline` 阶段就报错（与 `feature.merge` 同一约定），而不是等到运行才炸 |
+| 列集合必须一致、顺序按 `first` 对齐、索引重排 `0..N-1` | 与 `data.input.paths` 的规则**刻意保持一致**（同一件事的两个入口，规则漂移会让人猜不透）；静默补 NaN/丢列会让"两份数据结构不同"一路漂到模型里 |
+| 空输入直接报错 | 空表通常是"过滤条件什么都没匹配到"，静默拼进去等于把这个信号藏起来 |
+| `source_column` 写**输入端口名**（不是文件路径） | concat 坐在数据源之上：端口名在"单文件、多文件、运行期覆盖、链式合并"四种情况下都成立；要看具体文件，用上游 `data.input` 的 `source_column`（它写文件路径） |
+| 数据逻辑放 `fault_core.advanced_data.concat_by_rows`，组件只做薄适配 | 平台纪律：`fault_core` 可离线复用、组件层只声明元数据与端口 |
+
+顺手改掉一处"生成的文档不够诚实"：`scripts/export_catalog.py` 之前只给**输出**端口标"（可选）"，输入端口一律不标——多个可选输入的组件（`data.concat`、`validation.compare`、`visual.anomaly`）光看 `docs/components.md` 判断不出哪些必须接。现在输入端口也标了。
+
+演示里还暴露并修掉第三个问题：**`data.quality` 的"重复行"按整张表判定**（`data.duplicated()`）。于是给数据加一列簿记信息（`data.concat` 的 `source_column`、上游 `data.input` 的同名列）就会让重复数变小——同一个检查的含义被一个与数据质量无关的列改变了。改成按**参与检查的列**判定，并在 detail 里写明范围（`identical in the 22 checked column(s)`）。实测同一份 HBM 数据：旧口径 19,335 → 新口径 **19,342**，多出来的 7 行正是"22 个测量列完全相同、只有标签不同"的行——恰恰是这个检查最该抓出来的那类；加不加 `source_file` 列，数字现在都是 19,342。
+
+验收：新增 5 项测试（并入 `tests/test_multi_source_input.py`，该文件共 **12 项**）：两源/四源拼接与索引重排、只接一条被结构校验拦下（并钉住底层函数对单表是原样返回）、`source_column` 写下端口名、schema 不一致报错并点名端口与列、检索与 schema 可发现性（4 个端口 + required 标记正确）。全量 `pytest` **248 passed / 1 skipped**；`ruff check` + `format --check` 通过；`docs/components.md`/`component-registry.json` 重生成（含新的可选输入标记）。文档同步：README §6.3a、skill `SKILL.md` 阶段 1、`references/components.md` 数据段（19 → 20）、`docs/完整组件.md`（"数据拼接"标 ✅ + 第四轮说明）。
+
+## 第二十四轮：正负样本比例一路可见（概览 + 验证指标）（2026-09-16）
+
+触发原因：使用反馈"当前相关的组件中只显示了测试集数量、训练集数量，没有分别显示测试集和训练集中正负样本的比例。这是一个很重要的指标。在数据概览里面也应该显示正样本和负样本的比例"。
+
+这一条不是排版问题，是**读数字的前提**。`test_count=228` 与"228 行里只有 13 行是故障"是两回事；
+只看前者，一个"永远判正常"的模型（`accuracy=1.0`、`balanced_accuracy=0.5`、`miss_rate=1.0`）
+看起来就是满分。本轮把这个数字放到它该在的三个位置：
+
+| 位置 | 之前 | 现在 |
+| --- | --- | --- |
+| `validation.*` 的 metrics 载荷 | 只有 `train_class_counts`/`test_class_counts`（计数） | 增加 `train_class_rates`/`test_class_rates`（占比，与计数一起算，调用方不用自己除） |
+| 组件结果面板 | 只写"训练 756 / 测试 155" | 新增**正负样本构成**表（训练/测试 × 类别 × 数量 × 占比），并补 `balanced_accuracy`/`PR-AUC`/`miss_rate` 三张卡片 |
+| `visual.overview` | 与标签无关 | 新增 `label_column` 参数与**可选** `labels` 输入端口，输出 `label_distribution`（计数/占比/正类） |
+
+三个设计决定：
+
+| 决定 | 理由 |
+| --- | --- |
+| 占比由平台算，而不是让调用方拿 count 除 | 平台已经在算 count；分开算就会出现"两边口径不一致"，这恰恰是最该一致的一对数 |
+| `visual.overview` 给**可选**的 `labels` 端口，而不是放宽 `dataset` 端口 | 特征分支上标签是独立产物（`stat.labels`）。放宽 `dataset` 会让"概览能接标签向量"这种语义上行不通的连接也被放行；`tests/test_graph_runtime.py` 里那条"标签向量接进 dataset 端口必须被拒绝"的断言继续成立 |
+| `label_column` 写错时直接报错 | 静默跳过会让人以为"标签是均衡的"——这正是本轮要消灭的误读 |
+
+同时补了两条**诚实告警**（写进 `metrics["warnings"]`，前端与 MCP 都会原样带出）：
+
+- `Holdout split has no 1 rows: train {…}, test {…}. accuracy/balanced_accuracy/per_class_recall on this split say nothing about that class — do not read them as a score.`
+- `The test set contains no positive (1) rows; every metric here measures the negative class only.`
+
+`label_distribution` 在正类低于 10% 时也会自己给结论句（`Label is imbalanced: positive class 1 is 41/911 (4.50%)…`），
+正类恒为 0 时直接说"这个标签没法训练"。批处理与流式两条路都收敛到同一个 `_distribution_from_counts`，
+所以 `overview` 与 `overview_stream` 的计数、占比、结论句**逐字一致**（有测试钉住）。
+
+验收：新增 `tests/test_class_balance.py` **11 项**（列/向量两种标签来源、缺失标签计数、流式与批量一致、
+写错列报错、占比与计数自洽、留出集缺类告警、特征分支上 `stat.labels → overview.labels` 端到端）。
+全量 `pytest` **259 passed / 1 skipped**；`ruff check` + `format --check` 通过；
+`docs/components.md` 与 `docs/component-registry.json` 重生成（`visual.overview` 多一个可选输入端口与一个参数）。
+文档同步：skill `SKILL.md` §12.8、`references/stages.md` 指标字典与阶段 5、`references/components.md` 可视段。
+
 ## 首版边界
 
 - 核心工程和入口完整；单 DAG 串行调度，两个独立方案可同时执行。

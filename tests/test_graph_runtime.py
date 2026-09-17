@@ -46,6 +46,62 @@ def test_xml_roundtrip_and_reject_bad_xml(pipeline, registry):
             XMLParser(registry).loads(bad)
 
 
+def test_xml_tolerates_a_new_optional_port_but_not_a_changed_one(pipeline, registry):
+    """端口"只增一个可选口"是向后兼容的：旧 XML 不该因为平台加了个可选输入就废掉。
+
+    实测背景：给 `visual.overview` 加可选 `labels` 输入端口之后，之前保存的 HBM 方案
+    报 `Port declarations differ from registry: overview`，等于一次向后兼容的改动把所有旧
+    方案作废。所以这里放行"旧文档不认识的新可选端口"，其余不一致照旧拒绝。
+    """
+    import xml.etree.ElementTree as ElementTree
+
+    def overview_ports(root: ElementTree.Element) -> list[ElementTree.Element]:
+        node = next(item for item in root.findall("./nodes/node") if item.get("id") == "overview")
+        return list(node.find("ports"))
+
+    def mutate(document: str, edit) -> str:
+        root = ElementTree.fromstring(document)
+        edit(root)
+        return ElementTree.tostring(root, encoding="unicode")
+
+    document = XMLSerializer().dumps(pipeline)
+    assert [
+        item.get("name")
+        for item in overview_ports(ElementTree.fromstring(document))
+        if item.get("required") == "false"
+    ] == ["labels"]
+
+    def drop_optional(root):
+        node = next(item for item in root.findall("./nodes/node") if item.get("id") == "overview")
+        for item in [p for p in node.find("ports") if p.get("required") == "false"]:
+            node.find("ports").remove(item)
+
+    older = mutate(document, drop_optional)
+    restored = XMLParser(registry).loads(older)
+    assert "overview" in restored.nodes
+    assert restored.validate_graph() == []
+
+    # 改名 = 未知端口，必须拒绝（否则手改 XML 就能绕过类型系统）。
+    def rename_optional(root):
+        node = next(item for item in root.findall("./nodes/node") if item.get("id") == "overview")
+        for item in node.find("ports"):
+            if item.get("name") == "labels":
+                item.set("name", "not_a_port")
+
+    with pytest.raises(ValueError, match="Port declarations differ"):
+        XMLParser(registry).loads(mutate(document, rename_optional))
+
+    # 少一个必填端口也必须拒绝。
+    def drop_required(root):
+        node = next(item for item in root.findall("./nodes/node") if item.get("id") == "overview")
+        for item in [p for p in node.find("ports") if p.get("required") == "true"]:
+            node.find("ports").remove(item)
+            return
+
+    with pytest.raises(ValueError, match="Port declarations differ"):
+        XMLParser(registry).loads(mutate(document, drop_required))
+
+
 def test_execution_and_incremental_invalidation(pipeline, context):
     engine = ExecutionEngine()
     ws = engine.execute(pipeline, context)

@@ -185,7 +185,7 @@ async function main() {
       }
     }, "test platform server did not start");
     const health = await (await fetch(`${origin}/api/health`)).json();
-    if (health.components !== 56) throw new Error(`expected 56 components, got ${health.components}`);
+    if (health.components !== 88) throw new Error(`expected 88 components, got ${health.components}`);
     report.checks.push({name: "server exposes the full registry", components: health.components});
 
     client = await Client.connect(cdpPort);
@@ -193,7 +193,7 @@ async function main() {
     await client.send("Runtime.enable");
     await client.send("Page.navigate", {url: origin});
     await until(
-      () => client.evaluate("document.readyState === 'complete' && document.querySelectorAll('.component-item').length === 56"),
+      () => client.evaluate("document.readyState === 'complete' && document.querySelectorAll('.component-item').length === 88"),
       "component palette did not render in Chrome",
     );
 
@@ -221,7 +221,7 @@ async function main() {
     });
     await client.screenshot(path.join(shootDir, "01-catalog.png"));
 
-    // 组件库折叠：56 个组件超过自动折叠阈值，默认给"目录"，展开与搜索都必须能看到组件。
+    // 组件库折叠：88 个组件超过自动折叠阈值，默认给"目录"，展开与搜索都必须能看到组件。
     const folding = await client.evaluate(`(() => {
       const library = document.querySelector("#component-library");
       const domItems = library.querySelectorAll(".component-item").length;
@@ -247,10 +247,10 @@ async function main() {
       const clipped = headers.filter((header) => header.scrollWidth > header.clientWidth + 1).length;
       return {domItems, first, expanded, searching, collapsed, expandedAgain: visible(), clippedHeaders: clipped};
     })()`);
-    if (folding.domItems !== 56) {
-      throw new Error(`collapsing must keep all 56 items in the DOM, got ${folding.domItems}`);
+    if (folding.domItems !== 88) {
+      throw new Error(`collapsing must keep all 88 items in the DOM, got ${folding.domItems}`);
     }
-    if (!(folding.first.collapsedBodies > 0 && folding.first.visible < 56)) {
+    if (!(folding.first.collapsedBodies > 0 && folding.first.visible < 88)) {
       throw new Error(`a large catalog should open as a directory: ${JSON.stringify(folding.first)}`);
     }
     if (folding.expanded.aria !== "true" || folding.expanded.bodyCollapsed) {
@@ -266,6 +266,45 @@ async function main() {
       throw new Error(`the directory view must fit without scroll or clipping: ${JSON.stringify(folding)}`);
     }
     report.checks.push({name: "component library folds into a directory and stays searchable", ...folding});
+
+    // 字号：使用反馈是"整体偏小、组件库那块尤其小"。这里用**实测的计算样式**把底线钉住——
+    // 压缩过的 CSS 一改就没人知道字号有没有掉回去，所以必须由脚本盯，而不是靠肉眼看截图。
+    // 只断言此刻一定存在的左栏元素；节点/参数/结果面板的字号在后面有节点与结果时再测一次。
+    const catalogTypography = await client.evaluate(`(() => {
+      const size = (selector) => {
+        const node = document.querySelector(selector);
+        return node ? parseFloat(getComputedStyle(node).fontSize) : null;
+      };
+      const items = [...document.querySelectorAll(".component-item")];
+      const names = items.map((item) => item.querySelector("span:not(.component-icon)"));
+      return {
+        componentName: size(".component-item"),
+        smallestComponentName: items.length
+          ? Math.min(...items.map((item) => parseFloat(getComputedStyle(item).fontSize))) : null,
+        categoryHeader: size(".catalog .category-title"),
+        subcategoryHeader: size(".catalog .subcategory-title"),
+        groupCount: size(".catalog .group-count"),
+        libraryTab: size(".library-tabs button"),
+        catalogFilter: size(".catalog-filter select"),
+        searchInput: size(".search input"),
+        rowHeight: items.length ? Math.round(items[0].getBoundingClientRect().height) : 0,
+        // 名字超宽只能换行，不能被裁掉：裁掉就等于用户看不到组件名。
+        clippedNames: names.filter((node) => node && node.scrollWidth > node.clientWidth + 1).length,
+      };
+    })()`);
+    const catalogMinimums = {
+      componentName: 13, categoryHeader: 13, subcategoryHeader: 11,
+      libraryTab: 12, catalogFilter: 12, searchInput: 13,
+    };
+    for (const [key, minimum] of Object.entries(catalogMinimums)) {
+      if (!(catalogTypography[key] >= minimum)) {
+        throw new Error(`font too small in ${key}: ${catalogTypography[key]}px < ${minimum}px`);
+      }
+    }
+    if (catalogTypography.clippedNames) {
+      throw new Error(`${catalogTypography.clippedNames} component names are clipped in the library`);
+    }
+    report.checks.push({name: "catalog typography is legible and not clipped", ...catalogTypography});
     // 此时组件库已全部展开（默认目录视图见 01-catalog.png）。
     await client.screenshot(path.join(shootDir, "01b-library-expanded.png"));
     // 放大图：树形引导线与分隔条在整屏截图里几乎看不见，人工评审需要 3x 裁剪。
@@ -311,7 +350,7 @@ async function main() {
     }
     await client.send("Page.reload", {});
     await until(
-      () => client.evaluate("document.readyState === 'complete' && document.querySelectorAll('.component-item').length === 56"),
+      () => client.evaluate("document.readyState === 'complete' && document.querySelectorAll('.component-item').length === 88"),
       "palette did not come back after reload",
     );
     const restored = await client.evaluate(`(() => { const box = document.querySelector("#component-library").getBoundingClientRect();
@@ -559,6 +598,41 @@ async function main() {
     const inspectorText = await client.evaluate("document.querySelector('#inspector-content').textContent");
     const fields = await client.evaluate("document.querySelectorAll('#inspector-content .parameter').length");
     if (fields < 10) throw new Error(`spectral node rendered only ${fields} parameter fields`);
+
+    // 字号（第二处）：此刻画布上有节点、右栏有参数表、下面有结果，把这三处的实测字号也钉住。
+    const panelTypography = await client.evaluate(`(() => {
+      const size = (selector) => {
+        const node = document.querySelector(selector);
+        return node ? parseFloat(getComputedStyle(node).fontSize) : null;
+      };
+      const node = document.querySelector(".node");
+      return {
+        nodeTitle: size(".node-title"),
+        nodeSubtitle: size(".node-title small"),
+        port: size(".port"),
+        nodeStatus: size(".node-status"),
+        inspectorBody: size("#inspector-content"),
+        parameterLabel: size(".parameter-label"),
+        parameterHint: size(".parameter small"),
+        parameterInput: size(".parameter input:not([type=checkbox])") || size(".parameter select"),
+        resultTab: size(".result-tabs button"),
+        // offsetWidth 是未缩放的布局宽度：getBoundingClientRect() 会被画布缩放影响，
+        // 报出来会让人以为节点只有几十像素宽。
+        nodeWidth: node ? node.offsetWidth : null,
+      };
+    })()`);
+    const panelMinimums = {
+      nodeTitle: 13, nodeSubtitle: 10, port: 11, nodeStatus: 10,
+      inspectorBody: 12, parameterLabel: 11, parameterHint: 11,
+      parameterInput: 12, resultTab: 12,
+    };
+    for (const [key, minimum] of Object.entries(panelMinimums)) {
+      if (!(panelTypography[key] >= minimum)) {
+        throw new Error(`font too small in ${key}: ${panelTypography[key]}px < ${minimum}px`);
+      }
+    }
+    report.checks.push({name: "canvas, inspector and result typography are legible", ...panelTypography});
+
     await client.evaluate("document.querySelector('#delete').click()");
     await until(
       () => client.evaluate(`document.querySelectorAll(".node").length === ${knownIds.length}`),
@@ -675,6 +749,31 @@ async function main() {
       const scores = [...text.matchAll(/(\\d+\\.\\d)%/g)].map((m) => m[0]);
       return {preview: text.slice(0, 240), scores}; })()`);
     if (!metrics.scores.length) throw new Error("metric panel rendered without any percentage");
+
+    // 字号（第三处）：模型节点的结果此刻是渲染中的，量表格与预格式化文本的实测字号
+    // （图表/图例的字号在下一步切到可视化节点后再量）。
+    const metricsTypography = await client.evaluate(`(() => {
+      const size = (selector) => {
+        const node = document.querySelector(selector);
+        return node ? parseFloat(getComputedStyle(node).fontSize) : null;
+      };
+      return {
+        table: size("table"), tableCell: size("td"), tableHead: size("th"),
+        pre: size("#result-content pre") || size(".result-port pre"),
+        metricLabel: size(".metric-card .label"), metricValue: size(".metric-card strong"),
+        metricNote: size(".metric-note"), warning: size(".warning"),
+      };
+    })()`);
+    for (const [key, minimum] of Object.entries({pre: 11, metricLabel: 10, warning: 11})) {
+      if (metricsTypography[key] !== null && !(metricsTypography[key] >= minimum)) {
+        throw new Error(`font too small in metrics ${key}: ${metricsTypography[key]}px < ${minimum}px`);
+      }
+    }
+    if (!(metricsTypography.pre >= 11 || metricsTypography.table >= 11)) {
+      throw new Error(`metric panel text is too small: ${JSON.stringify(metricsTypography)}`);
+    }
+    report.checks.push({name: "metric panel typography is legible", ...metricsTypography});
+
     const linePoint = await client.evaluate(hitPoint("line"));
     if (linePoint) await client.click(linePoint.x, linePoint.y);
     await until(
@@ -683,6 +782,28 @@ async function main() {
     );
     const chartPoints = await client.evaluate("document.querySelector('#result-content svg.chart polyline').getAttribute('points').length");
     if (chartPoints < 20) throw new Error("rendered chart is empty");
+
+    // 字号（第三处）：结果面板此时才真正有内容，量一下表格/预格式化文本与图例的实测字号。
+    const resultTypography = await client.evaluate(`(() => {
+      const size = (selector) => {
+        const node = document.querySelector(selector);
+        return node ? parseFloat(getComputedStyle(node).fontSize) : null;
+      };
+      return {
+        table: size("table"), tableCell: size("td"),
+        pre: size("#result-content pre"), resultPortTitle: size(".result-port h3"),
+        legend: size(".legend"), chartText: size(".chart text"),
+        metricLabel: size(".metric-card .label"), metricValue: size(".metric-card strong"),
+        warning: size(".warning"), resultCaption: size("#result-caption"),
+      };
+    })()`);
+    for (const [key, minimum] of Object.entries({legend: 11, chartText: 10.5, resultPortTitle: 12})) {
+      if (resultTypography[key] !== null && !(resultTypography[key] >= minimum)) {
+        throw new Error(`font too small in result ${key}: ${resultTypography[key]}px < ${minimum}px`);
+      }
+    }
+    report.checks.push({name: "result panel typography is legible", ...resultTypography});
+
     report.checks.push({
       name: "browser run renders metrics and a bounded chart",
       status, metric_scores: metrics.scores, metrics_preview: metrics.preview.replace(/\s+/g, " ").trim(),

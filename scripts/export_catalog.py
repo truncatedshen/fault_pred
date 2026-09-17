@@ -28,7 +28,15 @@ def main() -> None:
                 c["description"],
                 "",
                 "**输入**："
-                + ("，".join(f"{p['name']} : {port_types(p)}" for p in c["input_ports"]) or "无"),
+                # 输入端口也要标"（可选）"：多输入组件（data.concat / validation.compare 等）光看
+                # 名字判断不出哪些必须接，而漏接必填端口要到校验期才报错。
+                + (
+                    "，".join(
+                        f"{p['name']} : {port_types(p)}" + ("" if p["required"] else "（可选）")
+                        for p in c["input_ports"]
+                    )
+                    or "无"
+                ),
                 "",
                 "**输出**："
                 + "，".join(

@@ -852,14 +852,49 @@ function table(rows, columns) {
       "</td>").join("") + "</tr>").join("") + "</tbody></table></div>";
 }
 function metricsView(m) {
-  const keys = [["accuracy","Accuracy"],["precision","Precision"],["recall","Recall"],["f1","F1 score"],["roc_auc","ROC-AUC"]];
+  const keys = [["accuracy","Accuracy"],["balanced_accuracy","Balanced acc."],["precision","Precision"],
+    ["recall","Recall"],["f1","F1 score"],["roc_auc","ROC-AUC"],["average_precision","PR-AUC"],["miss_rate","漏报率"]];
   return '<div class="metric-grid">' + keys.map(([k, title]) => '<div class="metric-card"><span class="label">' +
     title + "</span><strong>" + (typeof m[k] === "number" ? (m[k] * 100).toFixed(1) + "%" : "—") +
     "</strong></div>").join("") + '</div><p class="metric-note">' + esc(m.algorithm) + " · " + esc(m.split_method) +
     " · 训练 " + m.train_count + " / 测试 " + m.test_count + "</p>" +
+    classBalance(m) +
     (m.warnings || []).map((w) => '<div class="warning">' + esc(w) + "</div>").join("") +
     (m.confusion_matrix ? table(m.confusion_matrix.map((row, i) =>
       Object.fromEntries([["实际 / 预测", m.classes[i]], ...row.map((v, j) => [String(m.classes[j]), v])]))): "");
+}
+function percent(value) { return typeof value === "number" ? (value * 100).toFixed(2) + "%" : "—"; }
+/* 训练集/测试集的正负样本构成：只有数量看不出"228 行测试集里几行是故障"，占比才是那个数字。 */
+function classBalance(m) {
+  const sides = [["训练集", m.train_class_counts, m.train_class_rates, m.train_count],
+                 ["测试集", m.test_class_counts, m.test_class_rates, m.test_count]];
+  if (!sides.some(([, counts]) => counts && Object.keys(counts).length)) return "";
+  const classes = (m.classes && m.classes.length ? m.classes :
+    Object.keys(m.test_class_counts || m.train_class_counts || {})).map(String);
+  const rows = [];
+  for (const [side, counts, rates, total] of sides) {
+    if (!counts) continue;
+    const sum = total || Object.values(counts).reduce((a, b) => a + b, 0);
+    for (const cls of classes) {
+      const count = counts[cls] ?? 0;
+      const rate = rates && typeof rates[cls] === "number" ? rates[cls] : (sum ? count / sum : 0);
+      rows.push({集合: side, 类别: cls, 数量: count, 占比: percent(rate),
+        角色: cls === m.positive_class ? "正类" : (classes.length === 2 ? "负类" : "—")});
+    }
+  }
+  return '<h4 class="metric-title">正负样本构成</h4>' + table(rows) +
+    (m.positive_class ? '<p class="metric-note">正类 = ' + esc(String(m.positive_class)) + '</p>' : "");
+}
+/* 数据概览里的标签构成（label_column 或 labels 端口给了才会有）。 */
+function labelDistributionView(d) {
+  if (!d || !d.total) return "";
+  const rows = (d.classes || []).map((cls) => ({类别: cls, 数量: d.counts[cls], 占比: percent(d.rates[cls]),
+    角色: cls === d.positive_class ? "正类" : (d.binary ? "负类" : "—")}));
+  const headline = d.positive_class != null && typeof d.positive_rate === "number" ?
+    " · 正类 " + esc(String(d.positive_class)) + " " + d.positive_count + "/" + d.total +
+    "（" + percent(d.positive_rate) + "）" : "";
+  return '<h4 class="metric-title">标签构成（' + esc(String(d.source)) + "）" + headline + "</h4>" +
+    table(rows) + (d.findings || []).map((f) => '<div class="warning">' + esc(f) + "</div>").join("");
 }
 function chart(spec) {
   const width = 660, height = 190, colors = ["#527edf", "#21a992", "#d5a353", "#ad7ecb", "#e08585"];
@@ -899,6 +934,7 @@ function objectView(value) {
   if (value.kind === "overview") {
     return '<p class="metric-note">' + value.row_count + " 行 × " + value.column_count + " 列 · " +
       (value.memory_usage / 1024).toFixed(1) + " KB</p>" +
+      labelDistributionView(value.label_distribution) +
       table(value.column_names.filter((name) => typeof name === "string").map((name) => ({
         column: name, dtype: value.data_types[name], missing_rate: value.missing_rate[name],
         unique_count: value.unique_count[name],

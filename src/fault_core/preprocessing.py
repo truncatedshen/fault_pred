@@ -14,12 +14,27 @@ from sklearn.preprocessing import (
     MaxAbsScaler,
     MinMaxScaler,
     PowerTransformer,
+    QuantileTransformer,
     RobustScaler,
     StandardScaler,
     normalize,
 )
 
 from fault_core.data import expression, numeric_columns
+
+#: ``data.transformation`` 支持的全部方法。集中放在这里是为了让组件 schema、检索与实现
+#: 只有一个来源；``quantile_*`` 两个是经验分位数映射，其余是逐点单调变换。
+TRANSFORMATION_METHODS = (
+    "log",
+    "log1p",
+    "sqrt",
+    "power",
+    "box-cox",
+    "yeo-johnson",
+    "quantile_uniform",
+    "quantile_normal",
+    "expression",
+)
 
 
 def mark_fitted(data: pd.DataFrame, operation: str) -> pd.DataFrame:
@@ -117,19 +132,38 @@ def scale(
 
 
 def transform(
-    data: pd.DataFrame, columns: list[str], method: str, power: float = 2, expression_text: str = ""
+    data: pd.DataFrame,
+    columns: list[str],
+    method: str,
+    power: float = 2,
+    expression_text: str = "",
+    n_quantiles: int = 1000,
 ) -> pd.DataFrame:
     """对数值列做单调变换：对数族、幂、Box-Cox / Yeo-Johnson 或自定义表达式。
 
     Box-Cox 需要严格正数，Yeo-Johnson 允许零与负数，两者都由 sklearn 在整表上拟合参数，
     因此带探索性警告。``expression`` 走 :func:`fault_core.data.expression` 的白名单求值，
     Python 侧先忽略浮点告警（对数域外的中间结果），最后再统一检查结果是否有限。
+
+    ``quantile_uniform``/``quantile_normal`` 把每列按**经验分位数**映射到均匀/正态分布：
+    对重尾、截断、量纲差异大的工业通道很实用，但它同样是在整表上拟合分位点，
+    所以同样带探索性警告——而且比 Box-Cox 更"吃"数据分布，训练集与线上分布不同时
+    映射会失真。``n_quantiles`` 会被自动削到样本量以内（sklearn 要求）。
     """
     cols = numeric_columns(data, columns)
     result = data.copy()
     values = data[cols].astype(float)
     if not np.isfinite(values.to_numpy()).all():
         raise ValueError("Transformation requires finite values")
+    if method in {"quantile_uniform", "quantile_normal"}:
+        # subsample=None 是刻意的：默认值会随机抽样分位点，同一份数据两次运行结果不同。
+        transformer = QuantileTransformer(
+            n_quantiles=max(1, min(n_quantiles, len(values))),
+            output_distribution="uniform" if method == "quantile_uniform" else "normal",
+            subsample=None,
+        )
+        result[cols] = transformer.fit_transform(values)
+        return mark_fitted(result, method)
     if method in {"box-cox", "yeo-johnson"}:
         result[cols] = PowerTransformer(method=method).fit_transform(values)
         return mark_fitted(result, method)

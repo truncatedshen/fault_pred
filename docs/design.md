@@ -6,7 +6,7 @@
 | --- | --- |
 | 文档性质 | 系统设计文档（架构、对象模型、执行语义、接口与约束） |
 | 对应实现 | `src/fault_core`、`src/fault_platform`（版本 0.1.0） |
-| 组件规模 | 56 个内置组件，5 个分类 |
+| 组件规模 | 88 个内置组件，5 个分类 |
 | 主要读者 | 平台开发者、算法工程师、集成 Agent 的工程师、评审者 |
 | 相关文档 | [总体架构摘要](architecture.md) · [组件参考](components.md) · [MCP 接入](mcp.md) · [验证记录](validation.md) · [README](../README.md) |
 
@@ -24,7 +24,7 @@
 
 | 编号 | 目标 | 落地方式 |
 | --- | --- | --- |
-| G1 | 复杂方案由组件组合而成 | 56 个单一职责组件 + 类型化端口 |
+| G1 | 复杂方案由组件组合而成 | 88 个单一职责组件 + 类型化端口 |
 | G2 | 人工与 Agent 使用同一底层系统 | 网页与 MCP 都调用同一 Pipeline Control API，操作同一 Graph/Workspace |
 | G3 | 组件可插拔，扩展不触碰核心 | Registry 统一注册；Graph/Runtime/XML/UI/MCP 无组件分支 |
 | G4 | 方案结构可持久化、可交换、可评审 | XML + XSD + Registry 语义校验，参数以 JSON 保类型 |
@@ -116,7 +116,7 @@
 | --- | --- | --- |
 | `fault_core` | 数值计算、数据校验、特征窗口、模型训练与指标 | 图结构、状态、持久化 |
 | `components/base.py` | 组件契约：端口、参数、元数据、执行接口 | 具体算法、IO、UI |
-| `components/builtin.py` | 56 个内置组件的薄适配层 | 数学实现（在 fault_core） |
+| `components/builtin.py` | 88 个内置组件的薄适配层 | 数学实现（在 fault_core） |
 | `registry.py` | 组件注册、目录、检索、Schema 导出 | 组件实例状态 |
 | `graph.py` | 节点/连线/DAG 校验/拓扑排序/克隆/序列化 | 运行数据 |
 | `runtime.py` | 执行调度、输入解析、指纹、失败传播 | 组件内部算法 |
@@ -337,7 +337,7 @@ class PipelineService:
     jobs: dict[str, Future]
     events: dict[str, Event]
     bus: EventBus                      # 事件总线：图修订、执行状态、检查点
-    operations: dict[str, Callable]   # 38 个控制操作，经 pydantic 严格校验
+operations: dict[str, Callable]   # 39 个控制操作，经 pydantic 严格校验
 ```
 
 设计要点：
@@ -415,15 +415,15 @@ ComponentRegistry ────────────────────�
 
 ## 5. 组件库设计与清单
 
-### 5.1 清单（56 个）
+### 5.1 清单（88 个）
 
 | 分类 | 组件 |
 | --- | --- |
-| 数据处理 `data` | `data.input`、`data.materialize`、`data.quality`、`data.filter`、`data.row_operation`、`data.column_operation`、`data.time_resample`、`data.split`、`data.neighbor_features`、`data.imputation`、`data.normalization`、`data.standardization`、`data.transformation`、`data.binarize`、`data.labels` |
-| 数据探索 `explore` | `explore.central_tendency`、`explore.dispersion`、`explore.correlation`、`explore.distribution`、`explore.periodicity`、`explore.concept_drift`、`explore.cross_relation`、`explore.anomaly` |
+| 数据处理 `data` | `data.input`、`data.materialize`、`data.quality`、`data.filter`、`data.row_operation`、`data.column_operation`、`data.time_resample`、`data.split`、`data.neighbor_features`、`data.imputation`、`data.normalization`、`data.standardization`、`data.transformation`、`data.binarize`、`data.polynomial_features`、`data.discretize`、`data.seasonal_difference`、`data.labels` |
+| 数据探索 `explore` | `explore.central_tendency`、`explore.dispersion`、`explore.correlation`、`explore.distribution`、`explore.periodicity`、`explore.concept_drift`、`explore.cross_relation`、`explore.anomaly`、`explore.peaks`、`explore.normality`、`explore.kl_divergence`、`explore.acf`、`explore.isotonic`、`explore.gbr_fit`、`explore.hp_filter`、`explore.stationarity`、`explore.dtw`、`explore.sbd`、`explore.slope_cosine` |
 | 数据可视化 `visual` | `visual.overview`、`visual.scatter`、`visual.line`、`visual.subplot`、`visual.histogram`、`visual.compare`、`visual.anomaly`、`visual.relationship` |
-| 特征提取 `feature` | `feature.statistical`、`feature.fitting`、`feature.rolling_statistics`、`feature.temporal`、`feature.entropy`、`feature.spectral`、`feature.categorical`、`feature.categorical_transform`、`feature.select`、`feature.merge`、`feature.score_select`、`feature.pca` |
-| 算法验证 `validation` | `validation.random_forest`、`validation.svm`、`validation.xgboost`、`validation.decision_tree`、`validation.reservoir_classifier`、`validation.linear_regression`、`validation.arma`、`validation.knn_detector`、`validation.isolation_forest_detector`、`validation.persistence_detector`、`validation.compare` |
+| 特征提取 `feature` | `feature.statistical`、`feature.fitting`、`feature.rolling_statistics`、`feature.temporal`、`feature.wavelet`、`feature.entropy`、`feature.spectral`、`feature.categorical`、`feature.categorical_transform`、`feature.select`、`feature.merge`、`feature.score_select`、`feature.pca` |
+| 算法验证 `validation` | `validation.random_forest`、`validation.svm`、`validation.xgboost`、`validation.decision_tree`、`validation.reservoir_classifier`、`validation.grid_search`、`validation.linear_regression`、`validation.ridge`、`validation.arma`、`validation.exponential_smoothing`、`validation.arima`、`validation.knn_detector`、`validation.isolation_forest_detector`、`validation.dbscan_detector`、`validation.pca_detector`、`validation.min_cluster_detector`、`validation.one_class_svm`、`validation.level_shift_detector`、`validation.volatility_shift_detector`、`validation.seasonal_detector`、`validation.autoregression_detector`、`validation.esd_detector`、`validation.nsigma_detector`、`validation.mean_drift_detector`、`validation.kmeans`、`validation.persistence_detector`、`validation.compare` |
 
 完整端口与参数表由 `scripts/export_catalog.py` 从 Registry 生成到 [components.md](components.md)。
 
@@ -864,10 +864,10 @@ Server-Sent Events 而不是 WebSocket，是因为这里只有服务端→浏览
 | `GET` | `/api/health` | 状态与组件数量 |
 | `GET` | `/api/data` | 列出 `data_root` 下的 CSV |
 | `POST` | `/api/data/upload` | 上传 CSV（25 MB，返回列名与预览） |
-| `POST` | `/api/control/{operation}` | 38 个控制操作统一入口 |
+| `POST` | `/api/control/{operation}` | 39 个控制操作统一入口 |
 | `GET` | `/api/events` | Server-Sent Events：图修订、节点状态、执行状态、检查点（可按 `pipeline_id` 过滤，支持 `Last-Event-ID` 补发） |
 
-### 11.2 操作分组（38 个）
+### 11.2 操作分组（39 个）
 
 | 分组 | 操作 |
 | --- | --- |
@@ -875,7 +875,18 @@ Server-Sent Events 而不是 WebSocket，是因为这里只有服务端→浏览
 | 组件发现 | `list_components`、`search_components`、`get_component_schema` |
 | 图编辑 | `add_component`、`remove_component`、`configure_component`、`connect_components`、`disconnect_components`、`validate_pipeline` |
 | 执行 | `execute_pipeline`、`execute_node`、`execute_from_node`、`retry_node`、`cancel_pipeline`、`get_pipeline_status`、`get_node_result`、`get_pipeline_result`、`get_history` |
-| 检查点与导出 | `save_checkpoint`、`load_checkpoint`、`list_checkpoints`、`get_pipeline_xml` |
+| 检查点与导出 | `save_checkpoint`、`load_checkpoint`、`list_checkpoints`、`get_pipeline_xml`、`export_python` |
+
+### 11.2a 多数据源（第六轮补充）
+
+同一份"配方"经常要在多份同构数据上跑（每台设备/每批各一个文件）。两条路，语义分开：
+
+| 路径 | 机制 | 特点 |
+| --- | --- | --- |
+| 入口合并（持久） | `data.input.paths`：`path` 之后按顺序追加，`pd.concat` 成一份 `Dataset` | 下游组件零改动；列集合必须一致（缺列/多列报错并点名）、列顺序按第一份对齐、索引重排 `0..N-1`、`source_column` 可选记录来源；`source_id` 覆盖全部文件 |
+| 运行期覆盖（临时） | `ExecutionContext.dataset_overrides`：`execute_pipeline(dataset_overrides={node: str \| list[str]})` | **执行参数而非编辑**：图不变、结果不失效；`external_fingerprint` 读同一个上下文，所以文件指纹参与缓存指纹，增量复用不可能拿旧数据冒充；流式与多源互斥 |
+
+设计取舍：**不做"覆盖第一个、保留其余"的混合语义**——那种规则没法从调用点看出来；覆盖一律整组替换（字符串=单文件，列表=整组）。单源时 `external_fingerprint` 的返回值与旧版逐字相同，因此已有方案的缓存指纹不变。
 
 ### 11.3 Observation 约定
 
@@ -948,7 +959,7 @@ Agent ──stdio──► mcp_server.py ──HTTP──► /api/control/{opera
 
 | 设计点 | 说明 |
 | --- | --- |
-| 工具集 | 与 `CONTROL_OPERATIONS` 一一对应，共 38 个工具；56 个组件由 Registry 通过组件查询与图编辑工具暴露 |
+| 工具集 | 与 `CONTROL_OPERATIONS` 一一对应，共 39 个工具；88 个组件由 Registry 通过组件查询与图编辑工具暴露 |
 | 签名来源 | 用 `inspect.signature` + `get_type_hints` 从 `PipelineService` 方法自动生成工具入参，避免"两套定义漂移" |
 | 描述 | 每个工具带一句面向 Agent 的说明（见 `DESCRIPTIONS`） |
 | 传输 | `FastMCP` + stdio；`--url` 指定后端服务地址（默认 `http://127.0.0.1:8765`） |
@@ -959,7 +970,7 @@ Agent ──stdio──► mcp_server.py ──HTTP──► /api/control/{opera
 
 `skills/fault-prediction/SKILL.md` **不计算数据**，只提供领域工作流知识：如何先探索数据、如何选择预处理、如何做窗口与标签、如何并行验证多个算法、如何解读警告与指标、什么时候修改方案。它使 Agent 的操作序列符合工程习惯，而不是把组件按字母顺序堆起来。
 
-技能按阶段编写，每个阶段固定回答四件事：目标是什么、怎么配（真实参数名）、要注意什么（护栏与常见坑）、满足什么条件才能进入下一阶段。`SKILL.md` 之外还有三份参考：`references/recipes.md`（可照抄的调用序列）、`references/troubleshooting.md`（报错原文 → 原因 → 修法）、`references/components.md`（56 个组件的用途与关键参数）。`tests/test_skill_guide.py` 会校验技能里出现的工具名与组件名真实存在、38 个工具全部被写到、附录里的组件计数与 Registry 一致——技能不允许与代码漂移。
+技能按阶段编写，每个阶段固定回答四件事：目标是什么、怎么配（真实参数名）、要注意什么（护栏与常见坑）、满足什么条件才能进入下一阶段。`SKILL.md` 之外还有三份参考：`references/recipes.md`（可照抄的调用序列）、`references/troubleshooting.md`（报错原文 → 原因 → 修法）、`references/components.md`（88 个组件的用途与关键参数）。`tests/test_skill_guide.py` 会校验技能里出现的工具名与组件名真实存在、39 个工具全部被写到、附录里的组件计数与 Registry 一致——技能不允许与代码漂移。
 
 ---
 

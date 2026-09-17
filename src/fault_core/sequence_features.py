@@ -16,6 +16,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from scipy.signal import find_peaks
 
 from fault_core.data import numeric_columns
 from fault_core.features import (
@@ -28,6 +29,10 @@ from fault_core.features import (
     window_attrs,
     window_shape,
 )
+
+#: 熵特征的全部方法名。``binned_entropy`` 与 ``information_entropy`` 是同一实现的两个叫法
+#: （组件清单里两个名字都出现过），对外都产出 ``<列名>__information_entropy``。
+ENTROPY_METHODS = ("approximate_entropy", "information_entropy", "binned_entropy")
 
 
 def _ordered(data: pd.DataFrame, group_column: str | None, time_column: str | None) -> pd.DataFrame:
@@ -52,9 +57,10 @@ def rolling_statistics(
 ) -> pd.DataFrame:
     """逐行输出滚动统计量，列名形如 ``vibration__rolling_mean_5``。
 
-    ``method``：``mean``/``std``（总体标准差 ddof=0）/``median``/``max_repeat``。
-    ``max_repeat`` 是"窗口内最大值出现了不止一次"的 0/1 指示，用来发现保持值/量化平台，
-    这类通道在频谱上不可用。``min_periods=1`` 让每组开头几行也能出值（不补 NaN）。
+    ``method``：``mean``/``std``（总体标准差 ddof=0）/``variance``/``median``/``max``/``min``/
+    ``max_repeat``。``max_repeat`` 是"窗口内最大值出现了不止一次"的 0/1 指示，用来发现
+    保持值/量化平台，这类通道在频谱上不可用。``min_periods=1`` 让每组开头几行也能出值
+    （不补 NaN）。
     """
     cols = numeric_columns(data, columns)
     ordered = _ordered(data, group_column, time_column)
@@ -72,6 +78,13 @@ def rolling_statistics(
                 return rolling.std(ddof=0)
             if method == "median":
                 return rolling.median()
+            if method == "variance":
+                # 与 std 保持同一口径（ddof=0，总体方差），这样 variance == std ** 2。
+                return rolling.var(ddof=0)
+            if method == "max":
+                return rolling.max()
+            if method == "min":
+                return rolling.min()
             if method == "max_repeat":
                 # raw=True 直接传 ndarray，比默认的 Series 快很多；判据是窗口内极值重复出现。
                 return rolling.apply(lambda values: float(np.sum(values == np.max(values)) > 1), raw=True)
@@ -95,6 +108,7 @@ def temporal_features(
     method: str = "first_difference",
     lag: int = 1,
     window: int = 20,
+    prominence: float = 0.0,
     group_column: str | None = None,
     time_column: str | None = None,
 ) -> pd.DataFrame:
@@ -103,6 +117,9 @@ def temporal_features(
     ``first_difference``/``second_difference``：组内一阶/二阶差分，用 0 填充各组首行
     （首行没有前值）。``autocorrelation``：窗口内滞后 ``lag`` 的自相关系数，
     ``min_periods=lag + 2`` 保证样本量足够。
+    ``sum_abs_change``：窗口内相邻点绝对差之和（数值变化之和），刻画"这段信号走了多远"，
+    对缓变漂移与高频抖动都敏感；``peak_count``：窗口内局部极大值个数（山峰数），
+    ``prominence`` 大于 0 时按 scipy 的峰突出度过滤，用来压掉量化台阶造成的假峰。
 
     与窗口特征不同，这里的输出行数等于输入行数，且只有特征端口（没有标签端口）。
     """
@@ -137,6 +154,30 @@ def temporal_features(
                 if grouped is not None
                 else autocorrelation(ordered[column])
             )
+            values = values.fillna(0.0)
+        elif method == "sum_abs_change":
+
+            def sum_abs_change(series: pd.Series) -> pd.Series:
+                # min_periods=2：单个点之间没有"变化"可言，只能用 0 表示。
+                return series.rolling(window, min_periods=2).apply(
+                    lambda chunk: float(np.abs(np.diff(chunk)).sum()), raw=True
+                )
+
+            values = (
+                grouped.transform(sum_abs_change) if grouped is not None else sum_abs_change(ordered[column])
+            )
+            values = values.fillna(0.0)
+        elif method == "peak_count":
+
+            def peak_count(series: pd.Series) -> pd.Series:
+                def count(chunk: np.ndarray) -> float:
+                    if prominence > 0:
+                        return float(len(find_peaks(chunk, prominence=prominence)[0]))
+                    return float(len(find_peaks(chunk)[0]))
+
+                return series.rolling(window, min_periods=3).apply(count, raw=True)
+
+            values = grouped.transform(peak_count) if grouped is not None else peak_count(ordered[column])
             values = values.fillna(0.0)
         else:
             raise ValueError(f"Unknown temporal feature method: {method}")
@@ -222,8 +263,11 @@ def entropy_features(
     if label_column in cols or group_column in cols:
         raise ValueError("Label/group columns cannot be feature inputs")
     selected = methods or ["approximate_entropy", "information_entropy"]
-    if any(method not in {"approximate_entropy", "information_entropy"} for method in selected):
+    if any(method not in ENTROPY_METHODS for method in selected):
         raise ValueError("Unknown entropy feature method")
+    # 箱值熵与信息熵是同一套"按箱统计的香农熵"（同一段代码、同一个 bins 参数），
+    # 保留两个名字是为了对齐组件清单里的叫法：叫 binned_entropy 也要能算出来。
+    binned = "binned_entropy" in selected
     span, stride, horizon, gap = window_arguments(
         window_size=window_size,
         window_span=window_span,
@@ -265,7 +309,7 @@ def entropy_features(
             # 近似熵是二次复杂度，这里显式设上限，避免用户忘记设窗口时把服务拖垮。
             if "approximate_entropy" in selected and len(values) > 2000:
                 raise ValueError("Approximate entropy windows are limited to 2000 rows; set window_size")
-            if "information_entropy" in selected:
+            if "information_entropy" in selected or binned:
                 row[f"{column}__information_entropy"] = _information_entropy(values, bins)
             if "approximate_entropy" in selected:
                 tolerance = tolerance_ratio * float(np.std(values))

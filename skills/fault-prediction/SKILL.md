@@ -84,8 +84,29 @@ description: 通过 MCP 驱动故障预测组件平台：侦察服务、准备�
 ### 0.6 用用户的语言回答
 
  - 用户用什么语言提问，就用什么语言写结论、警告与汇报（默认中文）。
- - 工具名、组件类型名、参数名、平台报错原文保持英文原样，不要翻译——它们是接口标识符，翻错了
-   就没法照着调用。
+- 工具名、组件类型名、参数名、平台报错原文保持英文原样，不要翻译——它们是接口标识符，翻错了
+  就没法照着调用。
+
+### 0.7 阶段地图 — 八个阶段各自的作用
+
+每个阶段都只回答一个问题，并且只为一个决定负责。跳过或敷衍某一阶段，代价都落在**后面的结论**上，
+而不是立刻报错——所以先看清楚每一步在替谁挡什么：
+
+| 阶段 | 作用（它替你做的决定） | 产出 | 敷衍它的代价 |
+| --- | --- | --- | --- |
+| 侦察（§1） | 这次能用什么手段：环境事实 + 3~6 行能力清单 | 数据路径、候选能力 | 靠猜参数建图，白跑一轮 |
+| 1 工作区与数据准备（§2） | 数据能不能被平台看见，哪一列是什么角色 | 一行一采样的表 + 列角色 | 路径或列角色错 → 后面所有结论作废 |
+| 2 质量预检（§3） | 哪些通道是死的、哪些窗口根本不可用 | 每列平窗口比例、全空/恒定量 | 死通道被当成特征，模型学到噪声而你看不出 |
+| 3 窗口、分组与标签（§4） | 一行特征代表哪段时间，它的标签从哪来 | 对齐的 `FeatureDataset` + `LabelVector` | 重叠窗口随机切分 → 分数虚高；标签错位 → 全盘无效 |
+| 4 特征（§5） | 从什么角度看这段信号 | 一条或多条对齐、清洗好的特征分支 | 只挂均值/标准差，频域、不规则性、多尺度全丢 |
+| 5 验证（§6） | 这个分数回答得了用户的问题吗 | 切分方式 + 指标 + `coverage` | 用随机切分报 0.95，上线后崩 |
+| 6 执行与排错（§7） | 错在哪里，要不要整图重算 | 节点状态、失败节点的输入预览 | 一失败就整图重跑；或看不见真正的错因 |
+| 7 读取结果（§8） | 哪些数字能进汇报，哪些只是描述 | 指标、重要性、警告 | 把描述性结果当结论讲给用户 |
+| 8 持久化与交接（§9） | 别人怎么复核这次运行 | XML / 检查点 / 数据来源 | 结论无法复核，等于没做 |
+
+三条贯穿始终的读法：**阶段 2/3/5 是诚实的三个关口**（谁死了、切得对不对、分数算不算数）；
+**阶段 4 是唯一"越多越好"的阶段**（多看一个角度就多一类证据）；**阶段 6~8 是运维**，
+错了就修、修完能读、读完能复现。
 
 ## 1. 侦察 — 三次调用，加一份能力清单
 
@@ -97,11 +118,13 @@ description: 通过 MCP 驱动故障预测组件平台：侦察服务、准备�
 
 然后按意图检索：`retrieve_components(intent=..., category=..., input_type=..., output_type=..., source_component_type=..., target_component_type=...)`。它按词面加权打分（含中文二元组），并能只保留"可以合法夹在两个已有节点之间"的组件——这是往已有图中间插节点时最好用的能力。需要穷举视图时用 `list_components`（`category`、`tags`、`input_type`、`include_schema` 等过滤器），纯关键词用 `search_components`。**优先用 `retrieve_components`**：列全目录只会白费上下文。
 
-侦察要产出两样东西：上面那些环境事实，以及一份 3~6 行的**能力清单**（这次任务可能用得上的手段）。做法是 `get_component_facets()` 加一两次 `retrieve_components`，只针对你不确定平台是否具备的能力（漂移、周期性、无监督异常、类别编码……）各查一次。**不要枚举全部 56 个组件**：那是目录，不是清单，只会烧上下文而不会改变任何决定。
+侦察要产出两样东西：上面那些环境事实，以及一份 3~6 行的**能力清单**（这次任务可能用得上的手段）。做法是 `get_component_facets()` 加一两次 `retrieve_components`，只针对你不确定平台是否具备的能力（漂移、周期性、无监督异常、类别编码……）各查一次。**不要枚举全部 88 个组件**：那是目录，不是清单，只会烧上下文而不会改变任何决定。
 
 `create_example(include_xgboost=false)` 会在合成数据上造一张能端到端跑通的示例图。用它学图的形状或给服务做冒烟测试；**永远不要用它回答关于用户数据的问题**。
 
 ## 2. 阶段 1 — 工作区与数据准备
+
+**作用：** 把"平台看不见的外部文件"变成"能按列名引用的表"，并确定实例 / 资产 / 时间 / 标签这四个角色——后面每一步都按这些角色取数，角色错了，后面全错。
 
 **目标：** 原始文件已经在 `data_root` 里，而且你知道哪几列是实例、资产、时间、测量值和标签。
 
@@ -112,7 +135,18 @@ description: 通过 MCP 驱动故障预测组件平台：侦察服务、准备�
 
 平台只认 CSV 和 Parquet：`.mat`、`.txt`、MDF/BLF 都必须在平台外先转换，而且你要说明你转了。转换配方与阶段检查清单在 `references/stages.md` 的阶段 1。转换时目标是**一行一个采样**（`asset_id`、`instance_id`、`time`、测量列、标签），窗口组件就认这个形状；同时把实例列和资产列都记下来——趁数据还在你眼前。
 
+**要在窗口之前做的数据层变换**（顺序错了含义就完全不同）：`data.polynomial_features`（平方项与交互项）、`data.discretize`（等宽/等频/一维聚类分箱，箱边界在整表上拟合，会带探索性警告）、`data.seasonal_difference`（同比口径：`y_t − y_{t−period}` 或比值，`mode=difference|ratio`）。三者都改列或行的语义，所以放在阶段 3 之前。
+
+**多份同构数据**（每台设备/每批各一个文件）不用重建方案：
+
+ - **入口合并（持久）**：`data.input` 的 `paths` 参数按顺序追加到 `path` 后面，纵向拼成**一份** `Dataset`——下游组件完全不用改。列集合必须一致（缺列/多列会报错并点名），列顺序可以不同；合并后索引重排为 `0..N-1`；`source_column="来源"` 可以给每行记下它来自哪个文件。
+ - **画布上合并**：摆几个 `data.input`，各自接到 `data.concat` 的 `first`/`second`（还有可选的 `third`/`fourth`）。适合"每个文件独立配置、想在前端一眼看见来源"的场景；超过四个源就串联下一个 concat。`first`/`second` 必填，只接一条会被 `validate_pipeline` 拦下。
+ - **运行期整组替换（临时）**：`execute_pipeline(dataset_overrides={"source": ["a.csv","b.csv"]})`——字符串=只读这一个文件，列表=只读这几个文件。它是**执行参数不是编辑**：图不变、已有结果不失效，但文件指纹跟着变，所以增量复用不会拿旧数据冒充。
+ - 两条路都会把"这次读了哪几份"写进警告（节点级与模型指标），汇报时要带上。流式（`streaming=true`）只支持单源，多源会被直接拒绝。
+
 ## 3. 阶段 2 — 质量预检
+
+**作用：** 在通道变成"特征"之前判它的死法（全空、整列恒定、**每组内**恒定、被量化产生的平窗口）。这些是 `visual.overview` 看不见的，也是唯一能在建模前拦住的坑。
 
 **目标：** 在任何通道变成"意外的特征"之前，先知道哪些通道是死的。
 
@@ -129,10 +163,13 @@ description: 通过 MCP 驱动故障预测组件平台：侦察服务、准备�
 | 怀疑有周期性或反复出现的工况 | 挂 `explore.periodicity`（采样率未知就先问，不要猜） |
 | 各资产的量级差得很多 | 挂 `explore.central_tendency` + `explore.dispersion`，按资产列分组 |
 | 完全没有标签，只想先看"异常长什么样" | 挂 `explore.anomaly`（输出 `Prediction`，终端分支） |
+| 想先知道这条序列**平稳吗、有趋势吗、记忆多长** | `explore.stationarity`（ADF 单位根，只给统计量与三档渐近临界值）、`explore.hp_filter`（趋势/周期分解，**λ 必须写进报告**）、`explore.acf`（整条自相关曲线 + 白噪声判定）——都是终端分支；平稳性决定要不要差分，趋势决定值不值得上拟合特征 |
 
 **不要为了"用上组件"而加节点。** 上面每一条都是终端分支：它服务人的报告，不会进模型。
 
 ## 4. 阶段 3 — 窗口、分组与标签
+
+**作用：** 决定"一行特征代表哪段时间"以及它的标签从哪来。这是整个方案里唯一无法事后补救的决定——切分和标签一旦定错，后面所有分数都是在回答另一个问题。
 
 **目标：** 得到一张 `FeatureDataset`，它的每一行与标签一一对应，并且验证阶段能诚实地切分。
 
@@ -155,9 +192,13 @@ description: 通过 MCP 驱动故障预测组件平台：侦察服务、准备�
 
 ## 5. 阶段 4 — 特征
 
+**作用：** 决定"从什么角度看这段信号"。同一份数据，换一个分支就是从另一个问题里取证据：水平与形状、趋势、旋转与共振、不规则性、短时动态、多尺度、离散档位。漏掉一个角度，模型就永远看不见那类证据。
+
 **目标：** 一条或多条对齐的 `FeatureDataset` 分支，合并好、清洗好，并且不含你已经知道是死的通道。
 
 "哪类信号问题该用哪个分支"（水平与形状、趋势、旋转与共振、不规则性、短时动态、离散属性）已经列在 `references/stages.md` 的阶段 4。照着挑，不要默认只挂统计分支；如果特征已经在表里，用 `feature.select`。
+
+**枚举值已经扩过两轮，别按记忆里的旧清单挑**：`feature.statistical` 的 `features` 现在 **35 项**（新增 `count`、`argmax_first/last`、`argmin_first/last`、`count_above/below_mean`、`longest_above/below_mean`、`mean_delta`、`mean_abs_delta`、`mean_second_derivative`、`duplicate_point_ratio`、`repeated_value_ratio`、`duplicate_sum`、`time_reversal_asymmetry`，以及四个字面比较项）；`feature.rolling_statistics` 多了 `variance`（与 `std` 同口径）/`max`/`min`；`feature.temporal` 多了 `sum_abs_change`（窗口内 |Δ| 之和）与 `peak_count`（山峰数，可用 `prominence` 过滤量化台阶）；`feature.entropy` 的 `methods` 也接受 `binned_entropy`。不确定就 `get_component_schema` 查一次，别猜。
 
 下面几条是**被强制**的，不是风格建议：
 
@@ -176,8 +217,11 @@ description: 通过 MCP 驱动故障预测组件平台：侦察服务、准备�
 | 波形是冲击性、不规则的 | `feature.entropy`（`methods` 必填） |
 | 需要变化率，但不想切窗 | `feature.temporal`（`columns` 必填）或 `feature.rolling_statistics` |
 | 某条探索分支产生了 NaN | 在模型前插 `feature.imputation`，并报告填充比例 |
+| 信号是宽频/多尺度变化的，只有水平与形状类特征 | `feature.wavelet`（Haar 多尺度能量占比 + 主尺度 + 细节峰个数）。它是**逐行对齐**的，行数与输入相同，因此**不能**和窗口分支合并——当补充分支或探索分支用 |
 
 ## 6. 阶段 5 — 验证
+
+**作用：** 决定这个分数回答的是哪一个问题——见过的实例？没见过的资产？未来的时间？并把它限制在能兑现的说法里。分数高低是次要的，"这个数字配不配得上结论"才是主要的。
 
 **目标：** 一个真正回答用户问题的分数。
 
@@ -188,6 +232,8 @@ description: 通过 MCP 驱动故障预测组件平台：侦察服务、准备�
  - **`group` 不是资产留出。** 一个资产通常贡献多个实例，所以被留出的"组"仍会把该资产的行为泄漏进训练。真实 3W 数据上，同一套特征与模型从实例留出的 ROC-AUC 0.716 掉到留一井的 0.528。
  - **把 `coverage` 跟分数一起报出来**——"3 个测试井全是训练时没见过的"这句话才让那个数字有意义。`validation.compare` 只接受特征、标签、切分方式、`test_size`、`random_state` 完全一致的两个运行。
 
+**方法面也扩过两轮，先按问题挑、再按方法挑**：回归除 `validation.linear_regression` 外还有 `validation.ridge`（窗口统计量几乎总是彼此相关，L2 收缩更稳，代价是系数不再可解释）；无监督检测器除 KNN / 隔离森林 / Persist 外还有 `validation.pca_detector`（重构误差）、`validation.dbscan_detector`（密度，**异常率由 `eps`/`min_samples` 决定，不用 `contamination`**）、`validation.min_cluster_detector`（到簇心的距离）与 `validation.one_class_svm`（只学"正常长什么样"，`nu` 是越界比例的上界而不是异常率）；分组用 `validation.kmeans`（**这不是异常检测**，它不给正常/异常判决）；时序基线多了 `validation.exponential_smoothing`（Holt / Holt–Winters，**平滑系数是输入不是拟合值**）与 `validation.arima`（需要可选依赖 statsmodels，未安装会给安装命令）；要调参用 `validation.grid_search`（`best_score` 是**交叉验证**分，不是留出分）。
+
 **阶段自检 — 验证方式回答得了这个问题吗？**
 
 | 自检 | 命中时 |
@@ -197,8 +243,11 @@ description: 通过 MCP 驱动故障预测组件平台：侦察服务、准备�
 | 要回答"这条序列本身可不可预测" | 用 `validation.arma`（`column` 必填）当基线 |
 | 对比里只有一个算法族 | 把 `validation.decision_tree` 或 `validation.reservoir_classifier` 加进 `validation.compare` |
 | 留出集里有模型没见过的资产 | 引用 `coverage.unseen_assets`；这才是唯一值得信任的泛化数字 |
+| 要回答"结构从哪一刻变了"（阶跃/波动率/季节/漂移/自回归），而不是"这条记录异常吗" | `validation.level_shift_detector`、`volatility_shift_detector`、`seasonal_detector`、`autoregression_detector`、`mean_drift_detector`、`esd_detector`、`nsigma_detector`——七个都是"逐行分数 + 阈值"，但**阈值口径各不相同**（t 量纲 / z 量纲 / σ 倍数 / ESD 的 λ），所以跨方法的分数不可比较，报分数时必须带上方法名与阈值 |
 
 ## 7. 阶段 6 — 执行与排错
+
+**作用：** 区分"我配错了"和"数据/组件拒绝了这次输入"，并只重算需要重算的部分。失败信息是用来定位的，不是用来重跑整张图的。
 
 **目标：** 一次跑完，或者对"卡在哪里"给出精确诊断。
 
@@ -221,11 +270,17 @@ create_pipeline(name)
 
 ## 8. 阶段 7 — 读取结果
 
+**作用：** 分清哪些数字能进汇报（留出指标 + `coverage`），哪些只能当描述（阈值、样本内分数、探索性警告）。这一步决定用户最终听到的是不是真的。
+
 `get_node_result(pipeline_id, node_id)` 返回 `{status, outputs: {端口: {kind, …, value}}, error, warnings}`；`get_pipeline_result` 一次覆盖所有节点（图大时要收小 `limit`）。保持 `include_indices=false`：指标载荷里已经有混淆矩阵、每类召回与类别计数，描述一个结果根本不需要 `train_indices`/`test_indices`——把它们拉出来曾经把 8000 个行号灌进上下文。只有"行本身就是交付物"时才展开索引。工作区 `warnings` 要原样转发。各 `kind` 的载荷形状见 `references/stages.md` 的阶段 7。
 
 ## 9. 阶段 8 — 持久化与交接
 
+**作用：** 让这次运行可以被别人复核：数据从哪来、图长什么样、当时用的是哪一版参数。没有这一步，结论只能被相信，不能被检查。
+
 `save_pipeline(pipeline_id, filename="...xml")` 把图写到 `storage_root` 下；`get_pipeline_xml` 直接返回同一份文档；`load_pipeline(xml)` 会导入成一个新方案；`replace_pipeline(graph, expected_version=...)` 是带乐观并发的覆盖，版本过期会被拒绝。`save_checkpoint`/`load_checkpoint`/`list_checkpoints` 同时快照图**与**工作区（都在内存里，随进程消失）。`delete_pipeline` 会删掉方案、工作区、溢出文件与检查点——放弃一次失败尝试后用它，别让服务一直背着。
+
+**XML 与 Python 怎么选**：`save_pipeline` 写出的 XML 是给**平台自己**再导入用的（`load_pipeline`）；`export_python(pipeline_id)` 写出的 `.py` 是给**人**用的——它把节点、参数、画布位置与连线渲染成代码，用 `fault_platform` 的 Python API 在本地重建同一张图并执行，**不连服务**，所以能进版本管理、能在别的机器上跑（`python <文件> --data-root <目录>`，加 `--no-execute` 只重建与校验）。返回值里 `validation_problems` 会列出这个脚本跑不起来的原因（缺参数、必填输入没连线），`include_code=true` 时才把源码一起回吐（默认只给路径，省 token）。**它是快照**：改了图要重新导出。
 
 交接时给出：方案 id、XML 路径、数据路径、切分方式、标签策略、以及带覆盖情况的头条指标。人可以在 `http://127.0.0.1:8765` 打开同一个图；你的改动会通过 SSE（`GET /api/events`）实时出现，包括运行中的节点状态。
 
@@ -263,12 +318,12 @@ create_pipeline(name)
 5. **边界** —— 哪些是探索性的、哪些是合成的、哪些被跳过了、什么会让这个数字失效。
 6. **产物** —— 方案 id、XML 路径、人能打开查看的地址。
 7. **阶段自检** —— 哪些闸门命中过、各自做了什么；以及整场没触及的能力类别（一行说明为什么这次可以接受）。
-8. **中间产物证据** —— 给出一次对你真正建模的那份数据的直接观察：把 `visual.overview` 挂在特征分支上（问题涉及信号或冗余时再加 `visual.line`/`explore.correlation`），并引用它返回的内容——行数、列名、缺失率——让人不必只凭你的结论。
+8. **中间产物证据** —— 给出一次对你真正建模的那份数据的直接观察：把 `visual.overview` 挂在特征分支上（把 `stat.labels` 接到它的 `labels` 端口，`label_column` 用于原始表），并引用它返回的内容——行数、列名、缺失率、**标签的正负样本比例**——让人不必只凭你的结论。正类占比是读其他所有指标的前提，先报它。
 9. **语言** —— 用用户提问的语言写（默认中文）；工具名、组件类型、参数名与平台报错原文保持英文。
 
 先给结论，再给限定它的那句注意事项。不要把注意事项提前，也永远不要省略它。
 
-## 附录 A — 工具地图（38 个）
+## 附录 A — 工具地图（39 个）
 
 | 阶段 | 工具 |
 | --- | --- |
@@ -277,21 +332,21 @@ create_pipeline(name)
 | 图编辑 | `add_component`, `add_components`, `remove_component`, `configure_component`, `configure_components`, `connect_components`, `connect_many`, `disconnect_components` |
 | 执行 | `validate_pipeline`, `execute_pipeline` (`mode=all|node|from`, `incremental`), `execute_node`, `execute_from_node`, `retry_node`, `cancel_pipeline` |
 | 观察 | `get_pipeline_status`, `wait_for_pipeline`, `get_node_result`, `get_pipeline_result`, `get_history` |
-| 持久化 | `save_checkpoint`, `load_checkpoint`, `list_checkpoints` |
+| 持久化与导出 | `save_checkpoint`, `load_checkpoint`, `list_checkpoints`, `export_python` |
 
 `wait_for_pipeline` 是唯一会阻塞的工具，并且刻意跑在服务锁之外。如果客户端显示带后缀的重名工具（`list_pipelines_1`），用不带后缀的那个名字。
 
 ## 附录 B — 能力地图
 
-五个族、56 个组件，以及各自期望什么样的输入端口：
+五个族、88 个组件，以及各自期望什么样的输入端口：
 
 | 族 | 干什么用 | 输入端口 |
 | --- | --- | --- |
-| **数据 (16):** | 读取、过滤、整形、重采样、切分、缩放/编码、派生键、质量预检 | `Dataset` |
-| **探索 (8):** | 提问式的诊断——漂移、周期性、相关性、异常；全部是终端分支 | `Dataset`，其中 5 个也接受 `FeatureDataset` |
+| **数据 (20):** | 读取（可多源合并）、过滤、整形、重采样、切分、缩放/编码/分箱/多项式项、派生键、质量预检 | `Dataset` |
+| **探索 (19):** | 提问式的诊断——漂移、周期性、散度、山峰、正态性、自相关、保序/GBR 拟合、相关性、异常；全部是终端分支 | `Dataset`，其中 10 个也接受 `FeatureDataset` |
 | **可视化 (8):** | 给人看的图；全部是终端分支 | `Dataset`，其中 6 个也接受 `FeatureDataset` |
-| **特征 (13):** | 窗口特征生产者、合并、清洗、选择、降维 | `Dataset` → `FeatureDataset`（+ `LabelVector`） |
-| **验证 (11):** | 有监督分类器、回归/ARMA 基线、无监督检测器、模型对比 | `FeatureDataset` + `LabelVector`，无监督检测器用原始 `Dataset` |
+| **特征 (14):** | 窗口特征生产者、合并、清洗、选择、降维 | `Dataset` → `FeatureDataset`（+ `LabelVector`） |
+| **验证 (27):** | 有监督分类器、线性/岭回归与 ARMA 基线、五种无监督检测器、模型对比 | `FeatureDataset` + `LabelVector`，无监督检测器用原始 `Dataset` |
 
 每个组件的端口、关键参数与"什么时候不要用"都在 `references/components.md`。
 

@@ -62,7 +62,8 @@ def example_graph(
     specs = [
         ("source", "data.input", {"path": path}, 60, 190),
         ("filter", "data.filter", {"column": "temperature", "operator": "gt", "value": 0}, 330, 190),
-        ("overview", "visual.overview", {"time_column": "time"}, 600, 30),
+        # 概览同时报标签构成：示例数据里 label 就是故障列，正负比例是所有其它指标的前提。
+        ("overview", "visual.overview", {"time_column": "time", "label_column": "label"}, 600, 30),
         (
             "stat",
             "feature.statistical",

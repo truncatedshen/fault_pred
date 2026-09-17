@@ -50,6 +50,7 @@ DESCRIPTIONS = {
     "save_pipeline": "Save graph XML in the configured local pipeline directory.",
     "load_pipeline": "Import XML as a graph using registered components. Does not load runtime artifacts.",
     "get_pipeline_xml": "Return the pipeline XML document inline instead of writing a file.",
+    "export_python": "Write the pipeline as a standalone runnable Python file (nodes, parameters and edges as code) that rebuilds and runs the same graph through the platform's Python API without the service. Returns the path; pass include_code=true to also get the source inline.",
     "create_example": "Create a synthetic equipment dataset and an example comparison graph.",
     "add_component": "Add one configured component instance to a graph.",
     "add_components": "Add many nodes in one call; prefer this over repeated add_component, and pass include_graph=false to keep the reply small. All or nothing: a rejected entry names its position and rolls the whole batch back, leaving the graph untouched.",

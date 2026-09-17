@@ -34,6 +34,7 @@ Windows 也可以直接运行 `.\setup.ps1`。Linux / macOS 把 `.venv\Scripts\p
 | `pip install -e .` | 只跑网页与 Runtime |
 | `pip install -e ".[mcp]"` | 让 Agent 通过 MCP 操作 |
 | `pip install -e ".[xgboost]"` | 使用 XGBoost 组件 |
+| `pip install -e ".[statsmodels]"` | 使用 ARIMA 组件（未安装时该组件会给出可执行的安装提示） |
 | `pip install -e ".[parquet]"` | 读取 Parquet 数据源（大文件列裁剪/谓词下推） |
 | `pip install -e ".[dev]"` | 运行测试与静态检查 |
 
@@ -61,7 +62,10 @@ Windows 也可以直接运行 `.\setup.ps1`。Linux / macOS 把 `.venv\Scripts\p
 
 1. 点顶部 **加载示例**（生成合成设备数据与示例方案）。
 2. 点 **▶ 运行方案**，等状态变为 `SUCCESS`。
-3. 依次点击节点查看输出：数据概览（列、类型、缺失率）、统计特征（特征表）、随机森林（指标、混淆矩阵、特征重要性）、折线图。
+3. 依次点击节点查看输出：数据概览（列、类型、缺失率、**标签构成**）、统计特征（特征表）、随机森林（指标、**训练/测试的正负样本构成**、混淆矩阵、特征重要性）、折线图。
+
+   正负样本比例是读其它指标的前提：测试集里一个故障样本都没有时，`accuracy=1.0` 只说明"模型全判正常"，
+   平台会为这种情况直接给出一条警告（`The test set contains no positive (1) rows`），别只抄 accuracy。
 4. 切换结果区页签：**执行日志** 看每个节点的状态、耗时与缓存命中，**XML 方案** 看完整配置。
 5. 点 **保存** 写入 `.fault-platform/pipelines`，或 **导出 XML** 下载文件。
 
@@ -111,7 +115,7 @@ Windows 也可以直接运行 `.\setup.ps1`。Linux / macOS 把 `.venv\Scripts\p
 
 ### 2.4 面板与组件库
 
-组件数量增长到 56 个（后续还会更多），所以左栏做成了"目录 + 分级折叠"，三栏宽窄也都可调：
+组件数量增长到 88 个（后续还会更多），所以左栏做成了"目录 + 分级折叠"，三栏宽窄也都可调：
 
 | 操作 | 方式 |
 | --- | --- |
@@ -125,9 +129,11 @@ Windows 也可以直接运行 `.\setup.ps1`。Linux / macOS 把 `.venv\Scripts\p
 
 宽度同时受视口限制（侧栏不超过视口宽度的 34%），窄窗口下三栏都不会被挤没；面板宽高记录在 `fault-layout`，刷新后保持。
 
+**字号改哪里**：`style.css` 上半部分是压缩成一行、彼此耦合的原始规则，**不要在那里改字号**；文件末尾有一段集中的「字号基线」块（正文类、组件库、画布/右栏、结果面板四组），调字号只动那一段。`scripts/browser_check.cjs` 会实测计算样式并断言下限（例如组件名 ≥ 13px、组件名不得被裁切），所以字号被改回去会直接让浏览器验收变红。
+
 ### 2.5 端口类型与连线规则
 
-组件之间只能通过声明了数据类型的端口连接，默认两端类型完全一致才能连。**输入端口可以额外声明兼容类型**：11 个检查类组件（`visual.overview`、`visual.line`、`visual.scatter`、`visual.subplot`、`visual.histogram`、`visual.relationship`、`explore.central_tendency`、`explore.dispersion`、`explore.correlation`、`explore.distribution`、`explore.anomaly`）既接受 `Dataset` 也接受 `FeatureDataset`，所以特征分支可以直接挂概览——中间产物随时可查。数据转换类组件不放宽，仍然只吃原始 `Dataset`。
+组件之间只能通过声明了数据类型的端口连接，默认两端类型完全一致才能连。**输入端口可以额外声明兼容类型**：16 个检查类组件（`visual.overview`、`visual.line`、`visual.scatter`、`visual.subplot`、`visual.histogram`、`visual.relationship`、`explore.central_tendency`、`explore.dispersion`、`explore.correlation`、`explore.distribution`、`explore.anomaly`、`explore.peaks`、`explore.normality`、`explore.acf`、`explore.isotonic`、`explore.gbr_fit`）既接受 `Dataset` 也接受 `FeatureDataset`，所以特征分支可以直接挂概览——中间产物随时可查。数据转换类组件不放宽，仍然只吃原始 `Dataset`；`explore.concept_drift` / `explore.kl_divergence` 需要两份输入，因此只吃 `Dataset`。
 
 | 数据类型 | 运行时对象 | 典型来源 |
 | --- | --- | --- |
@@ -158,7 +164,7 @@ Windows 也可以直接运行 `.\setup.ps1`。Linux / macOS 把 `.venv\Scripts\p
 
 ---
 
-## 3. 组件库（56 个）
+## 3. 组件库（88 个）
 
 组件定义由 Registry 统一提供，网页组件库、MCP `list_components` 和 XML 校验读取同一份定义。
 
@@ -181,6 +187,9 @@ Windows 也可以直接运行 `.\setup.ps1`。Linux / macOS 把 `.venv\Scripts\p
 | `data.standardization` | 标准化 | dataset : Dataset → dataset : Dataset |
 | `data.transformation` | 数值转换 | dataset : Dataset → dataset : Dataset |
 | `data.binarize` | 特征二值化 | dataset : Dataset → dataset : Dataset |
+| `data.polynomial_features` | 多项式特征 | dataset : Dataset → dataset : Dataset |
+| `data.discretize` | 离散化分箱 | dataset : Dataset → dataset : Dataset |
+| `data.seasonal_difference` | 同期差分 | dataset : Dataset → dataset : Dataset |
 | `data.labels` | 标签向量 | dataset : Dataset → labels : LabelVector |
 
 ### 数据探索 Data Exploration
@@ -195,6 +204,17 @@ Windows 也可以直接运行 `.\setup.ps1`。Linux / macOS 把 `.venv\Scripts\p
 | `explore.concept_drift` | 概念漂移 | reference / current : Dataset → statistics : StatisticsResult |
 | `explore.cross_relation` | 互相关与互协方差 | dataset : Dataset → matrix : CorrelationMatrix |
 | `explore.anomaly` | 异常探索 | dataset : Dataset → prediction : Prediction |
+| `explore.peaks` | 山峰检测 | dataset : Dataset → statistics : StatisticsResult |
+| `explore.normality` | 正态性校验 | dataset : Dataset → statistics : StatisticsResult |
+| `explore.kl_divergence` | KL 散度度量 | reference / current : Dataset → statistics : StatisticsResult |
+| `explore.acf` | ACF 自相关函数 | dataset : Dataset → statistics : StatisticsResult |
+| `explore.isotonic` | 保序回归 | dataset : Dataset → statistics : StatisticsResult |
+| `explore.gbr_fit` | 量化相关性拟合 GBR | dataset : Dataset → statistics : StatisticsResult, importance : FeatureImportance |
+| `explore.hp_filter` | HP 趋势过滤 | dataset : Dataset → statistics : StatisticsResult |
+| `explore.stationarity` | 平稳性检查（ADF） | dataset : Dataset → statistics : StatisticsResult |
+| `explore.dtw` | DTW 距离 | dataset : Dataset → statistics : StatisticsResult |
+| `explore.sbd` | SBD 相关 | dataset : Dataset → statistics : StatisticsResult |
+| `explore.slope_cosine` | 斜率与余弦夹角 | dataset : Dataset → prediction : Prediction |
 
 ### 数据可视化 Data Visualization
 
@@ -217,6 +237,7 @@ Windows 也可以直接运行 `.\setup.ps1`。Linux / macOS 把 `.venv\Scripts\p
 | `feature.fitting` | 拟合特征 | dataset : Dataset → features : FeatureDataset, labels : LabelVector |
 | `feature.rolling_statistics` | 滚动统计特征 | dataset : Dataset → features : FeatureDataset |
 | `feature.temporal` | 差分与自相关特征 | dataset : Dataset → features : FeatureDataset |
+| `feature.wavelet` | 小波特征 | dataset : Dataset → features : FeatureDataset |
 | `feature.entropy` | 熵特征 | dataset : Dataset → features : FeatureDataset, labels : LabelVector |
 | `feature.spectral` | 频域特征 | dataset : Dataset → features : FeatureDataset, labels : LabelVector |
 | `feature.categorical` | 分类特征 | dataset : Dataset → features : FeatureDataset, encoder : FeatureTransformer |
@@ -238,10 +259,26 @@ Windows 也可以直接运行 `.\setup.ps1`。Linux / macOS 把 `.venv\Scripts\p
 | `validation.decision_tree` | 决策树 | features, labels → model / prediction / metrics / importance |
 | `validation.reservoir_classifier` | 水库机分类 | features, labels → model / prediction / metrics |
 | `validation.linear_regression` | 线性回归 | features, target → model / prediction / metrics / importance |
+| `validation.ridge` | 岭回归 | features, target → model / prediction / metrics / importance |
 | `validation.arma` | ARMA | dataset → model / prediction / metrics |
 | `validation.knn_detector` | KNN 检测 | dataset → model / prediction / metrics |
 | `validation.isolation_forest_detector` | 隔离森林检测 | dataset → model / prediction / metrics |
+| `validation.dbscan_detector` | DBSCAN 检测 | dataset → model / prediction / metrics |
+| `validation.pca_detector` | PCA 检测器 | dataset → model / prediction / metrics |
+| `validation.min_cluster_detector` | Mincluster 探测器 | dataset → model / prediction / metrics |
 | `validation.persistence_detector` | Persist 检测器 | dataset → model / prediction / metrics |
+| `validation.level_shift_detector` | LevelShift 检测器 | dataset → model / prediction / metrics |
+| `validation.volatility_shift_detector` | VolatilityShift 检测器 | dataset → model / prediction / metrics |
+| `validation.seasonal_detector` | Seasonal 检测器 | dataset → model / prediction / metrics |
+| `validation.autoregression_detector` | AutoRegression 检测器 | dataset → model / prediction / metrics |
+| `validation.esd_detector` | GeneralizedESD 检测器 | dataset → model / prediction / metrics |
+| `validation.nsigma_detector` | Nsigma 检测 | dataset → model / prediction / metrics |
+| `validation.mean_drift_detector` | 均值漂移检测 | dataset → model / prediction / metrics |
+| `validation.one_class_svm` | 单类 SVM 检测 | dataset → model / prediction / metrics |
+| `validation.kmeans` | KMeans 聚类 | dataset → model / prediction / metrics |
+| `validation.exponential_smoothing` | 指数平滑 | dataset → model / prediction / metrics |
+| `validation.arima` | ARIMA（可选依赖） | dataset → model / prediction / metrics |
+| `validation.grid_search` | 超参搜索 | features, labels → model / metrics / importance |
 | `validation.compare` | 模型对比 | first / second / third : Metrics → comparison : StatisticsResult |
 
 每个组件的完整参数表（类型、默认值、必填、取值范围）见 [docs/components.md](docs/components.md)。
@@ -390,7 +427,7 @@ MCP bridge 只是转发到本地 HTTP 控制 API，所以**必须先启动服务
 
 `--from-config` 直接读取 `~/.codex/config.toml` 的 `[mcp_servers.fault-prediction]`；去掉该参数则用当前解释器和 `--url` 启动，方便 CI 或其它客户端复用。
 
-### 6.3 工具清单（38 个高层操作）
+### 6.3 工具清单（39 个高层操作）
 
 | 用途 | 工具 |
 | --- | --- |
@@ -398,7 +435,7 @@ MCP bridge 只是转发到本地 HTTP 控制 API，所以**必须先启动服务
 | 组件发现 | `list_components`、`search_components`、`get_component_schema` |
 | 图编辑 | `add_component`、`remove_component`、`configure_component`、`connect_components`、`disconnect_components`、`validate_pipeline` |
 | 执行 | `execute_pipeline`、`execute_node`、`execute_from_node`、`retry_node`、`cancel_pipeline`、`get_pipeline_status`、`get_node_result`、`get_pipeline_result`、`get_history` |
-| 检查点与导出 | `save_checkpoint`、`load_checkpoint`、`list_checkpoints`、`get_pipeline_xml` |
+| 检查点与导出 | `save_checkpoint`、`load_checkpoint`、`list_checkpoints`、`get_pipeline_xml`、`export_python` |
 
 大对象不经过 MCP：Agent 只用 `pipeline_id`、`workspace_id`、`node_id` 操作，读回的是有界预览（最多 100 行 / 50 列）和元数据，不返回完整训练矩阵或模型权重。
 
@@ -413,6 +450,24 @@ MCP bridge 只是转发到本地 HTTP 控制 API，所以**必须先启动服务
 | `get_server_info` / `list_datasets` | 查 data_root、storage_root、缓存预算与可读文件，无需读进程命令行 |
 | `delete_pipeline` | 清理失败的方案、工作区、落盘文件与检查点 |
 | 工作区陈旧提示 | 传了非最新的 `workspace_id` 时返回警告，而不是静默给出旧状态 |
+
+### 6.3a 多数据源：同一张图，跑多份同构数据
+
+两份同构数据（例如每台设备各导出一份、或每批一份）有两条路进场，**都不需要重建方案**：
+
+| 方式 | 怎么做 | 什么时候用 |
+| --- | --- | --- |
+| 入口合并（**持久**） | `data.input` 的 `paths` 参数：`path` 是第一个源，`paths` 按顺序追加，纵向拼成**一份** `Dataset` | 这批数据以后就一起用。下游组件完全不用改，它们只看到一份数据 |
+| 运行期整组替换（**临时**） | `execute_pipeline(dataset_overrides={"source": ["a.csv", "b.csv"]})`：字符串=只读这一个文件，列表=只读这几个文件 | 「同一张图，换一批数据跑」。**是执行参数不是编辑**：图不变（可追溯、已有结果不失效），但外部文件指纹会跟着变，所以增量复用不会拿旧数据的结果冒充 |
+
+几条刻意的规则：
+
+- **列集合必须一致**：缺列/多列都直接报错并点名（`missing [...] extra [...]`）。补 NaN 或丢列会让"两台机器数据结构不同"一路漂到模型里，报告上看不出来。列**顺序**可以不同，按第一份的顺序对齐。
+- **索引重排**：各文件索引都从 0 开始，直接拼会出现重复索引，所以合并后统一重排为 `0..N-1`（会写进警告）。
+- **`source_column`**：设了它就给每行加一列"来自哪个文件"（相对路径），混批排查时很有用；默认不加，表结构保持原样。
+- **指纹覆盖全部文件**：`source_id` 是各文件摘要按顺序再哈希，所以改任意一份、或换顺序都会让下游重算；**单源时返回值与旧版逐字一致**，已有方案的缓存不会失效。
+- **流式不支持多源**：`streaming=true` 只描述一个文件，配上 `paths` 会直接拒绝，而不是悄悄只读第一个。
+- 用了覆盖/合并都会写进警告（节点级 + 方案级 + 模型指标里的 `warnings`），所以报告里能看出"这次读的到底是哪几份"。
 
 ### 6.4 典型调用序列
 
@@ -436,15 +491,15 @@ get_pipeline_xml(...)
 
 | 文件 | 内容 |
 | --- | --- |
-| `SKILL.md` | 入口（385 行）：决策、硬约束、路由、阶段自检闸门、38 个工具的用途表与 5 类能力索引 |
+| `SKILL.md` | 入口（385 行）：决策、硬约束、路由、阶段自检闸门、39 个工具的用途表与 5 类能力索引 |
 | `references/recipes.md` | 可直接照抄的调用序列（常规分类、onset 数据、资产留出、无监督、超大文件、失败后重跑、三模型对比） |
 | `references/stages.md` | 每个阶段的细节：参数表、实测数字、检查清单与「注意事项」（入口把它挪出来，只留决策与闸门） |
 | `references/troubleshooting.md` | 报错原文 → 原因 → 修法，以及每条护栏为什么存在 |
-| `references/components.md` | 56 个组件的用途、端口、关键参数与「什么时候不要用」 |
+| `references/components.md` | 88 个组件的用途、端口、关键参数与「什么时候不要用」 |
 
 把它复制到 Agent 的技能目录，或让 Agent 直接读取（`docs/deploy.md` 的安装脚本会一并安装整个目录）。
 
-skill 的正文（含四份参考文件）现在**全中文**，只有工具名、组件类型、参数名与平台报错原文保持英文——它们是接口标识符。第十四轮又补了三件事：Recon 阶段要求产出一份 3~6 行的**能力清单**（这次任务可能用得上的手段，而不是 56 个组件的目录）；每个问题多发的阶段末尾有一道 **阶段自检**（逐条自问，命中才动手，最多 6 条）；汇报契约里有「中间产物证据」一项，要求把概览挂在真正建模的特征分支上并把行列引用出来。另外两处运营性内容：§0.5 讲清「等待超时 ≠ 服务死了，绝不要因此重启服务」，§0.6 要求用用户的语言回答。这些约束由 `tests/test_skill_guide.py`（23 项）与 `tests/test_mcp_bridge.py`（5 项）守住，包括「闸门不许膨胀成组件清单」「入口不许再长回手册」和「每个工具都必须有描述」。
+skill 的正文（含四份参考文件）现在**全中文**，只有工具名、组件类型、参数名与平台报错原文保持英文——它们是接口标识符。第十四轮又补了三件事：Recon 阶段要求产出一份 3~6 行的**能力清单**（这次任务可能用得上的手段，而不是 88 个组件的目录）；每个问题多发的阶段末尾有一道 **阶段自检**（逐条自问，命中才动手，最多 6 条）；汇报契约里有「中间产物证据」一项，要求把概览挂在真正建模的特征分支上并把行列引用出来。另外两处运营性内容：§0.5 讲清「等待超时 ≠ 服务死了，绝不要因此重启服务」，§0.6 要求用用户的语言回答。这些约束由 `tests/test_skill_guide.py`（23 项）与 `tests/test_mcp_bridge.py`（5 项）守住，包括「闸门不许膨胀成组件清单」「入口不许再长回手册」和「每个工具都必须有描述」。
 
 也可以用原始 HTTP：
 
@@ -602,7 +657,7 @@ scripts/                  组件目录导出、浏览器验收脚本
 ## 12. 验证
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest -q                 # 140 项通过（1 项按可选依赖跳过）
+.\.venv\Scripts\python.exe -m pytest -q                 # 228 项通过（1 项按可选依赖跳过）
 .\.venv\Scripts\python.exe -m ruff check src tests scripts
 .\.venv\Scripts\python.exe -m pip check
 node --check src/fault_platform/web/app.js
@@ -641,7 +696,7 @@ npm run browser-check                                   # Chrome headless 真实
 
 - [总体架构](docs/architecture.md)：对象职责、边界、数据流与实现约定
 - [项目设计文档](docs/design.md)：完整设计（对象模型、执行语义、端口/参数系统、XML、UI、MCP、领域约定、ADR）
-- [组件与参数参考](docs/components.md)：56 个组件的端口与参数表
+- [组件与参数参考](docs/components.md)：88 个组件的端口与参数表
 - [MCP 接入](docs/mcp.md)：bridge 配置与调用约定
 - [Agent Skill](skills/fault-prediction/SKILL.md)：Agent 搭方案的专业流程
 - [验证记录](docs/validation.md)：测试、浏览器验收与首版边界

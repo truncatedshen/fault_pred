@@ -19,6 +19,11 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from scipy import stats
+from scipy.signal import find_peaks
+from sklearn.ensemble import GradientBoostingRegressor
+from sklearn.isotonic import IsotonicRegression
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.model_selection import train_test_split
 
 from fault_core.data import numeric_columns
 
@@ -327,3 +332,429 @@ def anomaly_exploration(
     output = output.loc[data.index]
     output.attrs = {**data.attrs, "method": method, "columns": cols}
     return output
+
+
+def peak_summary(
+    data: pd.DataFrame,
+    columns: list[str] | None = None,
+    prominence: float = 0.0,
+    distance: int = 1,
+    group_column: str | None = None,
+) -> dict[str, Any]:
+    """逐列找局部极大值（山峰）并给出摘要与峰位。
+
+    ``prominence`` 是 scipy 的"峰突出度"：只保留比两侧谷底高出至少这个值的峰。真实工业
+    信号里量化台阶会产生大量高度相同的假峰（保持值段），把 ``prominence`` 设为量化的
+    最小刻度是最省事的过滤方式；``distance`` 限制两个峰之间的最小间距，防止一个宽峰被
+    数成多个。``count`` 是峰个数本身——它是"这段信号有几个周期"的粗粒度代理。
+
+    **给了 ``group_column`` 就按组独立找峰**（本平台的默认纪律：统计量绝不跨设备）。
+    不分组时，"设备 A 的结尾 + 设备 B 的开头"这个拼接处会被当成一个峰，结论就是假的。
+    分组后 ``rows`` 每行是"一组 × 一列"，``peaks`` 的键是 ``"<组>:<列>"``。
+    """
+    cols = numeric_columns(data, columns)
+    if len(data) < 3:
+        raise ValueError("Peak analysis needs at least three rows")
+    if group_column and group_column not in data.columns:
+        raise ValueError(f"Missing group column: {group_column}")
+    if isinstance(distance, bool) or not isinstance(distance, int) or distance < 1:
+        raise ValueError("distance must be an integer >= 1")
+    scopes = (
+        [(str(name), frame) for name, frame in data.groupby(group_column, sort=False, dropna=False)]
+        if group_column
+        else [(None, data)]
+    )
+    rows, peaks = [], {}
+    for scope, frame in scopes:
+        if len(frame) < 3:
+            raise ValueError(
+                f"Peak analysis needs at least three rows per group; group {scope} has {len(frame)}"
+            )
+        for column in cols:
+            values = frame[column].to_numpy(dtype=float)
+            if not np.isfinite(values).all():
+                raise ValueError(f"Peak analysis requires finite values: {column}")
+            index, properties = find_peaks(values, prominence=prominence, distance=distance)
+            heights = values[index]
+            rows.append(
+                {
+                    **({"group": scope} if scope is not None else {}),
+                    "column": column,
+                    "count": int(len(index)),
+                    "rate": float(len(index) / len(values)),
+                    "mean_height": float(np.mean(heights)) if len(index) else None,
+                    "mean_distance": float(np.mean(np.diff(index))) if len(index) > 1 else None,
+                    "max_prominence": float(np.max(properties["prominences"])) if len(index) else None,
+                }
+            )
+            peaks[column if scope is None else f"{scope}:{column}"] = {
+                "positions": index.tolist(),
+                "values": heights.tolist(),
+                "prominences": properties["prominences"].tolist(),
+            }
+    return {
+        "rows": rows,
+        "peaks": peaks,
+        "prominence": prominence,
+        "distance": distance,
+        "group_column": group_column,
+    }
+
+
+def normality_check(
+    data: pd.DataFrame, columns: list[str] | None = None, method: str = "normaltest", alpha: float = 0.05
+) -> dict[str, Any]:
+    """逐列做正态性检验，给出统计量、p 值与结论。
+
+    ``normaltest``（D'Agostino–Pearson）需要 **至少 8 个**样本；``shapiro``（Shapiro–Wilk）
+    需要 3~5000 个样本，超过 5000 时 scipy 会给出警告，因此这里主动改成"报错 + 提示换
+    检验"，而不是让使用者拿到一个自己都不信的 p 值。
+
+    **结论解读必须谨慎**：``p > alpha`` 只说明"没有足够证据拒绝正态"，不等于数据服从正态；
+    样本量很大时该检验会对毫无工程意义的微小偏离给出显著结果。返回值的 ``caveat``
+    会把这句话带给使用者，报告里应当照抄而不是只写"通过/不通过"。
+    """
+    cols = numeric_columns(data, columns)
+    if method not in {"normaltest", "shapiro"}:
+        raise ValueError(f"Unknown normality test: {method}")
+    if not 0 < alpha < 1:
+        raise ValueError("alpha must be between 0 and 1")
+    rows = []
+    for column in cols:
+        values = data[column].dropna().to_numpy(dtype=float)
+        if not np.isfinite(values).all():
+            raise ValueError(f"Normality check requires finite values: {column}")
+        if method == "normaltest" and len(values) < 8:
+            raise ValueError(
+                f"normaltest needs at least 8 samples for {column} (got {len(values)}); "
+                "use shapiro or provide more data"
+            )
+        if method == "shapiro":
+            if len(values) < 3:
+                raise ValueError(f"shapiro needs at least 3 samples for {column} (got {len(values)})")
+            if len(values) > 5000:
+                raise ValueError(
+                    f"shapiro is unreliable above 5000 samples for {column} (got {len(values)}); "
+                    "use normaltest"
+                )
+        result = stats.normaltest(values) if method == "normaltest" else stats.shapiro(values)
+        constant = not np.ptp(values)
+        rows.append(
+            {
+                "column": column,
+                "count": int(len(values)),
+                "statistic": float(result.statistic),
+                "p_value": float(result.pvalue),
+                # 常数列的偏度/峰度分母为 0：约定为 0，并把"这是常量"写进结果里。
+                "skewness": float(stats.skew(values)) if not constant else 0.0,
+                "kurtosis": float(stats.kurtosis(values)) if not constant else 0.0,
+                "constant": bool(constant),
+                "normal": bool(result.pvalue > alpha),
+            }
+        )
+    return {
+        "rows": rows,
+        "method": method,
+        "alpha": alpha,
+        "caveat": (
+            "p > alpha means the test failed to reject normality, not that the data is normal; "
+            "with large samples the test flags deviations that have no engineering meaning."
+        ),
+    }
+
+
+def divergence(
+    reference: pd.DataFrame,
+    current: pd.DataFrame,
+    columns: list[str] | None = None,
+    bins: int = 10,
+    epsilon: float = 1e-9,
+    js_threshold: float = 0.1,
+) -> dict[str, Any]:
+    """逐列比较两份样本的分布差异：KL 散度与 Jensen–Shannon 散度。
+
+    **方向性很重要**：KL 是非对称的，这里定义 ``kl = KL(Q || P)``，P 是 ``reference``、
+    Q 是 ``current``，含义是"用参考分布去编码当前数据的额外代价"。JS 是对称且有界的
+    （0 ~ ln2），更适合做跨列比较与阈值判断。
+
+    分箱边界取自**两份样本合并后的等宽区间**（这样两边落在同一组箱里），并在概率上加
+    ``epsilon`` 兜底以避免 log(0)。两份样本都退化成同一个常量时散度为 0；若一边恒定、
+    一边在波动，合并区间非退化，epsilon 兜底会给出一个很大的有限值——"从恒定变成波动"
+    本身就是最强的分布变化，这个值会把它显式暴露出来。
+    """
+    cols = numeric_columns(reference, columns)
+    missing = set(cols) - set(current.columns)
+    if missing:
+        raise ValueError(f"Current dataset is missing columns: {sorted(missing)}")
+    rows = []
+    for column in cols:
+        before = reference[column].dropna().to_numpy(dtype=float)
+        after = current[column].dropna().to_numpy(dtype=float)
+        if not len(before) or not len(after):
+            raise ValueError(f"Divergence comparison needs non-missing values for {column}")
+        if not np.isfinite(before).all() or not np.isfinite(after).all():
+            raise ValueError(f"Divergence comparison requires finite values for {column}")
+        combined = np.concatenate([before, after])
+        if not np.ptp(combined):
+            # 两份样本都只含同一个常量：分布完全一致。
+            kl = js = 0.0
+        else:
+            edges = np.histogram_bin_edges(combined, bins=bins)
+            p = np.histogram(before, bins=edges)[0].astype(float)
+            q = np.histogram(after, bins=edges)[0].astype(float)
+            p = np.clip(p / p.sum(), epsilon, None)
+            q = np.clip(q / q.sum(), epsilon, None)
+            kl = float(np.sum(q * np.log(q / p)))
+            middle = 0.5 * (p + q)
+            js = float(0.5 * np.sum(p * np.log(p / middle)) + 0.5 * np.sum(q * np.log(q / middle)))
+        rows.append(
+            {
+                "column": column,
+                "reference_count": int(len(before)),
+                "current_count": int(len(after)),
+                "reference_mean": float(np.mean(before)),
+                "current_mean": float(np.mean(after)),
+                "kl": kl,
+                "js": js,
+                "flagged": bool(js >= js_threshold),
+            }
+        )
+    return {
+        "rows": rows,
+        "flagged_columns": [row["column"] for row in rows if row["flagged"]],
+        "bins": bins,
+        "js_threshold": js_threshold,
+        "direction": "kl = KL(current || reference)",
+    }
+
+
+def autocorrelation_function(
+    data: pd.DataFrame,
+    columns: list[str] | None = None,
+    max_lag: int = 50,
+    alpha: float = 0.05,
+    group_column: str | None = None,
+) -> dict[str, Any]:
+    """逐列给出 0..max_lag 的自相关曲线与 95% 置信带。
+
+    与 :func:`periodicity_check` 的分工：那里只回答"主周期是多少"（取峰值），这里给出
+    **整条 ACF 曲线** 并逐滞后判断显著性——用来回答"这条通道的记忆有多长""是不是白噪声"
+    这类问题。置信带用经典的 ``±z / sqrt(n)`` 近似（白噪声下 ACF 近似正态），
+    ``white_noise`` 表示 1..max_lag 内没有任何滞后超出带外。
+
+    **给了 ``group_column`` 就按组独立计算**：ACF 假设序列连续，跨设备的拼接会凭空造出
+    一个"长程相关"。分组后置信带按各组的样本量单独算，``series`` 的 ``name`` 是
+    ``"<组>:<列>"``；``max_lag`` 会被最短的那一组削短，保证各条曲线可比较。
+    """
+    cols = numeric_columns(data, columns)
+    if len(data) < 4:
+        raise ValueError("ACF needs at least four rows")
+    if group_column and group_column not in data.columns:
+        raise ValueError(f"Missing group column: {group_column}")
+    if isinstance(max_lag, bool) or not isinstance(max_lag, int) or max_lag < 1:
+        raise ValueError("max_lag must be an integer >= 1")
+    scopes = (
+        [(str(name), frame) for name, frame in data.groupby(group_column, sort=False, dropna=False)]
+        if group_column
+        else [(None, data)]
+    )
+    limit = min(max_lag, min(len(frame) for _, frame in scopes) - 2)
+    if limit < 1:
+        raise ValueError("max_lag is too small for the shortest group in this dataset")
+    z_score = float(stats.norm.ppf(1 - alpha / 2))
+    rows, series = [], []
+    for scope, frame in scopes:
+        band = float(z_score / np.sqrt(len(frame)))
+        for column in cols:
+            values = frame[column].to_numpy(dtype=float)
+            if not np.isfinite(values).all():
+                raise ValueError(f"ACF requires finite values: {column}")
+            centered = values - values.mean()
+            variance = float(np.dot(centered, centered))
+            if variance:
+                correlations = np.array(
+                    [1.0]
+                    + [
+                        float(np.dot(centered[:-lag], centered[lag:]) / variance)
+                        for lag in range(1, limit + 1)
+                    ]
+                )
+            else:
+                # 常数列的自相关无定义：保留全 0 曲线（滞后 0 记 1），而不是抛错。
+                correlations = np.array([1.0] + [0.0] * limit)
+            outside = [lag for lag in range(1, limit + 1) if abs(correlations[lag]) > band]
+            rows.append(
+                {
+                    **({"group": scope} if scope is not None else {}),
+                    "column": column,
+                    "count": int(len(values)),
+                    "lag_1": float(correlations[1]),
+                    "confidence": band,
+                    "significant_count": len(outside),
+                    "significant_lags": outside[:20],
+                    "white_noise": not outside,
+                }
+            )
+            series.append(
+                {
+                    "name": column if scope is None else f"{scope}:{column}",
+                    "x": list(range(0, limit + 1)),
+                    "y": correlations.tolist(),
+                    "upper": band,
+                    "lower": -band,
+                }
+            )
+    return {
+        "rows": rows,
+        "series": series,
+        "max_lag": limit,
+        "alpha": alpha,
+        "group_column": group_column,
+    }
+
+
+def _subsample_rows(count: int, limit: int) -> np.ndarray:
+    """等间隔抽样出至多 ``limit`` 个位置，用于把曲线压到前端可画、MCP 可返回的长度。"""
+    if count <= limit:
+        return np.arange(count)
+    return np.unique(np.linspace(0, count - 1, limit).round().astype(int))
+
+
+def isotonic_fit(
+    data: pd.DataFrame,
+    x_column: str,
+    y_column: str,
+    increasing: bool = True,
+    out_of_bounds: str = "clip",
+    max_points: int = 500,
+) -> dict[str, Any]:
+    """保序（单调）回归：不放任何函数形式，只要求拟合曲线单调不减/不增。
+
+    适合"某个监测量随时间单调劣化"的场景：它给出的是**形状约束下**的最小二乘拟合。
+    注意两点，报告里必须一起写：
+
+    * 保序回归的 R² 是**样本内**的，而且因为它是分段常数、又带有单调约束，天然比线性/
+      多项式拟合更容易贴近数据，用它与别的模型比 R² 是不公平的；
+    * ``blocks``（拟合出的平台段数）才是它真正提供的信息——段数少说明单调关系干净，
+      段数多说明数据里的"单调趋势"其实很碎。
+
+    ``out_of_bounds`` 决定新点落在训练范围之外时的取值（``clip``/``nan``）。
+    """
+    numeric_columns(data, [x_column, y_column])
+    pairs = data[[x_column, y_column]].dropna().to_numpy(dtype=float)
+    if len(pairs) < 3:
+        raise ValueError("Isotonic regression needs at least three paired values")
+    if not np.isfinite(pairs).all():
+        raise ValueError("Isotonic regression requires finite values")
+    order = np.argsort(pairs[:, 0], kind="stable")
+    x, y = pairs[order, 0], pairs[order, 1]
+    model = IsotonicRegression(increasing=increasing, out_of_bounds=out_of_bounds)
+    fitted = model.fit_transform(x, y)
+    blocks = int(np.unique(fitted).size)
+    rho = stats.spearmanr(x, y)
+    selected = _subsample_rows(len(x), max_points)
+    r2 = float(r2_score(y, fitted)) if np.ptp(y) else 0.0
+    return {
+        "rows": [
+            {
+                "index": int(position),
+                "x": float(x[position]),
+                "y": float(y[position]),
+                "fitted": float(fitted[position]),
+            }
+            for position in selected
+        ],
+        "increasing": bool(increasing),
+        "blocks": blocks,
+        "sample_count": int(len(x)),
+        "spearman": float(rho.statistic) if np.isfinite(rho.statistic) else 0.0,
+        "spearman_pvalue": float(rho.pvalue) if np.isfinite(rho.pvalue) else 1.0,
+        "in_sample_r2": r2,
+        "caveat": (
+            "Isotonic R² is in-sample and a monotone step fit is more flexible than a line; "
+            "do not compare it with linear/polynomial R² as if the models were equally constrained."
+        ),
+    }
+
+
+def gbr_fit(
+    data: pd.DataFrame,
+    columns: list[str],
+    target_column: str,
+    n_estimators: int = 100,
+    learning_rate: float = 0.1,
+    max_depth: int = 3,
+    min_samples_leaf: int = 1,
+    subsample: float = 1.0,
+    test_size: float = 0.0,
+    random_state: int = 42,
+    max_points: int = 500,
+) -> dict[str, Any]:
+    """用梯度提升回归（GBR）量化"这些列能解释多少目标"，并给出特征重要性。
+
+    这是**相关性度量**，不是验证器：``test_size=0``（默认）时只在全量数据上拟合并报告
+    样本内 R²，并在警告里写明"这是拟合优度，不是泛化能力"。设置 ``test_size > 0``
+    会再切一份随机留出集——但随机切分无视窗口重叠，结论只能当探索用；真正要下结论
+    请走 ``validation.*``（它按组/资产/时间切分并检查原始行重叠）。
+
+    ``importance`` 来自 GBR 的 ``feature_importances_``（基于分裂带来的不纯度下降），
+    对相关特征会互相分流，排序只应作为"哪些列值得再看"的线索。
+    """
+    numeric_columns(data, [*columns, target_column])
+    if target_column in columns:
+        raise ValueError("The target column cannot also be a GBR feature")
+    if not columns:
+        raise ValueError("GBR needs at least one feature column")
+    if not 0 <= test_size < 1:
+        raise ValueError("test_size must be in [0, 1)")
+    values = data[[*columns, target_column]].dropna()
+    if len(values) < 10:
+        raise ValueError("GBR fit needs at least ten complete rows")
+    numeric = values.to_numpy(dtype=float)
+    if not np.isfinite(numeric).all():
+        raise ValueError("GBR fit requires finite values")
+    frame = pd.DataFrame(numeric[:, :-1], columns=columns, index=values.index)
+    target = pd.Series(numeric[:, -1], index=values.index)
+    warnings: list[str] = []
+    if test_size:
+        train, test = train_test_split(np.arange(len(frame)), test_size=test_size, random_state=random_state)
+        warnings.append(
+            "Holdout split is random and ignores window overlap; use validation.* for a defensible estimate."
+        )
+    else:
+        train = test = np.arange(len(frame))
+        warnings.append("GBR was fitted and scored on the same rows; the R² is in-sample.")
+    estimator = GradientBoostingRegressor(
+        n_estimators=n_estimators,
+        learning_rate=learning_rate,
+        max_depth=max_depth,
+        min_samples_leaf=min_samples_leaf,
+        subsample=subsample,
+        random_state=random_state,
+    ).fit(frame.iloc[train], target.iloc[train])
+    predicted = estimator.predict(frame.iloc[test])
+    actual = target.iloc[test].to_numpy()
+    constant = not np.ptp(actual)
+    metrics = {
+        "algorithm": "gbr_fit",
+        "target_column": target_column,
+        "train_count": int(len(train)),
+        "test_count": int(len(test)),
+        "r2": float(r2_score(actual, predicted)) if not constant else 0.0,
+        "mae": float(mean_absolute_error(actual, predicted)),
+        "rmse": float(np.sqrt(mean_squared_error(actual, predicted))),
+        "train_r2": float(r2_score(target.iloc[train], estimator.predict(frame.iloc[train])))
+        if np.ptp(target.iloc[train].to_numpy())
+        else 0.0,
+        "warnings": warnings,
+    }
+    importance = pd.DataFrame({"feature": columns, "importance": estimator.feature_importances_}).sort_values(
+        "importance", ascending=False, ignore_index=True
+    )
+    selected = _subsample_rows(len(test), max_points)
+    series = {
+        "x": [int(position) for position in selected],
+        "actual": actual[selected].tolist(),
+        "predicted": predicted[selected].tolist(),
+    }
+    return {"metrics": metrics, "importance": importance, "series": series}

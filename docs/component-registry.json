@@ -31,7 +31,31 @@
         "default": null,
         "required": true,
         "display_name": "",
-        "description": "CSV or Parquet path relative to the server data directory",
+        "description": "First source: CSV or Parquet path relative to the server data directory",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "paths",
+        "type": "list",
+        "default": [],
+        "required": false,
+        "display_name": "",
+        "description": "Additional sources appended after `path`, in order (same columns required); rows are concatenated and the index is renumbered",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "source_column",
+        "type": "string",
+        "default": "",
+        "required": false,
+        "display_name": "",
+        "description": "When set, add a column holding the relative path each row came from",
         "min": null,
         "max": null,
         "options": [],
@@ -1216,6 +1240,8 @@
         "max": null,
         "options": [
           "mean",
+          "max",
+          "min",
           "interpolate"
         ],
         "allow_multiple": false
@@ -1478,6 +1504,8 @@
           "power",
           "box-cox",
           "yeo-johnson",
+          "quantile_uniform",
+          "quantile_normal",
           "expression"
         ],
         "allow_multiple": false
@@ -1502,6 +1530,18 @@
         "display_name": "",
         "description": "",
         "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "n_quantiles",
+        "type": "integer",
+        "default": 1000,
+        "required": false,
+        "display_name": "",
+        "description": "quantile_uniform/quantile_normal only; capped at the row count",
+        "min": 1,
         "max": null,
         "options": [],
         "allow_multiple": false
@@ -1595,6 +1635,494 @@
       }
     ],
     "implementation_class": "fault_platform.components.builtin.BinarizeComponent"
+  },
+  {
+    "component_type": "data.polynomial_features",
+    "display_name": "多项式特征",
+    "category": "data",
+    "description": "Generate polynomial and interaction terms from numeric columns before window cutting",
+    "version": "1.0",
+    "subcategory": "规范化",
+    "tags": [
+      "polynomial",
+      "interaction",
+      "多项式",
+      "交互项"
+    ],
+    "search_keywords": [
+      "polynomial features",
+      "interaction terms",
+      "生成多项式特征",
+      "二次项",
+      "交叉项"
+    ],
+    "compatibility": [
+      "fault-platform>=0.1,<1"
+    ],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": "",
+        "accepted_types": [
+          "Dataset"
+        ]
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "columns",
+        "type": "column_list",
+        "default": null,
+        "required": true,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "degree",
+        "type": "integer",
+        "default": 2,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 2,
+        "max": 5,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "interaction_only",
+        "type": "boolean",
+        "default": false,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "include_bias",
+        "type": "boolean",
+        "default": false,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "keep_original",
+        "type": "boolean",
+        "default": true,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "max_columns",
+        "type": "integer",
+        "default": 512,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 2,
+        "max": 10000,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.PolynomialFeatureComponent"
+  },
+  {
+    "component_type": "data.discretize",
+    "display_name": "离散化分箱",
+    "category": "data",
+    "description": "KBins discretization into bin indices or one-hot flags, with a full-data bound warning",
+    "version": "1.0",
+    "subcategory": "转换",
+    "tags": [
+      "discretize",
+      "binning",
+      "分箱",
+      "离散化"
+    ],
+    "search_keywords": [
+      "discretization",
+      "kbins",
+      "k箱离散化",
+      "分位数分箱",
+      "离散化分箱"
+    ],
+    "compatibility": [
+      "fault-platform>=0.1,<1"
+    ],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": "",
+        "accepted_types": [
+          "Dataset"
+        ]
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "columns",
+        "type": "column_list",
+        "default": null,
+        "required": true,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "n_bins",
+        "type": "integer",
+        "default": 5,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 2,
+        "max": 200,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "strategy",
+        "type": "enum",
+        "default": "quantile",
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [
+          "uniform",
+          "quantile",
+          "kmeans"
+        ],
+        "allow_multiple": false
+      },
+      {
+        "name": "encode",
+        "type": "enum",
+        "default": "ordinal",
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [
+          "ordinal",
+          "onehot-dense"
+        ],
+        "allow_multiple": false
+      },
+      {
+        "name": "keep_original",
+        "type": "boolean",
+        "default": true,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "suffix",
+        "type": "string",
+        "default": "_bin",
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "random_state",
+        "type": "integer",
+        "default": 42,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 0,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.DiscretizeComponent"
+  },
+  {
+    "component_type": "data.seasonal_difference",
+    "display_name": "同期差分",
+    "category": "data",
+    "description": "Seasonal differencing or ratio against the same phase one period earlier",
+    "version": "1.0",
+    "subcategory": "变换与替换",
+    "tags": [
+      "seasonal",
+      "year over year",
+      "同比",
+      "同期差分"
+    ],
+    "search_keywords": [
+      "seasonal difference",
+      "year over year",
+      "同比口径",
+      "同期差分",
+      "季节差分"
+    ],
+    "compatibility": [
+      "fault-platform>=0.1,<1"
+    ],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": "",
+        "accepted_types": [
+          "Dataset"
+        ]
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "columns",
+        "type": "column_list",
+        "default": null,
+        "required": true,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "period",
+        "type": "integer",
+        "default": 24,
+        "required": false,
+        "display_name": "",
+        "description": "Samples per cycle (24 = daily series hourly)",
+        "min": 1,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "mode",
+        "type": "enum",
+        "default": "difference",
+        "required": false,
+        "display_name": "",
+        "description": "ratio needs a strictly positive baseline",
+        "min": null,
+        "max": null,
+        "options": [
+          "difference",
+          "ratio"
+        ],
+        "allow_multiple": false
+      },
+      {
+        "name": "group_column",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "time_column",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "keep_original",
+        "type": "boolean",
+        "default": true,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "suffix",
+        "type": "string",
+        "default": "",
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "drop_missing",
+        "type": "boolean",
+        "default": false,
+        "required": false,
+        "display_name": "",
+        "description": "Drop the first period of every group instead of keeping it as NaN",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.SeasonalDifferenceComponent"
+  },
+  {
+    "component_type": "data.concat",
+    "display_name": "数据拼接",
+    "category": "data",
+    "description": "Concatenate several Dataset branches into one table; same columns required",
+    "version": "1.0",
+    "subcategory": "变换与替换",
+    "tags": [
+      "concat",
+      "merge sources",
+      "拼接",
+      "多数据源",
+      "合并"
+    ],
+    "search_keywords": [
+      "concatenate",
+      "union rows",
+      "combine data sources",
+      "数据拼接",
+      "合并数据源",
+      "多数据源",
+      "多个数据源"
+    ],
+    "compatibility": [
+      "fault-platform>=0.1,<1"
+    ],
+    "input_ports": [
+      {
+        "name": "first",
+        "data_type": "Dataset",
+        "required": true,
+        "description": "",
+        "accepted_types": [
+          "Dataset"
+        ]
+      },
+      {
+        "name": "second",
+        "data_type": "Dataset",
+        "required": true,
+        "description": "",
+        "accepted_types": [
+          "Dataset"
+        ]
+      },
+      {
+        "name": "third",
+        "data_type": "Dataset",
+        "required": false,
+        "description": "",
+        "accepted_types": [
+          "Dataset"
+        ]
+      },
+      {
+        "name": "fourth",
+        "data_type": "Dataset",
+        "required": false,
+        "description": "",
+        "accepted_types": [
+          "Dataset"
+        ]
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "source_column",
+        "type": "string",
+        "default": "",
+        "required": false,
+        "display_name": "",
+        "description": "When set, add a column holding the input port each row came from",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.ConcatComponent"
   },
   {
     "component_type": "explore.central_tendency",
@@ -2272,6 +2800,1194 @@
       }
     ],
     "implementation_class": "fault_platform.components.builtin.AnomalyExplorationComponent"
+  },
+  {
+    "component_type": "explore.peaks",
+    "display_name": "山峰检测",
+    "category": "explore",
+    "description": "Local maxima detection with prominence and minimum-distance filtering",
+    "version": "1.0",
+    "subcategory": "集中趋势",
+    "tags": [
+      "peak",
+      "find peaks",
+      "山峰",
+      "峰值"
+    ],
+    "search_keywords": [
+      "peak detection",
+      "local maxima",
+      "寻找山峰",
+      "山峰数",
+      "峰值检测"
+    ],
+    "compatibility": [
+      "fault-platform>=0.1,<1"
+    ],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": "",
+        "accepted_types": [
+          "Dataset",
+          "FeatureDataset"
+        ]
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "statistics",
+        "data_type": "StatisticsResult",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "columns",
+        "type": "column_list",
+        "default": [],
+        "required": false,
+        "display_name": "",
+        "description": "Column names; numeric components default to all numeric columns",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "prominence",
+        "type": "float",
+        "default": 0.0,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 0,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "distance",
+        "type": "integer",
+        "default": 1,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 1,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "group_column",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "Find peaks within each group; never across",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.PeaksComponent"
+  },
+  {
+    "component_type": "explore.normality",
+    "display_name": "正态性校验",
+    "category": "explore",
+    "description": "Per-column normality tests (D'Agostino-Pearson or Shapiro-Wilk) with an explicit caveat",
+    "version": "1.0",
+    "subcategory": "离散度量",
+    "tags": [
+      "normality",
+      "shapiro",
+      "正态分布",
+      "正态性"
+    ],
+    "search_keywords": [
+      "normality test",
+      "gaussian check",
+      "正态分布校验",
+      "正态性检验",
+      "分布检验"
+    ],
+    "compatibility": [
+      "fault-platform>=0.1,<1"
+    ],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": "",
+        "accepted_types": [
+          "Dataset",
+          "FeatureDataset"
+        ]
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "statistics",
+        "data_type": "StatisticsResult",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "columns",
+        "type": "column_list",
+        "default": [],
+        "required": false,
+        "display_name": "",
+        "description": "Column names; numeric components default to all numeric columns",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "method",
+        "type": "enum",
+        "default": "normaltest",
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [
+          "normaltest",
+          "shapiro"
+        ],
+        "allow_multiple": false
+      },
+      {
+        "name": "alpha",
+        "type": "float",
+        "default": 0.05,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 1e-06,
+        "max": 0.999999,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.NormalityCheckComponent"
+  },
+  {
+    "component_type": "explore.kl_divergence",
+    "display_name": "KL散度度量",
+    "category": "explore",
+    "description": "Per-column Kullback-Leibler and Jensen-Shannon divergence between reference and current data",
+    "version": "1.0",
+    "subcategory": "离散度量",
+    "tags": [
+      "kl divergence",
+      "js divergence",
+      "散度",
+      "相对熵"
+    ],
+    "search_keywords": [
+      "divergence",
+      "relative entropy",
+      "KL散度度量",
+      "分布差异",
+      "JS散度"
+    ],
+    "compatibility": [
+      "fault-platform>=0.1,<1"
+    ],
+    "input_ports": [
+      {
+        "name": "reference",
+        "data_type": "Dataset",
+        "required": true,
+        "description": "",
+        "accepted_types": [
+          "Dataset"
+        ]
+      },
+      {
+        "name": "current",
+        "data_type": "Dataset",
+        "required": true,
+        "description": "",
+        "accepted_types": [
+          "Dataset"
+        ]
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "statistics",
+        "data_type": "StatisticsResult",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "columns",
+        "type": "column_list",
+        "default": [],
+        "required": false,
+        "display_name": "",
+        "description": "Column names; numeric components default to all numeric columns",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "bins",
+        "type": "integer",
+        "default": 10,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 2,
+        "max": 200,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "epsilon",
+        "type": "float",
+        "default": 1e-09,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 0,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "js_threshold",
+        "type": "float",
+        "default": 0.1,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 0,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.DivergenceComponent"
+  },
+  {
+    "component_type": "explore.acf",
+    "display_name": "ACF自相关函数",
+    "category": "explore",
+    "description": "Autocorrelation curve with a 95% confidence band and per-lag significance flags",
+    "version": "1.0",
+    "subcategory": "集中趋势",
+    "tags": [
+      "autocorrelation",
+      "acf",
+      "自相关",
+      "白噪声"
+    ],
+    "search_keywords": [
+      "autocorrelation function",
+      "ACF自相关函数",
+      "自相关",
+      "记忆长度",
+      "白噪声检验"
+    ],
+    "compatibility": [
+      "fault-platform>=0.1,<1"
+    ],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": "",
+        "accepted_types": [
+          "Dataset",
+          "FeatureDataset"
+        ]
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "statistics",
+        "data_type": "StatisticsResult",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "columns",
+        "type": "column_list",
+        "default": [],
+        "required": false,
+        "display_name": "",
+        "description": "Column names; numeric components default to all numeric columns",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "max_lag",
+        "type": "integer",
+        "default": 50,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 1,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "alpha",
+        "type": "float",
+        "default": 0.05,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 1e-06,
+        "max": 0.999999,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "group_column",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "Compute one ACF per group; never across",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.AcfComponent"
+  },
+  {
+    "component_type": "explore.isotonic",
+    "display_name": "保序回归",
+    "category": "explore",
+    "description": "Monotone (isotonic) regression between two columns, reporting blocks and Spearman rho",
+    "version": "1.0",
+    "subcategory": "相关性度量",
+    "tags": [
+      "isotonic",
+      "monotonic",
+      "保序回归",
+      "单调"
+    ],
+    "search_keywords": [
+      "isotonic regression",
+      "monotonic fit",
+      "保序回归",
+      "单调回归",
+      "量化相关性拟合"
+    ],
+    "compatibility": [
+      "fault-platform>=0.1,<1"
+    ],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": "",
+        "accepted_types": [
+          "Dataset",
+          "FeatureDataset"
+        ]
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "statistics",
+        "data_type": "StatisticsResult",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "x_column",
+        "type": "column",
+        "default": null,
+        "required": true,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "y_column",
+        "type": "column",
+        "default": null,
+        "required": true,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "increasing",
+        "type": "boolean",
+        "default": true,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "out_of_bounds",
+        "type": "enum",
+        "default": "clip",
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [
+          "clip",
+          "nan"
+        ],
+        "allow_multiple": false
+      },
+      {
+        "name": "max_points",
+        "type": "integer",
+        "default": 500,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 10,
+        "max": 5000,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.IsotonicComponent"
+  },
+  {
+    "component_type": "explore.gbr_fit",
+    "display_name": "量化相关性拟合GBR",
+    "category": "explore",
+    "description": "Gradient-boosting fit that quantifies how much the columns explain the target",
+    "version": "1.0",
+    "subcategory": "相关性度量",
+    "tags": [
+      "gbr",
+      "gradient boosting",
+      "相关性",
+      "特征重要性"
+    ],
+    "search_keywords": [
+      "gbr fit",
+      "gradient boosting regression",
+      "量化相关性拟合GBR",
+      "相关性拟合",
+      "非线性关系"
+    ],
+    "compatibility": [
+      "fault-platform>=0.1,<1"
+    ],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": "",
+        "accepted_types": [
+          "Dataset",
+          "FeatureDataset"
+        ]
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "statistics",
+        "data_type": "StatisticsResult",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "importance",
+        "data_type": "FeatureImportance",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "columns",
+        "type": "column_list",
+        "default": null,
+        "required": true,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "target_column",
+        "type": "column",
+        "default": null,
+        "required": true,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "n_estimators",
+        "type": "integer",
+        "default": 100,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 1,
+        "max": 2000,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "learning_rate",
+        "type": "float",
+        "default": 0.1,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 0.0001,
+        "max": 1,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "max_depth",
+        "type": "integer",
+        "default": 3,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 1,
+        "max": 32,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "min_samples_leaf",
+        "type": "integer",
+        "default": 1,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 1,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "subsample",
+        "type": "float",
+        "default": 1.0,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 0.01,
+        "max": 1,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "test_size",
+        "type": "float",
+        "default": 0.0,
+        "required": false,
+        "display_name": "",
+        "description": "0 = in-sample only (exploratory); a holdout here ignores window overlap",
+        "min": 0,
+        "max": 0.9,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "random_state",
+        "type": "integer",
+        "default": 42,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 0,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "max_points",
+        "type": "integer",
+        "default": 500,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 10,
+        "max": 5000,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.GbrFitComponent"
+  },
+  {
+    "component_type": "explore.hp_filter",
+    "display_name": "HP趋势过滤",
+    "category": "explore",
+    "description": "Hodrick-Prescott trend/cycle separation with the cycle variance share",
+    "version": "1.0",
+    "subcategory": "离散度量",
+    "tags": [
+      "hodrick prescott",
+      "hp filter",
+      "趋势",
+      "周期分离"
+    ],
+    "search_keywords": [
+      "hodrick prescott filter",
+      "hp filter",
+      "HP过滤器",
+      "趋势周期分解",
+      "趋势滤波"
+    ],
+    "compatibility": [
+      "fault-platform>=0.1,<1"
+    ],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": "",
+        "accepted_types": [
+          "Dataset",
+          "FeatureDataset"
+        ]
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "statistics",
+        "data_type": "StatisticsResult",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "column",
+        "type": "column",
+        "default": null,
+        "required": true,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "lamb",
+        "type": "float",
+        "default": 1600.0,
+        "required": false,
+        "display_name": "",
+        "description": "Smoothing penalty; larger = smoother trend",
+        "min": 0.0001,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "group_column",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "time_column",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "max_points",
+        "type": "integer",
+        "default": 500,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 10,
+        "max": 5000,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.HpFilterComponent"
+  },
+  {
+    "component_type": "explore.stationarity",
+    "display_name": "平稳性检查",
+    "category": "explore",
+    "description": "Augmented Dickey-Fuller unit-root test with asymptotic critical values",
+    "version": "1.0",
+    "subcategory": "离散度量",
+    "tags": [
+      "adf",
+      "stationarity",
+      "unit root",
+      "平稳性"
+    ],
+    "search_keywords": [
+      "stationarity check",
+      "adf test",
+      "平稳性检查",
+      "单位根检验"
+    ],
+    "compatibility": [
+      "fault-platform>=0.1,<1"
+    ],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": "",
+        "accepted_types": [
+          "Dataset",
+          "FeatureDataset"
+        ]
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "statistics",
+        "data_type": "StatisticsResult",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "column",
+        "type": "column",
+        "default": null,
+        "required": true,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "max_lag",
+        "type": "integer",
+        "default": 0,
+        "required": false,
+        "display_name": "",
+        "description": "0 = Schwert rule of thumb",
+        "min": 0,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "regression",
+        "type": "enum",
+        "default": "c",
+        "required": false,
+        "display_name": "",
+        "description": "c = constant, ct = constant + trend, n = none",
+        "min": null,
+        "max": null,
+        "options": [
+          "c",
+          "ct",
+          "n"
+        ],
+        "allow_multiple": false
+      },
+      {
+        "name": "group_column",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "time_column",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.StationarityComponent"
+  },
+  {
+    "component_type": "explore.dtw",
+    "display_name": "DTW距离",
+    "category": "explore",
+    "description": "Dynamic time warping distance between two columns, with an optional band",
+    "version": "1.0",
+    "subcategory": "相关性度量",
+    "tags": [
+      "dtw",
+      "dynamic time warping",
+      "形状距离",
+      "DTW"
+    ],
+    "search_keywords": [
+      "dynamic time warping",
+      "dtw distance",
+      "DTW距离",
+      "DTW相关分析",
+      "形状相似度"
+    ],
+    "compatibility": [
+      "fault-platform>=0.1,<1"
+    ],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": "",
+        "accepted_types": [
+          "Dataset",
+          "FeatureDataset"
+        ]
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "statistics",
+        "data_type": "StatisticsResult",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "first_column",
+        "type": "column",
+        "default": null,
+        "required": true,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "second_column",
+        "type": "column",
+        "default": null,
+        "required": true,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "band",
+        "type": "integer",
+        "default": 0,
+        "required": false,
+        "display_name": "",
+        "description": "Sakoe-Chiba radius; 0 = unbounded",
+        "min": 0,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "normalize",
+        "type": "boolean",
+        "default": true,
+        "required": false,
+        "display_name": "",
+        "description": "Z-normalize both series: compare shape, not level",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.DtwComponent"
+  },
+  {
+    "component_type": "explore.sbd",
+    "display_name": "SBD相关",
+    "category": "explore",
+    "description": "Shape-based distance from the peak normalised cross-correlation",
+    "version": "1.0",
+    "subcategory": "相关性度量",
+    "tags": [
+      "sbd",
+      "shape based distance",
+      "形状",
+      "平移相关"
+    ],
+    "search_keywords": [
+      "shape based distance",
+      "sbd",
+      "SBD相关",
+      "形状距离",
+      "平移相似度"
+    ],
+    "compatibility": [
+      "fault-platform>=0.1,<1"
+    ],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": "",
+        "accepted_types": [
+          "Dataset",
+          "FeatureDataset"
+        ]
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "statistics",
+        "data_type": "StatisticsResult",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "first_column",
+        "type": "column",
+        "default": null,
+        "required": true,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "second_column",
+        "type": "column",
+        "default": null,
+        "required": true,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "max_lag_fraction",
+        "type": "float",
+        "default": 0.5,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 0.01,
+        "max": 1.0,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "normalize",
+        "type": "boolean",
+        "default": true,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.SbdComponent"
+  },
+  {
+    "component_type": "explore.slope_cosine",
+    "display_name": "斜率与余弦夹角",
+    "category": "explore",
+    "description": "Rolling slopes plus the cosine between the two increment vectors",
+    "version": "1.0",
+    "subcategory": "集中趋势",
+    "tags": [
+      "slope",
+      "cosine",
+      "斜率",
+      "夹角"
+    ],
+    "search_keywords": [
+      "slope cosine",
+      "cosine similarity",
+      "斜率与余弦夹角",
+      "同向性分析",
+      "联动分析"
+    ],
+    "compatibility": [
+      "fault-platform>=0.1,<1"
+    ],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": "",
+        "accepted_types": [
+          "Dataset",
+          "FeatureDataset"
+        ]
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "prediction",
+        "data_type": "Prediction",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "first_column",
+        "type": "column",
+        "default": null,
+        "required": true,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "second_column",
+        "type": "column",
+        "default": null,
+        "required": true,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "window",
+        "type": "integer",
+        "default": 20,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 3,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "threshold",
+        "type": "float",
+        "default": 0.5,
+        "required": false,
+        "display_name": "",
+        "description": "Flag rows with cosine below -threshold",
+        "min": 0,
+        "max": 1,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "group_column",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "time_column",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.SlopeCosineComponent"
   },
   {
     "component_type": "visual.scatter",
@@ -2968,7 +4684,7 @@
     "component_type": "visual.overview",
     "display_name": "数据概览",
     "category": "visual",
-    "description": "Shape, dtypes, missing rates, summary and time range",
+    "description": "Shape, dtypes, missing rates, summary, time range and label/class balance",
     "version": "1.0",
     "subcategory": "",
     "tags": [],
@@ -2985,6 +4701,15 @@
         "accepted_types": [
           "Dataset",
           "FeatureDataset"
+        ]
+      },
+      {
+        "name": "labels",
+        "data_type": "LabelVector",
+        "required": false,
+        "description": "Optional label vector for class balance",
+        "accepted_types": [
+          "LabelVector"
         ]
       }
     ],
@@ -3004,6 +4729,18 @@
         "required": false,
         "display_name": "",
         "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "label_column",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "Label column in the data; use it or the labels port",
         "min": null,
         "max": null,
         "options": [],
@@ -3280,7 +5017,27 @@
           "iqr",
           "mad",
           "peak",
-          "crest_factor"
+          "crest_factor",
+          "count",
+          "argmax_first",
+          "argmax_last",
+          "argmin_first",
+          "argmin_last",
+          "count_above_mean",
+          "count_below_mean",
+          "longest_above_mean",
+          "longest_below_mean",
+          "mean_delta",
+          "mean_abs_delta",
+          "mean_second_derivative",
+          "duplicate_point_ratio",
+          "repeated_value_ratio",
+          "duplicate_sum",
+          "time_reversal_asymmetry",
+          "std_gt_range",
+          "variance_gt_std",
+          "max_repeated",
+          "min_repeated"
         ],
         "allow_multiple": false
       },
@@ -3634,7 +5391,10 @@
         "options": [
           "mean",
           "std",
+          "variance",
           "median",
+          "max",
+          "min",
           "max_repeat"
         ],
         "allow_multiple": false
@@ -3744,7 +5504,9 @@
         "options": [
           "first_difference",
           "second_difference",
-          "autocorrelation"
+          "autocorrelation",
+          "sum_abs_change",
+          "peak_count"
         ],
         "allow_multiple": false
       },
@@ -3768,6 +5530,18 @@
         "display_name": "",
         "description": "",
         "min": 3,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "prominence",
+        "type": "float",
+        "default": 0.0,
+        "required": false,
+        "display_name": "",
+        "description": "peak_count only: drop peaks flatter than this prominence (0 = keep every local peak)",
+        "min": 0,
         "max": null,
         "options": [],
         "allow_multiple": false
@@ -3798,6 +5572,125 @@
       }
     ],
     "implementation_class": "fault_platform.components.builtin.TemporalFeatureComponent"
+  },
+  {
+    "component_type": "feature.wavelet",
+    "display_name": "小波特征",
+    "category": "feature",
+    "description": "Rolling Haar multi-scale energies, dominant scale and detail peak counts",
+    "version": "1.0",
+    "subcategory": "时域 Time Domain",
+    "tags": [
+      "wavelet",
+      "haar",
+      "小波",
+      "多尺度"
+    ],
+    "search_keywords": [
+      "wavelet features",
+      "haar wavelet",
+      "小波变换",
+      "连续小波变换的山峰数",
+      "多尺度能量",
+      "小波特征"
+    ],
+    "compatibility": [
+      "fault-platform>=0.1,<1"
+    ],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": "",
+        "accepted_types": [
+          "Dataset"
+        ]
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "features",
+        "data_type": "FeatureDataset",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "columns",
+        "type": "column_list",
+        "default": null,
+        "required": true,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "window",
+        "type": "integer",
+        "default": 32,
+        "required": false,
+        "display_name": "",
+        "description": "Samples per rolling window",
+        "min": 4,
+        "max": 4096,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "levels",
+        "type": "integer",
+        "default": 3,
+        "required": false,
+        "display_name": "",
+        "description": "Must be <= floor(log2(window))",
+        "min": 1,
+        "max": 8,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "peak_sigma",
+        "type": "float",
+        "default": 3.0,
+        "required": false,
+        "display_name": "",
+        "description": "Detail peaks above this robust scale count",
+        "min": 0,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "group_column",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "time_column",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.WaveletFeatureComponent"
   },
   {
     "component_type": "feature.entropy",
@@ -4045,7 +5938,8 @@
         "max": null,
         "options": [
           "approximate_entropy",
-          "information_entropy"
+          "information_entropy",
+          "binned_entropy"
         ],
         "allow_multiple": false
       },
@@ -5861,6 +7755,450 @@
     "implementation_class": "fault_platform.components.builtin.LinearRegressionComponent"
   },
   {
+    "component_type": "validation.ridge",
+    "display_name": "岭回归",
+    "category": "validation",
+    "description": "Ridge regression with L2 shrinkage; same metric fields as linear regression",
+    "version": "1.0",
+    "subcategory": "可预测性",
+    "tags": [
+      "ridge",
+      "regression",
+      "岭回归",
+      "正则化"
+    ],
+    "search_keywords": [
+      "ridge regression",
+      "l2 regularization",
+      "岭回归",
+      "多重共线性",
+      "回归验证"
+    ],
+    "compatibility": [
+      "fault-platform>=0.1,<1"
+    ],
+    "input_ports": [
+      {
+        "name": "features",
+        "data_type": "FeatureDataset",
+        "required": true,
+        "description": "",
+        "accepted_types": [
+          "FeatureDataset"
+        ]
+      },
+      {
+        "name": "target",
+        "data_type": "LabelVector",
+        "required": true,
+        "description": "",
+        "accepted_types": [
+          "LabelVector"
+        ]
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "model",
+        "data_type": "Model",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "prediction",
+        "data_type": "Prediction",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "metrics",
+        "data_type": "Metrics",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "importance",
+        "data_type": "FeatureImportance",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "split_method",
+        "type": "enum",
+        "default": "random",
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [
+          "random",
+          "group",
+          "temporal"
+        ],
+        "allow_multiple": false
+      },
+      {
+        "name": "test_size",
+        "type": "float",
+        "default": 0.25,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 0.05,
+        "max": 0.5,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "random_state",
+        "type": "integer",
+        "default": 42,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 0,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "alpha",
+        "type": "float",
+        "default": 1.0,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 0,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "fit_intercept",
+        "type": "boolean",
+        "default": true,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.RidgeComponent"
+  },
+  {
+    "component_type": "validation.exponential_smoothing",
+    "display_name": "指数平滑",
+    "category": "validation",
+    "description": "Holt or Holt-Winters exponential smoothing with a tail holdout forecast",
+    "version": "1.0",
+    "subcategory": "可预测性",
+    "tags": [
+      "exponential smoothing",
+      "holt",
+      "holt winters",
+      "指数平滑",
+      "三阶指数平滑"
+    ],
+    "search_keywords": [
+      "exponential smoothing",
+      "holt winters",
+      "指数平滑",
+      "三阶指数平滑",
+      "平滑预测"
+    ],
+    "compatibility": [
+      "fault-platform>=0.1,<1"
+    ],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": "",
+        "accepted_types": [
+          "Dataset"
+        ]
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "model",
+        "data_type": "Model",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "prediction",
+        "data_type": "Prediction",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "metrics",
+        "data_type": "Metrics",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "column",
+        "type": "column",
+        "default": null,
+        "required": true,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "method",
+        "type": "enum",
+        "default": "holt",
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [
+          "holt",
+          "holt_winters"
+        ],
+        "allow_multiple": false
+      },
+      {
+        "name": "alpha",
+        "type": "float",
+        "default": 0.3,
+        "required": false,
+        "display_name": "",
+        "description": "Level smoothing",
+        "min": 1e-06,
+        "max": 0.999999,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "beta",
+        "type": "float",
+        "default": 0.1,
+        "required": false,
+        "display_name": "",
+        "description": "Trend smoothing",
+        "min": 1e-06,
+        "max": 0.999999,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "gamma",
+        "type": "float",
+        "default": 0.1,
+        "required": false,
+        "display_name": "",
+        "description": "Seasonal smoothing",
+        "min": 1e-06,
+        "max": 0.999999,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "seasonal_periods",
+        "type": "integer",
+        "default": 24,
+        "required": false,
+        "display_name": "",
+        "description": "holt_winters only",
+        "min": 2,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "seasonal",
+        "type": "enum",
+        "default": "additive",
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [
+          "additive",
+          "multiplicative"
+        ],
+        "allow_multiple": false
+      },
+      {
+        "name": "test_size",
+        "type": "float",
+        "default": 0.25,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 0.05,
+        "max": 0.5,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "time_column",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "group_column",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.ExponentialSmoothingComponent"
+  },
+  {
+    "component_type": "validation.arima",
+    "display_name": "ARIMA",
+    "category": "validation",
+    "description": "ARIMA forecasting; requires the optional statsmodels dependency",
+    "version": "1.0",
+    "subcategory": "可预测性",
+    "tags": [
+      "arima",
+      "sarimax",
+      "time series",
+      "ARIMA"
+    ],
+    "search_keywords": [
+      "arima",
+      "sarimax",
+      "ARIMA",
+      "SARIMAX",
+      "时序预测模型"
+    ],
+    "compatibility": [
+      "fault-platform>=0.1,<1"
+    ],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": "",
+        "accepted_types": [
+          "Dataset"
+        ]
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "model",
+        "data_type": "Model",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "prediction",
+        "data_type": "Prediction",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "metrics",
+        "data_type": "Metrics",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "column",
+        "type": "column",
+        "default": null,
+        "required": true,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "order",
+        "type": "list",
+        "default": [
+          2,
+          1,
+          1
+        ],
+        "required": false,
+        "display_name": "",
+        "description": "[p, d, q]",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "test_size",
+        "type": "float",
+        "default": 0.25,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 0.05,
+        "max": 0.5,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "trend",
+        "type": "string",
+        "default": "c",
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "time_column",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.ArimaComponent"
+  },
+  {
     "component_type": "validation.arma",
     "display_name": "ARMA",
     "category": "validation",
@@ -6171,6 +8509,1483 @@
       }
     ],
     "implementation_class": "fault_platform.components.builtin.IsolationForestDetectorComponent"
+  },
+  {
+    "component_type": "validation.dbscan_detector",
+    "display_name": "DBSCAN检测",
+    "category": "validation",
+    "description": "Density-based detection: points outside every cluster are anomalies (eps controls the rate)",
+    "version": "1.0",
+    "subcategory": "可检测性",
+    "tags": [
+      "dbscan",
+      "density",
+      "anomaly",
+      "密度聚类"
+    ],
+    "search_keywords": [
+      "dbscan",
+      "density based detection",
+      "DBSCAN 检测",
+      "密度检测",
+      "无监督异常检测"
+    ],
+    "compatibility": [
+      "fault-platform>=0.1,<1"
+    ],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": "",
+        "accepted_types": [
+          "Dataset"
+        ]
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "model",
+        "data_type": "Model",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "prediction",
+        "data_type": "Prediction",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "metrics",
+        "data_type": "Metrics",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "columns",
+        "type": "column_list",
+        "default": [],
+        "required": false,
+        "display_name": "",
+        "description": "Column names; numeric components default to all numeric columns",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "eps",
+        "type": "float",
+        "default": 1.0,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 1e-06,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "min_samples",
+        "type": "integer",
+        "default": 5,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 2,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "metric",
+        "type": "enum",
+        "default": "euclidean",
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [
+          "euclidean",
+          "manhattan",
+          "chebyshev"
+        ],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.DbscanDetectorComponent"
+  },
+  {
+    "component_type": "validation.pca_detector",
+    "display_name": "PCA检测器",
+    "category": "validation",
+    "description": "PCA reconstruction-error anomaly detection with a contamination-based threshold",
+    "version": "1.0",
+    "subcategory": "可检测性",
+    "tags": [
+      "pca",
+      "reconstruction",
+      "anomaly",
+      "主成分"
+    ],
+    "search_keywords": [
+      "pca anomaly detection",
+      "reconstruction error",
+      "PCA检测器",
+      "主成分分析异常检测",
+      "重构误差"
+    ],
+    "compatibility": [
+      "fault-platform>=0.1,<1"
+    ],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": "",
+        "accepted_types": [
+          "Dataset"
+        ]
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "model",
+        "data_type": "Model",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "prediction",
+        "data_type": "Prediction",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "metrics",
+        "data_type": "Metrics",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "columns",
+        "type": "column_list",
+        "default": [],
+        "required": false,
+        "display_name": "",
+        "description": "Column names; numeric components default to all numeric columns",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "n_components",
+        "type": "integer",
+        "default": 0,
+        "required": false,
+        "display_name": "",
+        "description": "0 = keep 95% of the variance automatically",
+        "min": 0,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "contamination",
+        "type": "float",
+        "default": 0.05,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 1e-06,
+        "max": 0.5,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "random_state",
+        "type": "integer",
+        "default": 42,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 0,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.PcaDetectorComponent"
+  },
+  {
+    "component_type": "validation.min_cluster_detector",
+    "display_name": "Mincluster探测器",
+    "category": "validation",
+    "description": "MiniBatchKMeans cluster-distance detection; n_clusters=0 picks the count by silhouette",
+    "version": "1.0",
+    "subcategory": "可检测性",
+    "tags": [
+      "kmeans",
+      "cluster",
+      "anomaly",
+      "聚类"
+    ],
+    "search_keywords": [
+      "minicluster detector",
+      "kmeans anomaly detection",
+      "Mincluster探测器",
+      "聚类检测",
+      "自动给出合理聚类"
+    ],
+    "compatibility": [
+      "fault-platform>=0.1,<1"
+    ],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": "",
+        "accepted_types": [
+          "Dataset"
+        ]
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "model",
+        "data_type": "Model",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "prediction",
+        "data_type": "Prediction",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "metrics",
+        "data_type": "Metrics",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "columns",
+        "type": "column_list",
+        "default": [],
+        "required": false,
+        "display_name": "",
+        "description": "Column names; numeric components default to all numeric columns",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "n_clusters",
+        "type": "integer",
+        "default": 0,
+        "required": false,
+        "display_name": "",
+        "description": "0 = choose the count automatically",
+        "min": 0,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "contamination",
+        "type": "float",
+        "default": 0.05,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 1e-06,
+        "max": 0.5,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "max_clusters",
+        "type": "integer",
+        "default": 8,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 2,
+        "max": 64,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "batch_size",
+        "type": "integer",
+        "default": 1024,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 16,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "silhouette_sample",
+        "type": "integer",
+        "default": 5000,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 50,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "random_state",
+        "type": "integer",
+        "default": 42,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 0,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.MinClusterDetectorComponent"
+  },
+  {
+    "component_type": "validation.kmeans",
+    "display_name": "KMeans聚类",
+    "category": "validation",
+    "description": "MiniBatchKMeans clustering with silhouette-based cluster-count selection",
+    "version": "1.0",
+    "subcategory": "可诊断性",
+    "tags": [
+      "kmeans",
+      "cluster",
+      "聚类",
+      "工况划分"
+    ],
+    "search_keywords": [
+      "kmeans clustering",
+      "cluster analysis",
+      "kmeans聚类",
+      "聚类分析",
+      "工况聚类"
+    ],
+    "compatibility": [
+      "fault-platform>=0.1,<1"
+    ],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": "",
+        "accepted_types": [
+          "Dataset",
+          "FeatureDataset"
+        ]
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "model",
+        "data_type": "Model",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "prediction",
+        "data_type": "Prediction",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "metrics",
+        "data_type": "Metrics",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "columns",
+        "type": "column_list",
+        "default": [],
+        "required": false,
+        "display_name": "",
+        "description": "Column names; numeric components default to all numeric columns",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "n_clusters",
+        "type": "integer",
+        "default": 0,
+        "required": false,
+        "display_name": "",
+        "description": "0 = choose automatically by silhouette",
+        "min": 0,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "max_clusters",
+        "type": "integer",
+        "default": 8,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 2,
+        "max": 64,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "batch_size",
+        "type": "integer",
+        "default": 1024,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 16,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "silhouette_sample",
+        "type": "integer",
+        "default": 5000,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 50,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "random_state",
+        "type": "integer",
+        "default": 42,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 0,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.KMeansComponent"
+  },
+  {
+    "component_type": "validation.one_class_svm",
+    "display_name": "单类SVM检测",
+    "category": "validation",
+    "description": "One-class SVM novelty detection learned from normal behaviour only",
+    "version": "1.0",
+    "subcategory": "可检测性",
+    "tags": [
+      "one class svm",
+      "novelty",
+      "单类",
+      "边界检测"
+    ],
+    "search_keywords": [
+      "one class svm",
+      "novelty detection",
+      "单类SVM",
+      "支持向量机检测",
+      "无标签检测"
+    ],
+    "compatibility": [
+      "fault-platform>=0.1,<1"
+    ],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": "",
+        "accepted_types": [
+          "Dataset"
+        ]
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "model",
+        "data_type": "Model",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "prediction",
+        "data_type": "Prediction",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "metrics",
+        "data_type": "Metrics",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "columns",
+        "type": "column_list",
+        "default": [],
+        "required": false,
+        "display_name": "",
+        "description": "Column names; numeric components default to all numeric columns",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "nu",
+        "type": "float",
+        "default": 0.05,
+        "required": false,
+        "display_name": "",
+        "description": "Upper bound on the outlier fraction",
+        "min": 1e-06,
+        "max": 1,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "kernel",
+        "type": "enum",
+        "default": "rbf",
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [
+          "rbf",
+          "linear",
+          "poly",
+          "sigmoid"
+        ],
+        "allow_multiple": false
+      },
+      {
+        "name": "gamma",
+        "type": "enum",
+        "default": "scale",
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [
+          "scale",
+          "auto"
+        ],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.OneClassSvmComponent"
+  },
+  {
+    "component_type": "validation.level_shift_detector",
+    "display_name": "LevelShift检测器",
+    "category": "validation",
+    "description": "Detect a step change in the mean using a two-sample t statistic around each split point",
+    "version": "1.0",
+    "subcategory": "可检测性",
+    "tags": [
+      "level shift",
+      "changepoint",
+      "阶跃",
+      "均值突变"
+    ],
+    "search_keywords": [
+      "level shift detector",
+      "changepoint detection",
+      "均值阶跃",
+      "结构变化",
+      "突变检测"
+    ],
+    "compatibility": [
+      "fault-platform>=0.1,<1"
+    ],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": "",
+        "accepted_types": [
+          "Dataset"
+        ]
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "model",
+        "data_type": "Model",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "prediction",
+        "data_type": "Prediction",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "metrics",
+        "data_type": "Metrics",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "column",
+        "type": "column",
+        "default": null,
+        "required": true,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "window",
+        "type": "integer",
+        "default": 20,
+        "required": false,
+        "display_name": "",
+        "description": "Points compared before and after each split",
+        "min": 2,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "threshold",
+        "type": "float",
+        "default": 4.0,
+        "required": false,
+        "display_name": "",
+        "description": "t statistic cut-off",
+        "min": 0,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "group_column",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "time_column",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.LevelShiftDetectorComponent"
+  },
+  {
+    "component_type": "validation.volatility_shift_detector",
+    "display_name": "VolatilityShift检测器",
+    "category": "validation",
+    "description": "Detect a change in the variance level; the score is the log variance ratio in z units",
+    "version": "1.0",
+    "subcategory": "可检测性",
+    "tags": [
+      "volatility shift",
+      "variance change",
+      "波动率",
+      "方差突变"
+    ],
+    "search_keywords": [
+      "volatility shift",
+      "variance change detection",
+      "波动率变化检测",
+      "波动率突变",
+      "噪声水平变化"
+    ],
+    "compatibility": [
+      "fault-platform>=0.1,<1"
+    ],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": "",
+        "accepted_types": [
+          "Dataset"
+        ]
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "model",
+        "data_type": "Model",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "prediction",
+        "data_type": "Prediction",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "metrics",
+        "data_type": "Metrics",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "column",
+        "type": "column",
+        "default": null,
+        "required": true,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "window",
+        "type": "integer",
+        "default": 20,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 2,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "threshold",
+        "type": "float",
+        "default": 4.0,
+        "required": false,
+        "display_name": "",
+        "description": "z units: 0.32 is one sigma for a 20-point window",
+        "min": 0,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "group_column",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "time_column",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.VolatilityShiftDetectorComponent"
+  },
+  {
+    "component_type": "validation.seasonal_detector",
+    "display_name": "Seasonal检测器",
+    "category": "validation",
+    "description": "Score each row against a seasonal profile fitted on a leading reference segment",
+    "version": "1.0",
+    "subcategory": "可检测性",
+    "tags": [
+      "seasonal",
+      "seasonality",
+      "季节性",
+      "周期异常"
+    ],
+    "search_keywords": [
+      "seasonal detector",
+      "seasonality check",
+      "季节性检测",
+      "周期剖面"
+    ],
+    "compatibility": [
+      "fault-platform>=0.1,<1"
+    ],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": "",
+        "accepted_types": [
+          "Dataset"
+        ]
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "model",
+        "data_type": "Model",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "prediction",
+        "data_type": "Prediction",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "metrics",
+        "data_type": "Metrics",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "column",
+        "type": "column",
+        "default": null,
+        "required": true,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "period",
+        "type": "integer",
+        "default": 24,
+        "required": false,
+        "display_name": "",
+        "description": "Samples per cycle",
+        "min": 2,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "threshold",
+        "type": "float",
+        "default": 4.0,
+        "required": false,
+        "display_name": "",
+        "description": "z units against the robust profile scale",
+        "min": 0,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "reference_fraction",
+        "type": "float",
+        "default": 0.5,
+        "required": false,
+        "display_name": "",
+        "description": "Leading share used to build the profile; the rest is out-of-sample",
+        "min": 0.1,
+        "max": 0.9,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "group_column",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "time_column",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.SeasonalDetectorComponent"
+  },
+  {
+    "component_type": "validation.autoregression_detector",
+    "display_name": "AutoRegression检测器",
+    "category": "validation",
+    "description": "One-step AR(p) residuals on the rows after a leading training segment",
+    "version": "1.0",
+    "subcategory": "可检测性",
+    "tags": [
+      "autoregression",
+      "ar model",
+      "自回归",
+      "动态变化"
+    ],
+    "search_keywords": [
+      "autoregression detector",
+      "ar residual detection",
+      "自回归检测",
+      "残差异常"
+    ],
+    "compatibility": [
+      "fault-platform>=0.1,<1"
+    ],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": "",
+        "accepted_types": [
+          "Dataset"
+        ]
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "model",
+        "data_type": "Model",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "prediction",
+        "data_type": "Prediction",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "metrics",
+        "data_type": "Metrics",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "column",
+        "type": "column",
+        "default": null,
+        "required": true,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "order",
+        "type": "integer",
+        "default": 2,
+        "required": false,
+        "display_name": "",
+        "description": "AR order p",
+        "min": 1,
+        "max": 50,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "threshold",
+        "type": "float",
+        "default": 4.0,
+        "required": false,
+        "display_name": "",
+        "description": "Robust z-score cut-off",
+        "min": 0,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "train_fraction",
+        "type": "float",
+        "default": 0.5,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 0.1,
+        "max": 0.9,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "group_column",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "time_column",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.AutoregressionDetectorComponent"
+  },
+  {
+    "component_type": "validation.esd_detector",
+    "display_name": "GeneralizedESD检测器",
+    "category": "validation",
+    "description": "Generalized extreme Studentized deviate test for up to a fraction of outliers",
+    "version": "1.0",
+    "subcategory": "可检测性",
+    "tags": [
+      "esd",
+      "rosner",
+      "outlier",
+      "广义ESD"
+    ],
+    "search_keywords": [
+      "generalized esd",
+      "rosner test",
+      "ESD检测",
+      "离群点检验"
+    ],
+    "compatibility": [
+      "fault-platform>=0.1,<1"
+    ],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": "",
+        "accepted_types": [
+          "Dataset"
+        ]
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "model",
+        "data_type": "Model",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "prediction",
+        "data_type": "Prediction",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "metrics",
+        "data_type": "Metrics",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "column",
+        "type": "column",
+        "default": null,
+        "required": true,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "max_outlier_fraction",
+        "type": "float",
+        "default": 0.1,
+        "required": false,
+        "display_name": "",
+        "description": "Upper bound tested",
+        "min": 0.001,
+        "max": 0.5,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "alpha",
+        "type": "float",
+        "default": 0.05,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 1e-06,
+        "max": 0.5,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "group_column",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "time_column",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.EsdDetectorComponent"
+  },
+  {
+    "component_type": "validation.nsigma_detector",
+    "display_name": "Nsigma检测",
+    "category": "validation",
+    "description": "Distance from a centre in units of a scale, with global, per-group or rolling centres",
+    "version": "1.0",
+    "subcategory": "可检测性",
+    "tags": [
+      "nsigma",
+      "sigma",
+      "3sigma",
+      "N倍标准差"
+    ],
+    "search_keywords": [
+      "nsigma detector",
+      "sigma threshold",
+      "Nsigma算法",
+      "三倍标准差",
+      "越限检测"
+    ],
+    "compatibility": [
+      "fault-platform>=0.1,<1"
+    ],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": "",
+        "accepted_types": [
+          "Dataset"
+        ]
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "model",
+        "data_type": "Model",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "prediction",
+        "data_type": "Prediction",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "metrics",
+        "data_type": "Metrics",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "column",
+        "type": "column",
+        "default": null,
+        "required": true,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "sigma",
+        "type": "float",
+        "default": 3.0,
+        "required": false,
+        "display_name": "",
+        "description": "How many scales count as an excursion",
+        "min": 0.1,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "mode",
+        "type": "enum",
+        "default": "global",
+        "required": false,
+        "display_name": "",
+        "description": "global/group use full-sample statistics (descriptive); rolling follows drift",
+        "min": null,
+        "max": null,
+        "options": [
+          "global",
+          "group",
+          "rolling"
+        ],
+        "allow_multiple": false
+      },
+      {
+        "name": "window",
+        "type": "integer",
+        "default": 30,
+        "required": false,
+        "display_name": "",
+        "description": "Only used by mode=rolling",
+        "min": 2,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "group_column",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "time_column",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.NSigmaDetectorComponent"
+  },
+  {
+    "component_type": "validation.mean_drift_detector",
+    "display_name": "均值漂移检测",
+    "category": "validation",
+    "description": "CUSUM drift detector against a reference segment mean, with a slack band",
+    "version": "1.0",
+    "subcategory": "可检测性",
+    "tags": [
+      "cusum",
+      "mean drift",
+      "均值漂移",
+      "缓慢漂移"
+    ],
+    "search_keywords": [
+      "mean drift detector",
+      "cusum",
+      "平均值漂移检测",
+      "缓慢漂移检测"
+    ],
+    "compatibility": [
+      "fault-platform>=0.1,<1"
+    ],
+    "input_ports": [
+      {
+        "name": "dataset",
+        "data_type": "Dataset",
+        "required": true,
+        "description": "",
+        "accepted_types": [
+          "Dataset"
+        ]
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "model",
+        "data_type": "Model",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "prediction",
+        "data_type": "Prediction",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "metrics",
+        "data_type": "Metrics",
+        "required": true,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "column",
+        "type": "column",
+        "default": null,
+        "required": true,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "reference_fraction",
+        "type": "float",
+        "default": 0.3,
+        "required": false,
+        "display_name": "",
+        "description": "Leading share that defines the target mean",
+        "min": 0.05,
+        "max": 0.9,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "slack",
+        "type": "float",
+        "default": 0.5,
+        "required": false,
+        "display_name": "",
+        "description": "Slack k in scale units; ignores small deviations",
+        "min": 0,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "decision",
+        "type": "float",
+        "default": 5.0,
+        "required": false,
+        "display_name": "",
+        "description": "Alarm line h in scale units",
+        "min": 0.1,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "group_column",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "time_column",
+        "type": "column",
+        "default": null,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.MeanDriftDetectorComponent"
   },
   {
     "component_type": "validation.persistence_detector",
@@ -6517,6 +10332,165 @@
     ],
     "parameter_schema": [],
     "implementation_class": "fault_platform.components.builtin.MergeFeatureComponent"
+  },
+  {
+    "component_type": "validation.grid_search",
+    "display_name": "超参搜索",
+    "category": "validation",
+    "description": "Small-grid cross-validated hyper-parameter search with an explicit optimism warning",
+    "version": "1.0",
+    "subcategory": "自动机器学习",
+    "tags": [
+      "grid search",
+      "hyperparameter",
+      "超参搜索",
+      "自动机器学习"
+    ],
+    "search_keywords": [
+      "grid search",
+      "hyperparameter tuning",
+      "超参搜索",
+      "自动机器学习",
+      "参数寻优"
+    ],
+    "compatibility": [
+      "fault-platform>=0.1,<1"
+    ],
+    "input_ports": [
+      {
+        "name": "features",
+        "data_type": "FeatureDataset",
+        "required": true,
+        "description": "",
+        "accepted_types": [
+          "FeatureDataset"
+        ]
+      },
+      {
+        "name": "labels",
+        "data_type": "LabelVector",
+        "required": true,
+        "description": "",
+        "accepted_types": [
+          "LabelVector"
+        ]
+      }
+    ],
+    "output_ports": [
+      {
+        "name": "model",
+        "data_type": "Model",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "metrics",
+        "data_type": "Metrics",
+        "required": true,
+        "description": ""
+      },
+      {
+        "name": "importance",
+        "data_type": "FeatureImportance",
+        "required": false,
+        "description": ""
+      }
+    ],
+    "parameter_schema": [
+      {
+        "name": "algorithm",
+        "type": "enum",
+        "default": "random_forest",
+        "required": false,
+        "display_name": "",
+        "description": "Classifiers take features+labels; regressors take features+target",
+        "min": null,
+        "max": null,
+        "options": [
+          "random_forest",
+          "decision_tree",
+          "svm",
+          "logistic",
+          "ridge",
+          "gradient_boosting"
+        ],
+        "allow_multiple": false
+      },
+      {
+        "name": "param_grid",
+        "type": "object",
+        "default": {
+          "n_estimators": [
+            100,
+            300
+          ],
+          "max_depth": [
+            4,
+            8
+          ]
+        },
+        "required": true,
+        "display_name": "",
+        "description": "Parameter name to candidate list, e.g. {'n_estimators': [100, 300]}",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "cv_method",
+        "type": "enum",
+        "default": "stratified",
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": null,
+        "max": null,
+        "options": [
+          "stratified",
+          "group",
+          "temporal"
+        ],
+        "allow_multiple": false
+      },
+      {
+        "name": "cv_folds",
+        "type": "integer",
+        "default": 3,
+        "required": false,
+        "display_name": "",
+        "description": "",
+        "min": 2,
+        "max": 10,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "scoring",
+        "type": "string",
+        "default": "",
+        "required": false,
+        "display_name": "",
+        "description": "Empty = f1_weighted for classifiers, r2 for regressors",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      },
+      {
+        "name": "top_k",
+        "type": "integer",
+        "default": 5,
+        "required": false,
+        "display_name": "",
+        "description": "How many candidates to report",
+        "min": 1,
+        "max": 20,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
+    "implementation_class": "fault_platform.components.builtin.GridSearchComponent"
   },
   {
     "component_type": "validation.compare",

@@ -51,6 +51,28 @@ class ExecutionContext:
     on_event: Callable[[str, dict[str, Any]], None] | None = None
     #: Suffixes a data source may use; components decide what they can actually read.
     data_suffixes: frozenset[str] = frozenset({".csv", ".parquet", ".pq"})
+    #: 执行期数据源覆盖：``node_id → data_root 内的相对路径（字符串）或路径列表``。
+    #:
+    #: 存在的理由：同一份"配方"（图）经常要在多份同构数据上跑——今天是 8 月的数据，
+    #: 明天是 9 月的另一台机器。没有它就只能改 `data.input.path`，而那是**编辑**：
+    #: 会让已有结果失效、需要重新导出。
+    #:
+    #: 放在上下文而不是改图参数，有三个好处：执行用的是图的克隆（改参数本来也影响不到这次运行）；
+    #: `external_fingerprint` 与 `execute` 看到的是同一个上下文，因此**指纹会跟着覆盖变**，
+    #: 增量复用不可能把上一份数据的结果当成本次结果；图本身保持不变，可追溯性不受影响。
+    #:
+    #: 语义是**整组替换**：字符串 = 只读这一个文件；列表 = 只读这几个文件（顺序即拼接顺序）。
+    #: 不做"覆盖第一个、保留其余"这种混合语义——那种规则没法从调用点看出来。
+    dataset_overrides: dict[str, str | list[str]] = field(default_factory=dict)
+
+    def effective_dataset_paths(
+        self, node_id: str, configured: str, extra: list[str] | None = None
+    ) -> list[str]:
+        """本节点这次实际要读的**全部**路径：执行期覆盖优先（整组替换），否则 ``path`` + ``paths``。"""
+        if node_id in self.dataset_overrides:
+            override = self.dataset_overrides[node_id]
+            return [override] if isinstance(override, str) else [str(item) for item in override]
+        return [configured, *(extra or [])]
 
     def resolve_data_path(self, value: str) -> Path:
         """把组件里的相对路径解析成绝对路径，并做三重校验。

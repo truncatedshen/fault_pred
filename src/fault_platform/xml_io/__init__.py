@@ -122,6 +122,44 @@ class XMLSerializer:
         Path(path).write_text(self.dumps(graph), encoding="utf-8")
 
 
+def _port_declaration_problem(
+    declared: list[tuple[str, str | None, str | None, str | None]],
+    expected: list[tuple[str, str, str, str]],
+) -> str:
+    """比较 XML 里声明的端口与注册表里的端口，返回第一条不一致（一致则返回空串）。
+
+    为什么不直接 `declared == expected`：给组件**新增一个可选端口**是完全向后兼容的改动，
+    但严格相等会让所有旧 XML 立刻无法导入（实测：给 `visual.overview` 加一个可选 `labels`
+    输入端口后，之前保存的 HBM 方案报 `Port declarations differ from registry: overview`）。
+    所以这里只放行这一种情况：
+
+    * 旧 XML 里的每个端口仍必须存在、类型与必填一致、相对顺序不变；
+    * 注册表里**必填**的端口一个都不能少（少了就是真的不兼容）；
+    * 旧 XML 不认识的新端口，只允许是**可选**的。
+
+    改名、改类型、删端口、漏掉必填端口依然被拒绝——这些才是不兼容。
+    """
+    lookup = {(tag, name): (data_type, required) for tag, name, data_type, required in expected}
+    order = {entry: index for index, entry in enumerate(expected)}
+    previous = -1
+    for entry in declared:
+        tag, name, data_type, required = entry
+        spec = lookup.get((tag, name))
+        if spec is None:
+            return f"{tag} {name!r} is not declared by this component"
+        if spec != (data_type, required):
+            return f"{tag} {name!r} declares {data_type!r}/{required}, registry has {spec[0]!r}/{spec[1]}"
+        index = order[(tag, name, data_type, required)]
+        if index < previous:
+            return f"{tag} {name!r} is out of order"
+        previous = index
+    declared_set = set(declared)
+    for entry in expected:
+        if entry[3] == "true" and entry not in declared_set:
+            return f"required {entry[0]} {entry[1]!r} is missing from the document"
+    return ""
+
+
 class XMLParser:
     def __init__(self, registry: ComponentRegistry) -> None:
         """需要一个注册表：导入时必须能按类型名找到组件实现，才能做端口一致性校验。"""
@@ -132,7 +170,7 @@ class XMLParser:
 
         * 组件版本必须与注册表一致，否则拒绝（避免"配置来自别的版本"的静默错配）；
         * 参数不能重复，值按 JSON 解析；
-        * 文件里声明的端口列表必须与注册表**逐项相同**（名字、类型、必填），
+        * 文件里声明的端口列表必须与注册表**对得上**（名字、类型、必填、顺序），
           防止手改 XML 绕过类型系统；
         * 最后跑一遍图校验；``require_complete=True`` 时缺参数或未连线也会失败。
         """
@@ -171,9 +209,10 @@ class XMLParser:
                 for tag, specs in (("inputPort", cls.input_ports), ("outputPort", cls.output_ports))
                 for p in specs
             ]
-            if declared != expected:
+            problem = _port_declaration_problem(declared, expected)
+            if problem:
                 # 端口对不上说明 XML 被改过或来自不兼容的版本，必须拒绝而不是"尽力解析"。
-                raise ValueError(f"Port declarations differ from registry: {node.id}")
+                raise ValueError(f"Port declarations differ from registry: {node.id} ({problem})")
         for edge in root.findall("./connections/connection"):
             graph.connect(
                 edge.get("sourceNode"), edge.get("sourcePort"), edge.get("targetNode"), edge.get("targetPort")

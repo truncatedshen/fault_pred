@@ -1,6 +1,6 @@
 """Thin component adapters; numerical implementations live in fault_core.
 
-这个文件里的 56 个类都是**薄适配层**：声明元数据、端口与参数 schema，
+这个文件里的 87 个类都是**薄适配层**：声明元数据、端口与参数 schema，
 ``execute`` 里只做"取参数 → 调用 ``fault_core`` 的对应函数 → 包装成
 :class:`ComponentResult`"。真正的计算在 ``src/fault_core``，因此：
 
@@ -24,15 +24,19 @@ from fault_core import (
     advanced_analysis,
     advanced_data,
     advanced_models,
+    change_detection,
     data,
     exploration,
     features,
+    forecasting,
+    model_selection,
     models,
     preprocessing,
     quality,
     reduction,
     selection,
     sequence_features,
+    series_analysis,
     visualization,
 )
 from fault_core import (
@@ -168,7 +172,22 @@ class DataInputComponent(BaseComponent):
             "string",
             None,
             required=True,
-            description="CSV or Parquet path relative to the server data directory",
+            description="First source: CSV or Parquet path relative to the server data directory",
+        ),
+        P(
+            "paths",
+            "list",
+            [],
+            description=(
+                "Additional sources appended after `path`, in order (same columns required); "
+                "rows are concatenated and the index is renumbered"
+            ),
+        ),
+        P(
+            "source_column",
+            "string",
+            "",
+            description="When set, add a column holding the relative path each row came from",
         ),
         enum("format", "csv", ("csv", "parquet"), "Parquet needs the pyarrow extra"),
         P("encoding", "string", "utf-8-sig"),
@@ -197,46 +216,101 @@ class DataInputComponent(BaseComponent):
     )
 
     def preflight(self, context: ExecutionContext) -> None:
-        """执行前的资源检查：路径必须落在数据目录内且文件存在；Parquet 还需要 pyarrow。"""
-        context.resolve_data_path(self.parameters["path"])
-        if self._format(context) == "parquet":
-            try:
-                import pyarrow  # noqa: F401
-            except ImportError as exc:
-                raise ValueError(
-                    "Parquet input requires pyarrow: pip install 'fault-prediction-platform[parquet]'"
-                ) from exc
+        """执行前的资源检查：**每个**源都要落在数据目录内且存在；Parquet 还需要 pyarrow。"""
+        for source in self._sources(context):
+            context.resolve_data_path(source)
+            if self._format_for(context, source) == "parquet":
+                try:
+                    import pyarrow  # noqa: F401
+                except ImportError as exc:
+                    raise ValueError(
+                        "Parquet input requires pyarrow: pip install 'fault-prediction-platform[parquet]'"
+                    ) from exc
 
     def external_fingerprint(self, context: ExecutionContext) -> str:
-        """对文件内容取 SHA-256：源文件一改，下游结果会自动重算，而不是复用旧结果。"""
-        with context.resolve_data_path(self.parameters["path"]).open("rb") as handle:
-            return hashlib.file_digest(handle, "sha256").hexdigest()
+        """对**全部源文件**的内容取 SHA-256（顺序敏感）：任一文件变了，下游自动重算。
 
-    def _format(self, context: ExecutionContext) -> str:
+        单源时返回的仍是那一个文件的摘要——与旧行为逐字一致，因此已有方案的缓存不会失效。
+        多源时把各文件摘要按顺序串起来再哈希，所以"换了其中一个文件"或"换了顺序"都会变。
+        """
+        digests = []
+        for source in self._sources(context):
+            with context.resolve_data_path(source).open("rb") as handle:
+                digests.append(hashlib.file_digest(handle, "sha256").hexdigest())
+        if len(digests) == 1:
+            return digests[0]
+        return hashlib.sha256("\n".join(digests).encode()).hexdigest()
+
+    def _sources(self, context: ExecutionContext) -> list[str]:
+        """本节点这次要读的**相对路径列表**：执行期覆盖优先，否则 ``path`` + ``paths``。
+
+        走上下文而不是改图参数，是为了让"同一张图换一批同构数据跑"变成**执行参数**而不是**编辑**：
+        图不变（可追溯）、已有结果不失效；而 `external_fingerprint` 读同一个上下文，
+        所以指纹会跟着实际文件变，增量复用不会把上一批数据的结果当成本次结果。
+        """
+        return context.effective_dataset_paths(
+            self.component_id, self.parameters["path"], self.parameters["paths"]
+        )
+
+    def _format_for(self, context: ExecutionContext, source: str) -> str:
         """按后缀优先判断格式（``.parquet``/``.pq`` 直接当 Parquet，避免参数写错读崩）。"""
-        suffix = context.resolve_data_path(self.parameters["path"]).suffix.lower()
+        suffix = context.resolve_data_path(source).suffix.lower()
         return "parquet" if suffix in {".parquet", ".pq"} else self.parameters["format"]
 
+    @staticmethod
+    def _require_same_schema(source: str, reference: list[str], actual: list[str]) -> None:
+        """多源拼接要求列集合一致；缺列/多列都直接报错，而不是补 NaN 或丢列。
+
+        静默对齐是这里最危险的选项：少了一列就补 0/NaN 会让"两台机器数据不一致"这件事
+        一路漂到模型里，而报告上看不出任何异常。
+        """
+        missing = [name for name in reference if name not in actual]
+        extra = [name for name in actual if name not in reference]
+        if missing or extra:
+            raise ValueError(
+                f"Data source {source} has a different schema than the first source "
+                f"(missing {missing}, extra {extra}); multi-source input needs the same columns"
+            )
+
     def execute(self, inputs: dict[str, Any], context: ExecutionContext) -> Result:
-        """读取数据：流式模式下只返回惰性描述符，普通模式按裁剪参数读进内存。"""
-        path = context.resolve_data_path(self.parameters["path"])
+        """读取数据：单源直接读；多源按顺序纵向拼成一份表（列集合必须一致）。
+
+        多个同构文件（例如每台设备一份导出）在这里合并成一份 ``Dataset``，后续组件看到的
+        始终是"一份数据"，因此下游窗口、特征与验证器完全不用改。
+        """
+        sources = self._sources(context)
+        path = context.resolve_data_path(sources[0])
         columns = self.parameters["columns"] or None
         max_rows = self.parameters["max_rows"] or None
         warnings: list[str] = []
+        configured = self.parameters["path"]
+        configured_sources = [configured, *self.parameters["paths"]]
+        if sources != configured_sources:
+            # 用了覆盖就必须说出来：否则"这份报告读的是哪个文件"只能靠猜。
+            warnings.append(
+                f"Reading {sources} from a dataset override; the graph says {configured_sources}."
+            )
         if self.parameters["streaming"]:
+            if len(sources) > 1:
+                # 流式描述符只描述一个文件；默默地只读第一个是错的，直接拒绝。
+                raise ValueError(
+                    "Streamed input supports a single source; remove `paths` (or the override) "
+                    "or set streaming=false"
+                )
             # 流式分支：不读数据，只把"怎么读"（路径、列、块大小、来源指纹）打包传下去。
             identifier = self.external_fingerprint(context)
             streamed = StreamedDataset(
                 path=path,
-                format=self._format(context),
+                format=self._format_for(context, sources[0]),
                 chunk_rows=int(self.parameters["chunk_rows"]),
                 columns=columns,
                 encoding=self.parameters["encoding"],
                 separator=self.parameters["separator"],
                 filters=self.parameters["filters"] or None,
-                total_rows=self._total_rows(path, self._format(context)),
+                total_rows=self._total_rows(path, self._format_for(context, sources[0])),
                 attrs={
                     "source_path": str(path),
+                    "source_paths": [str(path)],
                     "source_id": identifier,
                     "source_projection": {
                         "columns": columns,
@@ -249,25 +323,50 @@ class DataInputComponent(BaseComponent):
                 # 流式路径无法在读取时截断行数，必须明确告知使用者"限制没有生效"。
                 warnings.append("Streamed input cannot enforce max_rows; the whole file is read.")
             return Result({"dataset": streamed}, warnings)
-        if self._format(context) == "parquet":
-            frame = self._read_parquet(path, columns, max_rows, self.parameters["filters"])
-        else:
-            frame = pd.read_csv(
-                path,
-                encoding=self.parameters["encoding"],
-                sep=self.parameters["separator"],
-                usecols=columns,
-                nrows=max_rows,
-            )
-        if not frame.columns.is_unique or frame.empty:
-            raise ValueError("Data source must contain rows and unique column names")
-        if max_rows or columns or self.parameters["filters"]:
-            # 裁剪过输入就必须标注：结论只适用于这个子集，不能当成全量结论。
+        frames: list[tuple[str, pd.DataFrame]] = []
+        for source in sources:
+            resolved = context.resolve_data_path(source)
+            if self._format_for(context, source) == "parquet":
+                frame = self._read_parquet(resolved, columns, max_rows, self.parameters["filters"])
+            else:
+                frame = pd.read_csv(
+                    resolved,
+                    encoding=self.parameters["encoding"],
+                    sep=self.parameters["separator"],
+                    usecols=columns,
+                    nrows=max_rows,
+                )
+            if not frame.columns.is_unique or frame.empty:
+                raise ValueError(f"Data source must contain rows and unique column names: {source}")
+            frames.append((source, frame))
+        reference = frames[0][1].columns.tolist()
+        for source, frame in frames[1:]:
+            self._require_same_schema(source, reference, frame.columns.tolist())
+        if self.parameters["source_column"]:
+            name = self.parameters["source_column"]
+            if name in reference:
+                raise ValueError(f"source_column {name!r} already exists in the data")
+            for source, frame in frames:
+                frame.insert(0, name, source)
+            reference = [name, *reference]
+        if len(frames) > 1:
+            # 各文件的原始索引都是从 0 开始的，直接拼会出现重复索引；重排成 0..N-1。
+            frame = pd.concat([item[1].loc[:, reference] for item in frames], ignore_index=True)
             warnings.append(
-                "Input was limited (rows/columns/filter); results and metrics describe that subset only."
+                f"Combined {len(frames)} sources into one dataset ({len(frame)} rows, index renumbered): "
+                + ", ".join(item[0] for item in frames)
             )
+        else:
+            frame = frames[0][1]
+        if max_rows or columns or self.parameters["filters"] or len(frames) > 1:
+            # 裁剪过输入就必须标注：结论只适用于这个子集，不能当成全量结论。
+            if max_rows or columns or self.parameters["filters"]:
+                warnings.append(
+                    "Input was limited (rows/columns/filter); results and metrics describe that subset only."
+                )
             frame.attrs["evaluation_warnings"] = list(warnings)
         frame.attrs["source_path"] = str(path)
+        frame.attrs["source_paths"] = [str(context.resolve_data_path(item)) for item in sources]
         frame.attrs["source_id"] = self.external_fingerprint(context)
         frame.attrs["source_projection"] = {
             "columns": list(frame.columns),
@@ -588,7 +687,7 @@ class ImputationComponent(BaseComponent):
     input_ports, output_ports = DATA_IN, DATA_OUT
     parameter_schema = (
         COLS,
-        enum("method", "mean", ("mean", "interpolate")),
+        enum("method", "mean", ("mean", "max", "min", "interpolate")),
         P("group_column", "column", None),
         enum("interpolation_method", "linear", ("linear", "nearest")),
     )
@@ -619,6 +718,155 @@ class BinarizeComponent(BaseComponent):
 
     def execute(self, inputs: dict[str, Any], context: ExecutionContext) -> Result:
         return Result({"dataset": advanced_data.binarize(inputs["dataset"], **self.parameters)})
+
+
+class PolynomialFeatureComponent(BaseComponent):
+    """多项式特征：在选定列上生成平方项与交互项（**必须在窗口切分之前**使用）。"""
+
+    metadata = Meta(
+        "data.polynomial_features",
+        "多项式特征",
+        "data",
+        "Generate polynomial and interaction terms from numeric columns before window cutting",
+        subcategory="规范化",
+        tags=("polynomial", "interaction", "多项式", "交互项"),
+        search_keywords=(
+            "polynomial features",
+            "interaction terms",
+            "生成多项式特征",
+            "二次项",
+            "交叉项",
+        ),
+    )
+    input_ports, output_ports = DATA_IN, DATA_OUT
+    parameter_schema = (
+        REQUIRED_COLS,
+        P("degree", "integer", 2, min=2, max=5),
+        P("interaction_only", "boolean", False),
+        P("include_bias", "boolean", False),
+        P("keep_original", "boolean", True),
+        P("max_columns", "integer", 512, min=2, max=10000),
+    )
+
+    def execute(self, inputs: dict[str, Any], context: ExecutionContext) -> Result:
+        return Result({"dataset": advanced_data.polynomial_features(inputs["dataset"], **self.parameters)})
+
+
+class DiscretizeComponent(BaseComponent):
+    """离散化分箱：等宽/等频/一维聚类切箱，输出箱序号或独热指示（箱边界在整表上拟合）。"""
+
+    metadata = Meta(
+        "data.discretize",
+        "离散化分箱",
+        "data",
+        "KBins discretization into bin indices or one-hot flags, with a full-data bound warning",
+        subcategory="转换",
+        tags=("discretize", "binning", "分箱", "离散化"),
+        search_keywords=(
+            "discretization",
+            "kbins",
+            "k箱离散化",
+            "分位数分箱",
+            "离散化分箱",
+        ),
+    )
+    input_ports, output_ports = DATA_IN, DATA_OUT
+    parameter_schema = (
+        REQUIRED_COLS,
+        P("n_bins", "integer", 5, min=2, max=200),
+        enum("strategy", "quantile", ("uniform", "quantile", "kmeans")),
+        enum("encode", "ordinal", ("ordinal", "onehot-dense")),
+        P("keep_original", "boolean", True),
+        P("suffix", "string", "_bin"),
+        P("random_state", "integer", 42, min=0),
+    )
+
+    def execute(self, inputs: dict[str, Any], context: ExecutionContext) -> Result:
+        frame = advanced_data.discretize(inputs["dataset"], **self.parameters)
+        return Result({"dataset": frame}, list(frame.attrs.get("evaluation_warnings", [])))
+
+
+class ConcatComponent(BaseComponent):
+    """数据拼接：把多条 `Dataset` 分支按顺序纵向拼成一份（多数据源在图里合并）。
+
+    典型用法：画布上摆几个 `data.input`（每台设备/每批各一个文件），各自接进这里，
+    后续窗口、特征、验证器看到的是**一份**数据，完全不用改。超过四个源就串联下一个 concat
+    （链式合并的语义是平的：顺序即拼接顺序）。
+    """
+
+    metadata = Meta(
+        "data.concat",
+        "数据拼接",
+        "data",
+        "Concatenate several Dataset branches into one table; same columns required",
+        subcategory="变换与替换",
+        tags=("concat", "merge sources", "拼接", "多数据源", "合并"),
+        search_keywords=(
+            "concatenate",
+            "union rows",
+            "combine data sources",
+            "数据拼接",
+            "合并数据源",
+            "多数据源",
+            "多个数据源",
+        ),
+    )
+    input_ports = (
+        In("first", T.DATASET),
+        In("second", T.DATASET),
+        In("third", T.DATASET, False),
+        In("fourth", T.DATASET, False),
+    )
+    output_ports = DATA_OUT
+    parameter_schema = (
+        P(
+            "source_column",
+            "string",
+            "",
+            description="When set, add a column holding the input port each row came from",
+        ),
+    )
+
+    def execute(self, inputs: dict[str, Any], context: ExecutionContext) -> Result:
+        """按端口声明顺序拼接；只有真正连上的端口参与（可选端口没接就跳过）。"""
+        frames = [(port.name, inputs[port.name]) for port in self.input_ports if port.name in inputs]
+        frame = advanced_data.concat_by_rows(frames, source_column=self.parameters["source_column"])
+        notes = list(frame.attrs.get("evaluation_warnings", []))
+        return Result({"dataset": frame}, notes)
+
+
+class SeasonalDifferenceComponent(BaseComponent):
+    """同期差分/同期比值（"同比"口径）：``y_t - y_{t-period}`` 或 ``y_t / y_{t-period}``。"""
+
+    metadata = Meta(
+        "data.seasonal_difference",
+        "同期差分",
+        "data",
+        "Seasonal differencing or ratio against the same phase one period earlier",
+        subcategory="变换与替换",
+        tags=("seasonal", "year over year", "同比", "同期差分"),
+        search_keywords=("seasonal difference", "year over year", "同比口径", "同期差分", "季节差分"),
+    )
+    input_ports, output_ports = DATA_IN, DATA_OUT
+    parameter_schema = (
+        REQUIRED_COLS,
+        P("period", "integer", 24, min=1, description="Samples per cycle (24 = daily series hourly)"),
+        enum("mode", "difference", ("difference", "ratio"), "ratio needs a strictly positive baseline"),
+        P("group_column", "column", None),
+        P("time_column", "column", None),
+        P("keep_original", "boolean", True),
+        P("suffix", "string", ""),
+        P(
+            "drop_missing",
+            "boolean",
+            False,
+            description="Drop the first period of every group instead of keeping it as NaN",
+        ),
+    )
+
+    def execute(self, inputs: dict[str, Any], context: ExecutionContext) -> Result:
+        frame = series_analysis.seasonal_difference(inputs["dataset"], **self.parameters)
+        return Result({"dataset": frame}, list(frame.attrs.get("evaluation_warnings", [])))
 
 
 class NormalizationComponent(BaseComponent):
@@ -670,9 +918,16 @@ class TransformationComponent(BaseComponent):
     input_ports, output_ports = DATA_IN, DATA_OUT
     parameter_schema = (
         COLS,
-        enum("method", "log1p", ("log", "log1p", "sqrt", "power", "box-cox", "yeo-johnson", "expression")),
+        enum("method", "log1p", preprocessing.TRANSFORMATION_METHODS),
         P("power", "float", 2, min=-10, max=10),
         P("expression_text", "expression", "x"),
+        P(
+            "n_quantiles",
+            "integer",
+            1000,
+            min=1,
+            description="quantile_uniform/quantile_normal only; capped at the row count",
+        ),
     )
 
     def execute(self, inputs: dict[str, Any], context: ExecutionContext) -> Result:
@@ -853,6 +1108,352 @@ class AnomalyExplorationComponent(BaseComponent):
         )
 
 
+class PeaksComponent(BaseComponent):
+    """山峰检测：逐列找局部极大值，可按突出度与最小间距过滤量化台阶造成的假峰。"""
+
+    metadata = Meta(
+        "explore.peaks",
+        "山峰检测",
+        "explore",
+        "Local maxima detection with prominence and minimum-distance filtering",
+        subcategory="集中趋势",
+        tags=("peak", "find peaks", "山峰", "峰值"),
+        search_keywords=("peak detection", "local maxima", "寻找山峰", "山峰数", "峰值检测"),
+    )
+    input_ports = TABLE_IN
+    output_ports = (Out("statistics", T.STATISTICS),)
+    parameter_schema = (
+        COLS,
+        P("prominence", "float", 0.0, min=0),
+        P("distance", "integer", 1, min=1),
+        P("group_column", "column", None, description="Find peaks within each group; never across"),
+    )
+
+    def execute(self, inputs: dict[str, Any], context: ExecutionContext) -> Result:
+        return Result({"statistics": advanced_analysis.peak_summary(inputs["dataset"], **self.parameters)})
+
+
+class NormalityCheckComponent(BaseComponent):
+    """正态性校验：D'Agostino 或 Shapiro 检验，结论只说明"没有拒绝正态"。"""
+
+    metadata = Meta(
+        "explore.normality",
+        "正态性校验",
+        "explore",
+        "Per-column normality tests (D'Agostino-Pearson or Shapiro-Wilk) with an explicit caveat",
+        subcategory="离散度量",
+        tags=("normality", "shapiro", "正态分布", "正态性"),
+        search_keywords=(
+            "normality test",
+            "gaussian check",
+            "正态分布校验",
+            "正态性检验",
+            "分布检验",
+        ),
+    )
+    input_ports = TABLE_IN
+    output_ports = (Out("statistics", T.STATISTICS),)
+    parameter_schema = (
+        COLS,
+        enum("method", "normaltest", ("normaltest", "shapiro")),
+        P("alpha", "float", 0.05, min=0.000001, max=0.999999),
+    )
+
+    def execute(self, inputs: dict[str, Any], context: ExecutionContext) -> Result:
+        return Result({"statistics": advanced_analysis.normality_check(inputs["dataset"], **self.parameters)})
+
+
+class DivergenceComponent(BaseComponent):
+    """KL / JS 散度：逐列比较参考集与当前集的分布差异，JS 对称可用于跨列比较。"""
+
+    metadata = Meta(
+        "explore.kl_divergence",
+        "KL散度度量",
+        "explore",
+        "Per-column Kullback-Leibler and Jensen-Shannon divergence between reference and current data",
+        subcategory="离散度量",
+        tags=("kl divergence", "js divergence", "散度", "相对熵"),
+        search_keywords=(
+            "divergence",
+            "relative entropy",
+            "KL散度度量",
+            "分布差异",
+            "JS散度",
+        ),
+    )
+    input_ports = (In("reference", T.DATASET), In("current", T.DATASET))
+    output_ports = (Out("statistics", T.STATISTICS),)
+    parameter_schema = (
+        COLS,
+        P("bins", "integer", 10, min=2, max=200),
+        P("epsilon", "float", 0.000000001, min=0),
+        P("js_threshold", "float", 0.1, min=0),
+    )
+
+    def execute(self, inputs: dict[str, Any], context: ExecutionContext) -> Result:
+        return Result(
+            {
+                "statistics": advanced_analysis.divergence(
+                    inputs["reference"], inputs["current"], **self.parameters
+                )
+            }
+        )
+
+
+class AcfComponent(BaseComponent):
+    """ACF 自相关函数：给出整条自相关曲线与置信带，回答"记忆有多长/是否白噪声"。"""
+
+    metadata = Meta(
+        "explore.acf",
+        "ACF自相关函数",
+        "explore",
+        "Autocorrelation curve with a 95% confidence band and per-lag significance flags",
+        subcategory="集中趋势",
+        tags=("autocorrelation", "acf", "自相关", "白噪声"),
+        search_keywords=(
+            "autocorrelation function",
+            "ACF自相关函数",
+            "自相关",
+            "记忆长度",
+            "白噪声检验",
+        ),
+    )
+    input_ports = TABLE_IN
+    output_ports = (Out("statistics", T.STATISTICS),)
+    parameter_schema = (
+        COLS,
+        P("max_lag", "integer", 50, min=1),
+        P("alpha", "float", 0.05, min=0.000001, max=0.999999),
+        P("group_column", "column", None, description="Compute one ACF per group; never across"),
+    )
+
+    def execute(self, inputs: dict[str, Any], context: ExecutionContext) -> Result:
+        return Result(
+            {"statistics": advanced_analysis.autocorrelation_function(inputs["dataset"], **self.parameters)}
+        )
+
+
+class IsotonicComponent(BaseComponent):
+    """保序回归：只约束单调性，输出拟合曲线与平台段数（样本内 R² 不可与其他模型比）。"""
+
+    metadata = Meta(
+        "explore.isotonic",
+        "保序回归",
+        "explore",
+        "Monotone (isotonic) regression between two columns, reporting blocks and Spearman rho",
+        subcategory="相关性度量",
+        tags=("isotonic", "monotonic", "保序回归", "单调"),
+        search_keywords=(
+            "isotonic regression",
+            "monotonic fit",
+            "保序回归",
+            "单调回归",
+            "量化相关性拟合",
+        ),
+    )
+    input_ports = TABLE_IN
+    output_ports = (Out("statistics", T.STATISTICS),)
+    parameter_schema = (
+        P("x_column", "column", None, required=True),
+        P("y_column", "column", None, required=True),
+        P("increasing", "boolean", True),
+        enum("out_of_bounds", "clip", ("clip", "nan")),
+        P("max_points", "integer", 500, min=10, max=5000),
+    )
+
+    def execute(self, inputs: dict[str, Any], context: ExecutionContext) -> Result:
+        return Result({"statistics": advanced_analysis.isotonic_fit(inputs["dataset"], **self.parameters)})
+
+
+class GbrFitComponent(BaseComponent):
+    """梯度提升拟合（GBR）：量化特征对目标的解释力并给出特征重要性。"""
+
+    metadata = Meta(
+        "explore.gbr_fit",
+        "量化相关性拟合GBR",
+        "explore",
+        "Gradient-boosting fit that quantifies how much the columns explain the target",
+        subcategory="相关性度量",
+        tags=("gbr", "gradient boosting", "相关性", "特征重要性"),
+        search_keywords=(
+            "gbr fit",
+            "gradient boosting regression",
+            "量化相关性拟合GBR",
+            "相关性拟合",
+            "非线性关系",
+        ),
+    )
+    input_ports = TABLE_IN
+    output_ports = (Out("statistics", T.STATISTICS), Out("importance", T.IMPORTANCE))
+    parameter_schema = (
+        REQUIRED_COLS,
+        P("target_column", "column", None, required=True),
+        P("n_estimators", "integer", 100, min=1, max=2000),
+        P("learning_rate", "float", 0.1, min=0.0001, max=1),
+        P("max_depth", "integer", 3, min=1, max=32),
+        P("min_samples_leaf", "integer", 1, min=1),
+        P("subsample", "float", 1.0, min=0.01, max=1),
+        P(
+            "test_size",
+            "float",
+            0.0,
+            min=0,
+            max=0.9,
+            description="0 = in-sample only (exploratory); a holdout here ignores window overlap",
+        ),
+        P("random_state", "integer", 42, min=0),
+        P("max_points", "integer", 500, min=10, max=5000),
+    )
+
+    def execute(self, inputs: dict[str, Any], context: ExecutionContext) -> Result:
+        outputs = advanced_analysis.gbr_fit(inputs["dataset"], **self.parameters)
+        # importance 同时作为独立端口给出（可以接 validation.compare 那类展示），
+        # statistics 端口只放"拟合结论 + 曲线"，避免同一份表在两个端口里重复出现。
+        statistics = {key: value for key, value in outputs.items() if key != "importance"}
+        return Result(
+            {"statistics": statistics, "importance": outputs["importance"]},
+            list(outputs["metrics"]["warnings"]),
+        )
+
+
+class HpFilterComponent(BaseComponent):
+    """HP 趋势过滤（Hodrick–Prescott）：把序列拆成趋势与周期，并给出周期项占比。"""
+
+    metadata = Meta(
+        "explore.hp_filter",
+        "HP趋势过滤",
+        "explore",
+        "Hodrick-Prescott trend/cycle separation with the cycle variance share",
+        subcategory="离散度量",
+        tags=("hodrick prescott", "hp filter", "趋势", "周期分离"),
+        search_keywords=(
+            "hodrick prescott filter",
+            "hp filter",
+            "HP过滤器",
+            "趋势周期分解",
+            "趋势滤波",
+        ),
+    )
+    input_ports = TABLE_IN
+    output_ports = (Out("statistics", T.STATISTICS),)
+    parameter_schema = (
+        P("column", "column", None, required=True),
+        P("lamb", "float", 1600.0, min=0.0001, description="Smoothing penalty; larger = smoother trend"),
+        P("group_column", "column", None),
+        P("time_column", "column", None),
+        P("max_points", "integer", 500, min=10, max=5000),
+    )
+
+    def execute(self, inputs: dict[str, Any], context: ExecutionContext) -> Result:
+        return Result({"statistics": series_analysis.hp_filter(inputs["dataset"], **self.parameters)})
+
+
+class StationarityComponent(BaseComponent):
+    """平稳性检查：ADF 单位根检验，给出统计量与三档渐近临界值（不给 p 值）。"""
+
+    metadata = Meta(
+        "explore.stationarity",
+        "平稳性检查",
+        "explore",
+        "Augmented Dickey-Fuller unit-root test with asymptotic critical values",
+        subcategory="离散度量",
+        tags=("adf", "stationarity", "unit root", "平稳性"),
+        search_keywords=("stationarity check", "adf test", "平稳性检查", "单位根检验"),
+    )
+    input_ports = TABLE_IN
+    output_ports = (Out("statistics", T.STATISTICS),)
+    parameter_schema = (
+        P("column", "column", None, required=True),
+        P("max_lag", "integer", 0, min=0, description="0 = Schwert rule of thumb"),
+        enum("regression", "c", ("c", "ct", "n"), "c = constant, ct = constant + trend, n = none"),
+        P("group_column", "column", None),
+        P("time_column", "column", None),
+    )
+
+    def execute(self, inputs: dict[str, Any], context: ExecutionContext) -> Result:
+        return Result({"statistics": series_analysis.adf_test(inputs["dataset"], **self.parameters)})
+
+
+class DtwComponent(BaseComponent):
+    """DTW 距离：允许时间轴伸缩的形状距离，可选 Sakoe–Chiba 带约束与 z 标准化。"""
+
+    metadata = Meta(
+        "explore.dtw",
+        "DTW距离",
+        "explore",
+        "Dynamic time warping distance between two columns, with an optional band",
+        subcategory="相关性度量",
+        tags=("dtw", "dynamic time warping", "形状距离", "DTW"),
+        search_keywords=("dynamic time warping", "dtw distance", "DTW距离", "DTW相关分析", "形状相似度"),
+    )
+    input_ports = TABLE_IN
+    output_ports = (Out("statistics", T.STATISTICS),)
+    parameter_schema = (
+        P("first_column", "column", None, required=True),
+        P("second_column", "column", None, required=True),
+        P("band", "integer", 0, min=0, description="Sakoe-Chiba radius; 0 = unbounded"),
+        P("normalize", "boolean", True, description="Z-normalize both series: compare shape, not level"),
+    )
+
+    def execute(self, inputs: dict[str, Any], context: ExecutionContext) -> Result:
+        return Result({"statistics": series_analysis.dtw_distance(inputs["dataset"], **self.parameters)})
+
+
+class SbdComponent(BaseComponent):
+    """SBD 相关：``1 - max(NCC)``，有界且自带归一化，可直接跨样本对比较。"""
+
+    metadata = Meta(
+        "explore.sbd",
+        "SBD相关",
+        "explore",
+        "Shape-based distance from the peak normalised cross-correlation",
+        subcategory="相关性度量",
+        tags=("sbd", "shape based distance", "形状", "平移相关"),
+        search_keywords=("shape based distance", "sbd", "SBD相关", "形状距离", "平移相似度"),
+    )
+    input_ports = TABLE_IN
+    output_ports = (Out("statistics", T.STATISTICS),)
+    parameter_schema = (
+        P("first_column", "column", None, required=True),
+        P("second_column", "column", None, required=True),
+        P("max_lag_fraction", "float", 0.5, min=0.01, max=1.0),
+        P("normalize", "boolean", True),
+    )
+
+    def execute(self, inputs: dict[str, Any], context: ExecutionContext) -> Result:
+        return Result(
+            {"statistics": series_analysis.shape_based_distance(inputs["dataset"], **self.parameters)}
+        )
+
+
+class SlopeCosineComponent(BaseComponent):
+    """斜率与余弦夹角：两条序列在窗口内的增量向量余弦，判断是否同向变化。"""
+
+    metadata = Meta(
+        "explore.slope_cosine",
+        "斜率与余弦夹角",
+        "explore",
+        "Rolling slopes plus the cosine between the two increment vectors",
+        subcategory="集中趋势",
+        tags=("slope", "cosine", "斜率", "夹角"),
+        search_keywords=("slope cosine", "cosine similarity", "斜率与余弦夹角", "同向性分析", "联动分析"),
+    )
+    input_ports = TABLE_IN
+    output_ports = (Out("prediction", T.PREDICTION),)
+    parameter_schema = (
+        P("first_column", "column", None, required=True),
+        P("second_column", "column", None, required=True),
+        P("window", "integer", 20, min=3),
+        P("threshold", "float", 0.5, min=0, max=1, description="Flag rows with cosine below -threshold"),
+        P("group_column", "column", None),
+        P("time_column", "column", None),
+    )
+
+    def execute(self, inputs: dict[str, Any], context: ExecutionContext) -> Result:
+        frame = series_analysis.slope_cosine(inputs["dataset"], **self.parameters)
+        return Result({"prediction": frame}, list(frame.attrs.get("evaluation_warnings", [])))
+
+
 class ScatterPlotComponent(BaseComponent):
     """散点图：按分组给点着色，用于观察类别可分性（终端分支）。"""
 
@@ -1023,22 +1624,33 @@ class RelationshipPlotComponent(BaseComponent):
 
 
 class DataOverviewComponent(BaseComponent):
-    """数据概览：行数/列数/类型/缺失率/唯一值数/时间范围，也支持流式单遍统计。"""
+    """数据概览：行数/列数/类型/缺失率/唯一值数/时间范围/标签构成，也支持流式单遍统计。"""
 
     metadata = Meta(
-        "visual.overview", "数据概览", "visual", "Shape, dtypes, missing rates, summary and time range"
+        "visual.overview",
+        "数据概览",
+        "visual",
+        "Shape, dtypes, missing rates, summary, time range and label/class balance",
     )
-    input_ports = TABLE_IN
+    #: `labels` 是可选端口：特征分支上标签是独立产物（`stat.labels`），
+    #: 不接它就只是没有正负比例，接了也不会改变"表"那个入口的宽容范围。
+    input_ports = TABLE_IN + (In("labels", T.LABEL_VECTOR, False, "Optional label vector for class balance"),)
     output_ports = (Out("overview", T.VISUALIZATION),)
-    parameter_schema = (P("time_column", "column", None),)
+    parameter_schema = (
+        P("time_column", "column", None),
+        P("label_column", "column", None, description="Label column in the data; use it or the labels port"),
+    )
     accepts_streaming = True
 
     def execute(self, inputs: dict[str, Any], context: ExecutionContext) -> Result:
+        """跑概览；标签构成（正负样本比例）随报告一起返回，并把结论提升成节点警告。"""
         dataset = inputs["dataset"]
+        labels = inputs.get("labels")
         if isinstance(dataset, StreamedDataset):
-            overview = visualization.overview_stream(dataset.chunks(), **self.parameters)
-            return Result({"overview": overview})
-        return Result({"overview": visualization.overview(dataset, **self.parameters)})
+            overview = visualization.overview_stream(dataset.chunks(), labels=labels, **self.parameters)
+        else:
+            overview = visualization.overview(dataset, labels=labels, **self.parameters)
+        return Result({"overview": overview}, list(overview.get("findings") or []))
 
 
 class StatisticalFeatureComponent(BaseComponent):
@@ -1162,7 +1774,7 @@ class RollingStatisticsComponent(BaseComponent):
     output_ports = (Out("features", T.FEATURE_DATASET),)
     parameter_schema = (
         REQUIRED_COLS,
-        enum("method", "mean", ("mean", "std", "median", "max_repeat")),
+        enum("method", "mean", ("mean", "std", "variance", "median", "max", "min", "max_repeat")),
         P("window", "integer", 5, min=2, max=100000),
         P("group_column", "column", None),
         P("time_column", "column", None),
@@ -1190,9 +1802,20 @@ class TemporalFeatureComponent(BaseComponent):
     output_ports = (Out("features", T.FEATURE_DATASET),)
     parameter_schema = (
         REQUIRED_COLS,
-        enum("method", "first_difference", ("first_difference", "second_difference", "autocorrelation")),
+        enum(
+            "method",
+            "first_difference",
+            ("first_difference", "second_difference", "autocorrelation", "sum_abs_change", "peak_count"),
+        ),
         P("lag", "integer", 1, min=1),
         P("window", "integer", 20, min=3),
+        P(
+            "prominence",
+            "float",
+            0.0,
+            min=0,
+            description="peak_count only: drop peaks flatter than this prominence (0 = keep every local peak)",
+        ),
         P("group_column", "column", None),
         P("time_column", "column", None),
     )
@@ -1232,7 +1855,7 @@ class EntropyFeatureComponent(BaseComponent):
             "feature_list",
             ["approximate_entropy", "information_entropy"],
             required=True,
-            options=("approximate_entropy", "information_entropy"),
+            options=sequence_features.ENTROPY_METHODS,
         ),
         P("bins", "integer", 16, min=2, max=200),
         P("embedding_dimension", "integer", 2, min=1, max=5),
@@ -1241,6 +1864,40 @@ class EntropyFeatureComponent(BaseComponent):
 
     def execute(self, inputs: dict[str, Any], context: ExecutionContext) -> Result:
         return Result(sequence_features.entropy_features(inputs["dataset"], **self.parameters))
+
+
+class WaveletFeatureComponent(BaseComponent):
+    """小波特征：滚动 Haar 多尺度能量占比、主尺度与细节峰个数（逐行对齐，行数不变）。"""
+
+    metadata = Meta(
+        "feature.wavelet",
+        "小波特征",
+        "feature",
+        "Rolling Haar multi-scale energies, dominant scale and detail peak counts",
+        subcategory="时域 Time Domain",
+        tags=("wavelet", "haar", "小波", "多尺度"),
+        search_keywords=(
+            "wavelet features",
+            "haar wavelet",
+            "小波变换",
+            "连续小波变换的山峰数",
+            "多尺度能量",
+            "小波特征",
+        ),
+    )
+    input_ports = DATA_IN
+    output_ports = (Out("features", T.FEATURE_DATASET),)
+    parameter_schema = (
+        REQUIRED_COLS,
+        P("window", "integer", 32, min=4, max=4096, description="Samples per rolling window"),
+        P("levels", "integer", 3, min=1, max=8, description="Must be <= floor(log2(window))"),
+        P("peak_sigma", "float", 3.0, min=0, description="Detail peaks above this robust scale count"),
+        P("group_column", "column", None),
+        P("time_column", "column", None),
+    )
+
+    def execute(self, inputs: dict[str, Any], context: ExecutionContext) -> Result:
+        return Result({"features": series_analysis.wavelet_features(inputs["dataset"], **self.parameters)})
 
 
 class CategoricalFeatureComponent(BaseComponent):
@@ -1597,6 +2254,109 @@ class LinearRegressionComponent(BaseComponent):
         return Result(outputs, outputs["metrics"]["warnings"])
 
 
+class RidgeComponent(BaseComponent):
+    """岭回归：普通最小二乘加 L2 惩罚，用于特征高度相关时的回归验证。"""
+
+    metadata = Meta(
+        "validation.ridge",
+        "岭回归",
+        "validation",
+        "Ridge regression with L2 shrinkage; same metric fields as linear regression",
+        subcategory="可预测性",
+        tags=("ridge", "regression", "岭回归", "正则化"),
+        search_keywords=(
+            "ridge regression",
+            "l2 regularization",
+            "岭回归",
+            "多重共线性",
+            "回归验证",
+        ),
+    )
+    input_ports = (In("features", T.FEATURE_DATASET), In("target", T.LABEL_VECTOR))
+    output_ports = (
+        Out("model", T.MODEL),
+        Out("prediction", T.PREDICTION),
+        Out("metrics", T.METRICS),
+        Out("importance", T.IMPORTANCE),
+    )
+    parameter_schema = (
+        enum("split_method", "random", ("random", "group", "temporal")),
+        P("test_size", "float", 0.25, min=0.05, max=0.5),
+        P("random_state", "integer", 42, min=0),
+        P("alpha", "float", 1.0, min=0),
+        P("fit_intercept", "boolean", True),
+    )
+
+    def execute(self, inputs: dict[str, Any], context: ExecutionContext) -> Result:
+        outputs = advanced_models.validate_ridge(inputs["features"], inputs["target"], **self.parameters)
+        return Result(outputs, outputs["metrics"]["warnings"])
+
+
+class ExponentialSmoothingComponent(BaseComponent):
+    """指数平滑预测：Holt（水平+趋势）或 Holt–Winters（再加季节），系数由使用者给定。"""
+
+    metadata = Meta(
+        "validation.exponential_smoothing",
+        "指数平滑",
+        "validation",
+        "Holt or Holt-Winters exponential smoothing with a tail holdout forecast",
+        subcategory="可预测性",
+        tags=("exponential smoothing", "holt", "holt winters", "指数平滑", "三阶指数平滑"),
+        search_keywords=(
+            "exponential smoothing",
+            "holt winters",
+            "指数平滑",
+            "三阶指数平滑",
+            "平滑预测",
+        ),
+    )
+    input_ports = DATA_IN
+    output_ports = (Out("model", T.MODEL), Out("prediction", T.PREDICTION), Out("metrics", T.METRICS))
+    parameter_schema = (
+        P("column", "column", None, required=True),
+        enum("method", "holt", ("holt", "holt_winters")),
+        P("alpha", "float", 0.3, min=0.000001, max=0.999999, description="Level smoothing"),
+        P("beta", "float", 0.1, min=0.000001, max=0.999999, description="Trend smoothing"),
+        P("gamma", "float", 0.1, min=0.000001, max=0.999999, description="Seasonal smoothing"),
+        P("seasonal_periods", "integer", 24, min=2, description="holt_winters only"),
+        enum("seasonal", "additive", ("additive", "multiplicative")),
+        P("test_size", "float", 0.25, min=0.05, max=0.5),
+        P("time_column", "column", None),
+        P("group_column", "column", None),
+    )
+
+    def execute(self, inputs: dict[str, Any], context: ExecutionContext) -> Result:
+        outputs = forecasting.exponential_smoothing(inputs["dataset"], **self.parameters)
+        return Result(outputs, outputs["metrics"]["warnings"])
+
+
+class ArimaComponent(BaseComponent):
+    """ARIMA 预测：需要可选依赖 statsmodels（未安装时报错并给出安装命令）。"""
+
+    metadata = Meta(
+        "validation.arima",
+        "ARIMA",
+        "validation",
+        "ARIMA forecasting; requires the optional statsmodels dependency",
+        subcategory="可预测性",
+        tags=("arima", "sarimax", "time series", "ARIMA"),
+        search_keywords=("arima", "sarimax", "ARIMA", "SARIMAX", "时序预测模型"),
+    )
+    input_ports = DATA_IN
+    output_ports = (Out("model", T.MODEL), Out("prediction", T.PREDICTION), Out("metrics", T.METRICS))
+    parameter_schema = (
+        P("column", "column", None, required=True),
+        P("order", "list", [2, 1, 1], description="[p, d, q]"),
+        P("test_size", "float", 0.25, min=0.05, max=0.5),
+        P("trend", "string", "c"),
+        P("time_column", "column", None),
+    )
+
+    def execute(self, inputs: dict[str, Any], context: ExecutionContext) -> Result:
+        outputs = forecasting.arima_forecast(inputs["dataset"], **self.parameters)
+        return Result(outputs, outputs["metrics"]["warnings"])
+
+
 class ARMAComponent(BaseComponent):
     """ARMA 预测：对单条序列前段拟合并预测后段，属于时序外推而非窗口分类。"""
 
@@ -1677,6 +2437,371 @@ class IsolationForestDetectorComponent(DetectorComponent):
         P("random_state", "integer", 42, min=0),
         P("n_estimators", "integer", 100, min=1, max=2000),
     )
+
+
+class DbscanDetectorComponent(BaseComponent):
+    """DBSCAN 检测：落在任何簇之外的点判为异常；异常率由 eps 与 min_samples 决定。"""
+
+    metadata = Meta(
+        "validation.dbscan_detector",
+        "DBSCAN检测",
+        "validation",
+        "Density-based detection: points outside every cluster are anomalies (eps controls the rate)",
+        subcategory="可检测性",
+        tags=("dbscan", "density", "anomaly", "密度聚类"),
+        search_keywords=(
+            "dbscan",
+            "density based detection",
+            "DBSCAN 检测",
+            "密度检测",
+            "无监督异常检测",
+        ),
+    )
+    input_ports = DATA_IN
+    output_ports = (Out("model", T.MODEL), Out("prediction", T.PREDICTION), Out("metrics", T.METRICS))
+    parameter_schema = (
+        COLS,
+        P("eps", "float", 1.0, min=0.000001),
+        P("min_samples", "integer", 5, min=2),
+        enum("metric", "euclidean", ("euclidean", "manhattan", "chebyshev")),
+    )
+
+    def execute(self, inputs: dict[str, Any], context: ExecutionContext) -> Result:
+        outputs = advanced_models.fit_dbscan_detector(inputs["dataset"], **self.parameters)
+        return Result(outputs, outputs["metrics"]["warnings"])
+
+
+class PcaDetectorComponent(BaseComponent):
+    """PCA 检测：用主成分重构每一行，重构误差大的行判为异常。"""
+
+    metadata = Meta(
+        "validation.pca_detector",
+        "PCA检测器",
+        "validation",
+        "PCA reconstruction-error anomaly detection with a contamination-based threshold",
+        subcategory="可检测性",
+        tags=("pca", "reconstruction", "anomaly", "主成分"),
+        search_keywords=(
+            "pca anomaly detection",
+            "reconstruction error",
+            "PCA检测器",
+            "主成分分析异常检测",
+            "重构误差",
+        ),
+    )
+    input_ports = DATA_IN
+    output_ports = (Out("model", T.MODEL), Out("prediction", T.PREDICTION), Out("metrics", T.METRICS))
+    parameter_schema = (
+        COLS,
+        P(
+            "n_components",
+            "integer",
+            0,
+            min=0,
+            description="0 = keep 95% of the variance automatically",
+        ),
+        P("contamination", "float", 0.05, min=0.000001, max=0.5),
+        P("random_state", "integer", 42, min=0),
+    )
+
+    def execute(self, inputs: dict[str, Any], context: ExecutionContext) -> Result:
+        outputs = advanced_models.fit_pca_detector(inputs["dataset"], **self.parameters)
+        return Result(outputs, outputs["metrics"]["warnings"])
+
+
+class MinClusterDetectorComponent(BaseComponent):
+    """Mincluster 探测器：先聚类正常工况，再按到最近簇心的距离判异常（可自动选簇数）。"""
+
+    metadata = Meta(
+        "validation.min_cluster_detector",
+        "Mincluster探测器",
+        "validation",
+        "MiniBatchKMeans cluster-distance detection; n_clusters=0 picks the count by silhouette",
+        subcategory="可检测性",
+        tags=("kmeans", "cluster", "anomaly", "聚类"),
+        search_keywords=(
+            "minicluster detector",
+            "kmeans anomaly detection",
+            "Mincluster探测器",
+            "聚类检测",
+            "自动给出合理聚类",
+        ),
+    )
+    input_ports = DATA_IN
+    output_ports = (Out("model", T.MODEL), Out("prediction", T.PREDICTION), Out("metrics", T.METRICS))
+    parameter_schema = (
+        COLS,
+        P("n_clusters", "integer", 0, min=0, description="0 = choose the count automatically"),
+        P("contamination", "float", 0.05, min=0.000001, max=0.5),
+        P("max_clusters", "integer", 8, min=2, max=64),
+        P("batch_size", "integer", 1024, min=16),
+        P("silhouette_sample", "integer", 5000, min=50),
+        P("random_state", "integer", 42, min=0),
+    )
+
+    def execute(self, inputs: dict[str, Any], context: ExecutionContext) -> Result:
+        outputs = advanced_models.fit_min_cluster_detector(inputs["dataset"], **self.parameters)
+        return Result(outputs, outputs["metrics"]["warnings"])
+
+
+class ChangeDetectorComponent(BaseComponent):
+    """结构变化检测器的公共基类：吃原始表，输出 model / prediction / metrics。
+
+    七个检测器共用同一套实现（:func:`fault_core.change_detection.detect`），差异只在**判定
+    口径**与参数上，因此端口与执行收敛在基类，每个子类只声明自己的方法与参数。
+    共同的语义约定：
+
+    * ``anomaly_score`` 的量纲随方法不同（t 统计量 / 对数比 / z 分数 / sigma 倍数），
+      跨方法的分数不可比较，报告里必须同时写方法名与阈值；
+    * 窗口或参考段不足的行 ``anomaly_score`` 是 NaN、``is_anomaly`` 为 False，
+      用 metrics 里的 ``scored_count`` 说明到底评了多少行；
+    * 给了 ``group_column`` 就逐组独立检测，**绝不跨设备边界**。
+    """
+
+    input_ports = DATA_IN
+    output_ports = (Out("model", T.MODEL), Out("prediction", T.PREDICTION), Out("metrics", T.METRICS))
+    detection_method: ClassVar[str]
+
+    def execute(self, inputs: dict[str, Any], context: ExecutionContext) -> Result:
+        outputs = change_detection.detect(inputs["dataset"], method=self.detection_method, **self.parameters)
+        return Result(outputs, outputs["metrics"]["warnings"])
+
+
+class LevelShiftDetectorComponent(ChangeDetectorComponent):
+    """LevelShift 检测：候选点前后各 window 点的均值差的 t 统计量超过阈值即为阶跃。"""
+
+    metadata = Meta(
+        "validation.level_shift_detector",
+        "LevelShift检测器",
+        "validation",
+        "Detect a step change in the mean using a two-sample t statistic around each split point",
+        subcategory="可检测性",
+        tags=("level shift", "changepoint", "阶跃", "均值突变"),
+        search_keywords=("level shift detector", "changepoint detection", "均值阶跃", "结构变化", "突变检测"),
+    )
+    detection_method = "level_shift"
+    parameter_schema = (
+        P("column", "column", None, required=True),
+        P("window", "integer", 20, min=2, description="Points compared before and after each split"),
+        P("threshold", "float", 4.0, min=0, description="t statistic cut-off"),
+        P("group_column", "column", None),
+        P("time_column", "column", None),
+    )
+
+
+class VolatilityShiftDetectorComponent(ChangeDetectorComponent):
+    """VolatilityShift 检测：前后两段方差之比的对数，按原假设抽样标准差归一化后比阈值。"""
+
+    metadata = Meta(
+        "validation.volatility_shift_detector",
+        "VolatilityShift检测器",
+        "validation",
+        "Detect a change in the variance level; the score is the log variance ratio in z units",
+        subcategory="可检测性",
+        tags=("volatility shift", "variance change", "波动率", "方差突变"),
+        search_keywords=(
+            "volatility shift",
+            "variance change detection",
+            "波动率变化检测",
+            "波动率突变",
+            "噪声水平变化",
+        ),
+    )
+    detection_method = "volatility_shift"
+    parameter_schema = (
+        P("column", "column", None, required=True),
+        P("window", "integer", 20, min=2),
+        P("threshold", "float", 4.0, min=0, description="z units: 0.32 is one sigma for a 20-point window"),
+        P("group_column", "column", None),
+        P("time_column", "column", None),
+    )
+
+
+class SeasonalDetectorComponent(ChangeDetectorComponent):
+    """Seasonal 检测：偏离"参考段季节剖面"的稳健 z 分数超过阈值即为异常。"""
+
+    metadata = Meta(
+        "validation.seasonal_detector",
+        "Seasonal检测器",
+        "validation",
+        "Score each row against a seasonal profile fitted on a leading reference segment",
+        subcategory="可检测性",
+        tags=("seasonal", "seasonality", "季节性", "周期异常"),
+        search_keywords=("seasonal detector", "seasonality check", "季节性检测", "周期剖面"),
+    )
+    detection_method = "seasonal"
+    parameter_schema = (
+        P("column", "column", None, required=True),
+        P("period", "integer", 24, min=2, description="Samples per cycle"),
+        P("threshold", "float", 4.0, min=0, description="z units against the robust profile scale"),
+        P(
+            "reference_fraction",
+            "float",
+            0.5,
+            min=0.1,
+            max=0.9,
+            description="Leading share used to build the profile; the rest is out-of-sample",
+        ),
+        P("group_column", "column", None),
+        P("time_column", "column", None),
+    )
+
+
+class AutoregressionDetectorComponent(ChangeDetectorComponent):
+    """AutoRegression 检测：AR(p) 单步预测残差的稳健 z 分数；只评参考段之后的行。"""
+
+    metadata = Meta(
+        "validation.autoregression_detector",
+        "AutoRegression检测器",
+        "validation",
+        "One-step AR(p) residuals on the rows after a leading training segment",
+        subcategory="可检测性",
+        tags=("autoregression", "ar model", "自回归", "动态变化"),
+        search_keywords=("autoregression detector", "ar residual detection", "自回归检测", "残差异常"),
+    )
+    detection_method = "autoregression"
+    parameter_schema = (
+        P("column", "column", None, required=True),
+        P("order", "integer", 2, min=1, max=50, description="AR order p"),
+        P("threshold", "float", 4.0, min=0, description="Robust z-score cut-off"),
+        P("train_fraction", "float", 0.5, min=0.1, max=0.9),
+        P("group_column", "column", None),
+        P("time_column", "column", None),
+    )
+
+
+class EsdDetectorComponent(ChangeDetectorComponent):
+    """Generalized ESD（Rosner）检测：迭代剔除最极端点并与 t 分布临界值比较。"""
+
+    metadata = Meta(
+        "validation.esd_detector",
+        "GeneralizedESD检测器",
+        "validation",
+        "Generalized extreme Studentized deviate test for up to a fraction of outliers",
+        subcategory="可检测性",
+        tags=("esd", "rosner", "outlier", "广义ESD"),
+        search_keywords=("generalized esd", "rosner test", "ESD检测", "离群点检验"),
+    )
+    detection_method = "esd"
+    parameter_schema = (
+        P("column", "column", None, required=True),
+        P("max_outlier_fraction", "float", 0.1, min=0.001, max=0.5, description="Upper bound tested"),
+        P("alpha", "float", 0.05, min=0.000001, max=0.5),
+        P("group_column", "column", None),
+        P("time_column", "column", None),
+    )
+
+
+class NSigmaDetectorComponent(ChangeDetectorComponent):
+    """Nsigma 检测：偏离中心 sigma 倍尺度即为异常；中心可按整列、整组或滚动窗口取。"""
+
+    metadata = Meta(
+        "validation.nsigma_detector",
+        "Nsigma检测",
+        "validation",
+        "Distance from a centre in units of a scale, with global, per-group or rolling centres",
+        subcategory="可检测性",
+        tags=("nsigma", "sigma", "3sigma", "N倍标准差"),
+        search_keywords=("nsigma detector", "sigma threshold", "Nsigma算法", "三倍标准差", "越限检测"),
+    )
+    detection_method = "nsigma"
+    parameter_schema = (
+        P("column", "column", None, required=True),
+        P("sigma", "float", 3.0, min=0.1, description="How many scales count as an excursion"),
+        enum(
+            "mode",
+            "global",
+            ("global", "group", "rolling"),
+            "global/group use full-sample statistics (descriptive); rolling follows drift",
+        ),
+        P("window", "integer", 30, min=2, description="Only used by mode=rolling"),
+        P("group_column", "column", None),
+        P("time_column", "column", None),
+    )
+
+
+class MeanDriftDetectorComponent(ChangeDetectorComponent):
+    """均值漂移检测：Page 的 CUSUM，累积"偏离参考均值超过 slack 倍尺度"的部分。"""
+
+    metadata = Meta(
+        "validation.mean_drift_detector",
+        "均值漂移检测",
+        "validation",
+        "CUSUM drift detector against a reference segment mean, with a slack band",
+        subcategory="可检测性",
+        tags=("cusum", "mean drift", "均值漂移", "缓慢漂移"),
+        search_keywords=("mean drift detector", "cusum", "平均值漂移检测", "缓慢漂移检测"),
+    )
+    detection_method = "mean_drift"
+    parameter_schema = (
+        P("column", "column", None, required=True),
+        P(
+            "reference_fraction",
+            "float",
+            0.3,
+            min=0.05,
+            max=0.9,
+            description="Leading share that defines the target mean",
+        ),
+        P("slack", "float", 0.5, min=0, description="Slack k in scale units; ignores small deviations"),
+        P("decision", "float", 5.0, min=0.1, description="Alarm line h in scale units"),
+        P("group_column", "column", None),
+        P("time_column", "column", None),
+    )
+
+
+class KMeansComponent(BaseComponent):
+    """KMeans 聚类：把记录分到若干工况簇（可自动选簇数）；**不是**异常检测。"""
+
+    metadata = Meta(
+        "validation.kmeans",
+        "KMeans聚类",
+        "validation",
+        "MiniBatchKMeans clustering with silhouette-based cluster-count selection",
+        subcategory="可诊断性",
+        tags=("kmeans", "cluster", "聚类", "工况划分"),
+        search_keywords=("kmeans clustering", "cluster analysis", "kmeans聚类", "聚类分析", "工况聚类"),
+    )
+    input_ports = TABLE_IN
+    output_ports = (Out("model", T.MODEL), Out("prediction", T.PREDICTION), Out("metrics", T.METRICS))
+    parameter_schema = (
+        COLS,
+        P("n_clusters", "integer", 0, min=0, description="0 = choose automatically by silhouette"),
+        P("max_clusters", "integer", 8, min=2, max=64),
+        P("batch_size", "integer", 1024, min=16),
+        P("silhouette_sample", "integer", 5000, min=50),
+        P("random_state", "integer", 42, min=0),
+    )
+
+    def execute(self, inputs: dict[str, Any], context: ExecutionContext) -> Result:
+        outputs = advanced_models.fit_kmeans(inputs["dataset"], **self.parameters)
+        return Result(outputs, outputs["metrics"]["warnings"])
+
+
+class OneClassSvmComponent(BaseComponent):
+    """单类 SVM 检测：只学"正常长什么样"，边界之外判为异常（不需要标签）。"""
+
+    metadata = Meta(
+        "validation.one_class_svm",
+        "单类SVM检测",
+        "validation",
+        "One-class SVM novelty detection learned from normal behaviour only",
+        subcategory="可检测性",
+        tags=("one class svm", "novelty", "单类", "边界检测"),
+        search_keywords=("one class svm", "novelty detection", "单类SVM", "支持向量机检测", "无标签检测"),
+    )
+    input_ports = DATA_IN
+    output_ports = (Out("model", T.MODEL), Out("prediction", T.PREDICTION), Out("metrics", T.METRICS))
+    parameter_schema = (
+        COLS,
+        P("nu", "float", 0.05, min=0.000001, max=1, description="Upper bound on the outlier fraction"),
+        enum("kernel", "rbf", ("rbf", "linear", "poly", "sigmoid")),
+        enum("gamma", "scale", ("scale", "auto")),
+    )
+
+    def execute(self, inputs: dict[str, Any], context: ExecutionContext) -> Result:
+        outputs = advanced_models.fit_one_class_svm(inputs["dataset"], **self.parameters)
+        return Result(outputs, outputs["metrics"]["warnings"])
 
 
 class PersistenceDetectorComponent(BaseComponent):
@@ -1785,6 +2910,62 @@ class MergeFeatureComponent(BaseComponent):
         return Result({"features": features.merge_features(inputs["left"], inputs["right"])})
 
 
+class GridSearchComponent(BaseComponent):
+    """超参搜索：在小网格上做交叉验证，返回最优参数、全部候选分数与选出来的模型。"""
+
+    metadata = Meta(
+        "validation.grid_search",
+        "超参搜索",
+        "validation",
+        "Small-grid cross-validated hyper-parameter search with an explicit optimism warning",
+        subcategory="自动机器学习",
+        tags=("grid search", "hyperparameter", "超参搜索", "自动机器学习"),
+        search_keywords=(
+            "grid search",
+            "hyperparameter tuning",
+            "超参搜索",
+            "自动机器学习",
+            "参数寻优",
+        ),
+    )
+    input_ports = (In("features", T.FEATURE_DATASET), In("labels", T.LABEL_VECTOR))
+    output_ports = (
+        Out("model", T.MODEL),
+        Out("metrics", T.METRICS),
+        Out("importance", T.IMPORTANCE, False),
+    )
+    parameter_schema = (
+        enum(
+            "algorithm",
+            "random_forest",
+            model_selection.ALGORITHMS,
+            "Classifiers take features+labels; regressors take features+target",
+        ),
+        P(
+            "param_grid",
+            "object",
+            {"n_estimators": [100, 300], "max_depth": [4, 8]},
+            required=True,
+            description="Parameter name to candidate list, e.g. {'n_estimators': [100, 300]}",
+        ),
+        enum("cv_method", "stratified", ("stratified", "group", "temporal")),
+        P("cv_folds", "integer", 3, min=2, max=10),
+        P("scoring", "string", "", description="Empty = f1_weighted for classifiers, r2 for regressors"),
+        P("top_k", "integer", 5, min=1, max=20, description="How many candidates to report"),
+    )
+
+    def execute(self, inputs: dict[str, Any], context: ExecutionContext) -> Result:
+        outputs = model_selection.grid_search(inputs["features"], inputs["labels"], **self.parameters)
+        warnings = list(outputs["metrics"]["warnings"])
+        # 候选表放进 metrics（有界的前 top_k 行），不额外加端口：它是一次搜索的审计记录，
+        # 不是可以继续接线往下传的数据。
+        outputs["metrics"]["top_candidates"] = outputs.pop("candidates").to_dict(orient="records")
+        payload = {"model": outputs["model"], "metrics": outputs["metrics"]}
+        if "importance" in outputs:
+            payload["importance"] = outputs["importance"]
+        return Result(payload, warnings)
+
+
 class CompareModelsComponent(BaseComponent):
     """模型对比：比较最多三个 metrics 产物，要求它们来自同一批测试行。"""
 
@@ -1828,6 +3009,10 @@ BUILTIN_COMPONENTS = (
     StandardizationComponent,
     TransformationComponent,
     BinarizeComponent,
+    PolynomialFeatureComponent,
+    DiscretizeComponent,
+    SeasonalDifferenceComponent,
+    ConcatComponent,
     CentralTendencyComponent,
     DispersionComponent,
     CorrelationComponent,
@@ -1836,6 +3021,17 @@ BUILTIN_COMPONENTS = (
     ConceptDriftComponent,
     CrossRelationComponent,
     AnomalyExplorationComponent,
+    PeaksComponent,
+    NormalityCheckComponent,
+    DivergenceComponent,
+    AcfComponent,
+    IsotonicComponent,
+    GbrFitComponent,
+    HpFilterComponent,
+    StationarityComponent,
+    DtwComponent,
+    SbdComponent,
+    SlopeCosineComponent,
     ScatterPlotComponent,
     LinePlotComponent,
     SubplotComponent,
@@ -1848,6 +3044,7 @@ BUILTIN_COMPONENTS = (
     FittingFeatureComponent,
     RollingStatisticsComponent,
     TemporalFeatureComponent,
+    WaveletFeatureComponent,
     EntropyFeatureComponent,
     CategoricalFeatureComponent,
     CategoricalTransformComponent,
@@ -1860,13 +3057,29 @@ BUILTIN_COMPONENTS = (
     DecisionTreeComponent,
     ReservoirClassifierComponent,
     LinearRegressionComponent,
+    RidgeComponent,
+    ExponentialSmoothingComponent,
+    ArimaComponent,
     ARMAComponent,
     KNNDetectorComponent,
     IsolationForestDetectorComponent,
+    DbscanDetectorComponent,
+    PcaDetectorComponent,
+    MinClusterDetectorComponent,
+    KMeansComponent,
+    OneClassSvmComponent,
+    LevelShiftDetectorComponent,
+    VolatilityShiftDetectorComponent,
+    SeasonalDetectorComponent,
+    AutoregressionDetectorComponent,
+    EsdDetectorComponent,
+    NSigmaDetectorComponent,
+    MeanDriftDetectorComponent,
     PersistenceDetectorComponent,
     LabelComponent,
     SelectFeatureComponent,
     FeatureImputationComponent,
     MergeFeatureComponent,
+    GridSearchComponent,
     CompareModelsComponent,
 )

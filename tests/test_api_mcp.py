@@ -52,7 +52,7 @@ def test_api_example_execution_and_xml(service):
     with TestClient(create_app(service=service)) as client:
         assert client.get("/").status_code == 200
         assert client.get("/static/app.js").status_code == 200
-        assert client.get("/api/health").json()["components"] == 56
+        assert client.get("/api/health").json()["components"] == 88
         example = call(client, "create_example").json()
         pipeline_id = example["pipeline_id"]
         assert call(client, "validate_pipeline", pipeline_id=pipeline_id).json()["valid"]

@@ -43,3 +43,101 @@ body.resizing.row-resize{cursor:row-resize}
 /* 连线：正交折线的点击热区与悬停高亮。热区始终透明，只负责把可点区域放大到 15px。 */
 #connections .edge-hit,#connections .edge-hit:hover{stroke:transparent;stroke-width:15;pointer-events:stroke;cursor:pointer}
 #connections path.hover{stroke:var(--blue);stroke-width:3}
+
+/* ── 字号基线（2026-09-16）──────────────────────────────────────────────────
+   反馈：整体偏小，组件库那块尤其小（原来组件名 11px、子分类标题 9px、箭头 8px）。
+   这里集中覆盖，而不是去改上面那些压缩成一行、彼此耦合的规则——以后调字号只动这一段。
+   原则：正文类 +1~1.5px；组件库（左栏，最常被扫读）从 11px 提到 13px。
+   左栏的垂直内边距同时收 1px：字号变大后行高会涨，不收一点会破坏"全部折叠后目录
+   无需滚动"那条验收（见 scripts/browser_check.cjs 的 folding.fitsWithoutScroll）。
+   窄屏例外放在文件末尾，避免把三栏挤坏。 */
+
+/* 左栏 · 组件库 */
+.component-item{font-size:13px;gap:8px;padding:7px}
+.component-icon{width:27px;height:27px;font-size:15px}
+.component-item .star{font-size:16px}
+.catalog .category-title{font-size:13px;margin:10px 0 5px;padding:6px 8px}
+.catalog .subcategory-title{font-size:11.5px;margin:3px 0 2px;padding:4px 8px 4px 13px}
+.catalog .chevron{font-size:10px;width:11px}
+.catalog .group-icon{font-size:14px}
+.catalog .group-count,.catalog .subcategory-title span{font-size:11px}
+.catalog-empty{font-size:12px}
+.library-tools button{font-size:12px}
+.catalog-filter select{font-size:12px}
+.panel-heading h2{font-size:14px}
+.count{font-size:11.5px}
+.eyebrow{font-size:10.5px}
+.library-tabs button{font-size:12px}
+.search span{font-size:25px}
+
+/* 顶栏与工具栏 */
+.brand{font-size:16px}
+.brand small{font-size:11px}
+.project input{font-size:14px}
+.project span{font-size:11px}
+.connection-indicator{font-size:12px}
+button{font-size:13px}
+input,select,textarea{font-size:13px}
+.toolbar select{font-size:12px}
+
+/* 画布与节点 */
+.canvas-heading h1{font-size:17px}
+.status-chip{font-size:11px}
+.node{width:232px}
+.node-title{font-size:13px}
+.node-title small{font-size:10px;max-width:176px}
+.node .component-icon{width:28px;height:28px}
+.port{font-size:11.5px;min-height:24px}
+.port-dot{height:10px;width:10px}
+.node-status{font-size:10px}
+.canvas-help{font-size:10.5px}
+.zoom-controls span{font-size:11.5px}
+.zoom-controls button{font-size:16px}
+#empty-canvas h3{font-size:18px}
+#empty-canvas p{font-size:12px}
+#empty-canvas button{font-size:12px}
+.empty-icon{font-size:48px}
+
+/* 右栏 · 节点配置 */
+#inspector-content{font-size:12px}
+.inspect-title{font-size:15px}
+.inspect-description{font-size:11.5px}
+.inspect-section{font-size:11px}
+.parameter-label{font-size:11.5px}
+.parameter small{font-size:11px}
+.parameter input:not([type=checkbox]),.parameter select,.parameter textarea{font-size:12px}
+.port-info{font-size:10.5px}
+.node-actions button{font-size:11.5px}
+#apply-params{font-size:12px}
+.data-box strong{font-size:12px}
+.data-box button{font-size:11px}
+.data-box select{font-size:11.5px}
+.data-box small{font-size:10.5px}
+.inspector-empty{font-size:12px}
+.inspector-empty>span{font-size:38px}
+.inspector-empty h3{font-size:13px}
+
+/* 结果面板 */
+.result-tabs button{font-size:12px}
+#result-caption{font-size:11px}
+.empty-result{font-size:12px}
+.empty-result span{font-size:28px}
+.result-port h3{font-size:12px}
+.result-port pre,#result-content>pre{font-size:11.5px}
+table{font-size:11.5px}
+.metric-card .label{font-size:10.5px}
+.metric-card strong{font-size:23px}
+.metric-note{font-size:11.5px}
+/* 结果面板里的小标题（正负样本构成 / 标签构成）——比 metric-note 醒目，比 h3 轻 */
+.metric-title{margin:14px 0 7px;font-size:12px;font-weight:600;color:#5b6f8c}
+.metric-title:first-child{margin-top:4px}
+.warning{font-size:11.5px}
+.error{font-size:12px}
+.chart text{font-size:10.5px}
+.legend{font-size:11.5px}
+#toast{font-size:13px}
+footer{font-size:10.5px}
+
+/* 窄屏例外：上面按元素写的覆盖会盖掉原媒体查询里的缩小值（同选择器、后写者胜），
+   所以这里把窄屏的收缩重新声明一次，只是比原来各留 1px。 */
+@media(max-width:850px){.brand{font-size:13px}.brand small{font-size:9px}}

@@ -4,7 +4,10 @@
 
 * ``validate_linear_regression``：在特征表上做回归，输出 R²/MAE/RMSE 与系数；
 * ``validate_arma``：对单条时间序列做 ARMA 预测（后段留出，只前向预测）；
-* ``fit_anomaly_detector`` / ``persistence_detection``：无监督检测，输出逐行分数与标记。
+* ``fit_anomaly_detector`` / ``persistence_detection`` / ``fit_dbscan_detector`` /
+  ``fit_pca_detector`` / ``fit_min_cluster_detector``：无监督检测，输出逐行分数与标记。
+  这几个检测器的阈值来源互不相同（分位数、eps、簇距离），各自的 metrics 会把
+  "这个阈值是怎么来的"写清楚，而不是让使用者以为它们可以互换。
 
 与前两类不同，无监督检测没有"留出集"的概念：阈值在**全部输入**上拟合，
 因此 metrics 里固定带一条警告，提醒使用者这只是描述性结果。
@@ -13,17 +16,20 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
 import pandas as pd
+from sklearn.cluster import DBSCAN, MiniBatchKMeans
+from sklearn.decomposition import PCA
 from sklearn.ensemble import IsolationForest
-from sklearn.linear_model import LinearRegression
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.linear_model import LinearRegression, Ridge
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, silhouette_score
 from sklearn.model_selection import GroupShuffleSplit, train_test_split
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import StandardScaler
+from sklearn.svm import OneClassSVM
 
 from fault_core.data import numeric_columns
 from fault_core.features import coverage_subset, rows_without_overlap, windows_share_rows
@@ -106,6 +112,60 @@ class TrainedRegressor:
         return np.asarray(self.estimator.predict(values), dtype=float)
 
 
+def _regression_report(
+    features: pd.DataFrame,
+    target: pd.Series,
+    estimator: Any,
+    algorithm: str,
+    split_method: str,
+    test_size: float,
+    random_state: int,
+    extra_metrics: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """回归验证器的公共流程：对齐校验 → 切分 → 训练 → 留出指标 → 四件套。
+
+    线性回归与岭回归只在估计器上不同，其余（重叠窗口复查、指标字段、系数表）必须完全一致，
+    否则"换个模型再对比"这件事就失去意义，所以把流程收敛在这里。
+    """
+    y = _aligned_numeric(features, target)
+    train, test = _split(features, split_method, test_size, random_state)
+    if len(train) < 2 or len(test) < 1:
+        raise ValueError("Regression split leaves too few train or test rows")
+    if "source_rows_ranges" in features.attrs or features.attrs.get("source_rows"):
+        if windows_share_rows(
+            coverage_subset(features.attrs, list(train)), coverage_subset(features.attrs, list(test))
+        ):
+            raise ValueError("Train/test regression windows share source rows")
+    estimator.fit(features.iloc[train], y[train])
+    predicted = estimator.predict(features.iloc[test])
+    warnings = list(features.attrs.get("evaluation_warnings", []))
+    metrics = {
+        "algorithm": algorithm,
+        "r2": float(r2_score(y[test], predicted)) if len(test) >= 2 else None,
+        "mae": float(mean_absolute_error(y[test], predicted)),
+        "rmse": float(np.sqrt(mean_squared_error(y[test], predicted))),
+        "split_method": split_method,
+        "train_count": len(train),
+        "test_count": len(test),
+        "random_state": random_state,
+        "train_indices": features.index[train].tolist(),
+        "test_indices": features.index[test].tolist(),
+        "warnings": warnings,
+    }
+    if extra_metrics:
+        metrics.update(extra_metrics)
+    prediction = pd.DataFrame({"actual": y[test], "predicted": predicted}, index=features.index[test])
+    importance = pd.DataFrame(
+        {"feature": features.columns, "coefficient": np.asarray(estimator.coef_).reshape(-1)}
+    )
+    return {
+        "model": TrainedRegressor(estimator, list(features.columns)),
+        "prediction": prediction,
+        "metrics": metrics,
+        "importance": importance,
+    }
+
+
 def validate_linear_regression(
     features: pd.DataFrame,
     target: pd.Series,
@@ -120,42 +180,43 @@ def validate_linear_regression(
     ``positive=True`` 约束系数非负（适合"特征越大故障越严重"的先验）。
     切分后还会复查训练与测试窗口是否共享原始行，共享即报错——这是重叠窗口下最常见的泄漏来源。
     """
-    y = _aligned_numeric(features, target)
-    train, test = _split(features, split_method, test_size, random_state)
-    if len(train) < 2 or len(test) < 1:
-        raise ValueError("Regression split leaves too few train or test rows")
-    if "source_rows_ranges" in features.attrs or features.attrs.get("source_rows"):
-        if windows_share_rows(
-            coverage_subset(features.attrs, list(train)), coverage_subset(features.attrs, list(test))
-        ):
-            raise ValueError("Train/test regression windows share source rows")
-    estimator = LinearRegression(fit_intercept=fit_intercept, positive=positive)
-    estimator.fit(features.iloc[train], y[train])
-    predicted = estimator.predict(features.iloc[test])
-    warnings = list(features.attrs.get("evaluation_warnings", []))
-    metrics = {
-        "algorithm": "linear_regression",
-        "r2": float(r2_score(y[test], predicted)) if len(test) >= 2 else None,
-        "mae": float(mean_absolute_error(y[test], predicted)),
-        "rmse": float(np.sqrt(mean_squared_error(y[test], predicted))),
-        "split_method": split_method,
-        "train_count": len(train),
-        "test_count": len(test),
-        "random_state": random_state,
-        "train_indices": features.index[train].tolist(),
-        "test_indices": features.index[test].tolist(),
-        "warnings": warnings,
-    }
-    prediction = pd.DataFrame({"actual": y[test], "predicted": predicted}, index=features.index[test])
-    importance = pd.DataFrame(
-        {"feature": features.columns, "coefficient": np.asarray(estimator.coef_).reshape(-1)}
+    return _regression_report(
+        features,
+        target,
+        LinearRegression(fit_intercept=fit_intercept, positive=positive),
+        "linear_regression",
+        split_method,
+        test_size,
+        random_state,
     )
-    return {
-        "model": TrainedRegressor(estimator, list(features.columns)),
-        "prediction": prediction,
-        "metrics": metrics,
-        "importance": importance,
-    }
+
+
+def validate_ridge(
+    features: pd.DataFrame,
+    target: pd.Series,
+    split_method: str = "random",
+    test_size: float = 0.25,
+    random_state: int = 42,
+    alpha: float = 1.0,
+    fit_intercept: bool = True,
+) -> dict[str, Any]:
+    """岭回归验证：与线性回归同一条流程，只是加了 L2 惩罚 ``alpha``。
+
+    用途是"特征之间高度相关"的场合（窗口统计量几乎总是互相相关）：普通最小二乘此时系数
+    会剧烈摆动甚至符号翻转，岭回归把系数压向 0 来换稳定性。代价是**系数不再是可解释的
+    边际效应**，只能当"哪些特征被用到"的线索；``alpha`` 越大收缩越强，``alpha=0``
+    等价于线性回归。指标字段与线性回归完全一致，方便用 ``validation.compare`` 并列。
+    """
+    return _regression_report(
+        features,
+        target,
+        Ridge(alpha=alpha, fit_intercept=fit_intercept),
+        "ridge",
+        split_method,
+        test_size,
+        random_state,
+        extra_metrics={"alpha": float(alpha)},
+    )
 
 
 @dataclass
@@ -454,5 +515,366 @@ def persistence_detection(
         "anomaly_rate": float(flags.mean()),
         "sample_count": len(data),
         "warnings": [],
+    }
+    return {"model": model, "prediction": prediction, "metrics": metrics}
+
+
+@dataclass
+class FittedUnsupervisedDetector:
+    """DBSCAN / PCA / 簇距离三种检测器的统一形态。
+
+    与 :class:`FittedAnomalyDetector` 一样约定"分数越大越异常"，但**阈值的来源不同**：
+    DBSCAN 用 ``eps``（密度定义），PCA 与簇距离用 ``contamination`` 分位数（预算假设）。
+    把来源写进 ``details``，是为了让报告能说清"这个异常率是被谁决定的"。
+    """
+
+    method: str
+    columns: list[str]
+    scaler: StandardScaler
+    estimator: Any
+    threshold: float
+    details: dict[str, Any] = field(default_factory=dict)
+
+    def _scaled(self, data: pd.DataFrame) -> np.ndarray:
+        """按训练时的列与尺度取值；缺列立刻报错，绝不按位置猜列。"""
+        missing = set(self.columns) - set(data.columns)
+        if missing:
+            raise ValueError(f"Detection data is missing columns: {sorted(missing)}")
+        values = data[self.columns].to_numpy(dtype=float)
+        if not np.isfinite(values).all():
+            raise ValueError("Detection data must be finite numeric values")
+        return self.scaler.transform(values)
+
+    def score_samples(self, data: pd.DataFrame) -> np.ndarray:
+        """逐行异常分数；三种方法共用"越大越异常"的约定。"""
+        values = self._scaled(data)
+        if self.method == "dbscan":
+            # 到最近核心样本的距离：大于 eps 就意味着它落在任何簇之外（噪声点）。
+            return self.estimator.kneighbors(values, n_neighbors=1)[0].ravel()
+        if self.method == "pca":
+            # 重构误差：用前若干主成分把它压回去，压不回来的部分就是异常。
+            reconstructed = self.estimator.inverse_transform(self.estimator.transform(values))
+            return np.mean((values - reconstructed) ** 2, axis=1)
+        if self.method == "min_cluster":
+            # 到最近簇心的距离：离所有正常簇都远的点没有归属。
+            return self.estimator.transform(values).min(axis=1)
+        raise ValueError(f"Unknown unsupervised detector: {self.method}")
+
+    def predict(self, data: pd.DataFrame) -> np.ndarray:
+        """分数超过阈值即判异常（DBSCAN 下阈值就是 ``eps``）。"""
+        return self.score_samples(data) > self.threshold
+
+
+def _detector_inputs(
+    data: pd.DataFrame, columns: list[str] | None, method: str
+) -> tuple[list[str], StandardScaler, np.ndarray]:
+    """三类检测器共用的输入校验与标准化：列存在、行数足够、取值有限。"""
+    cols = numeric_columns(data, columns)
+    values = data[cols].to_numpy(dtype=float)
+    if len(data) < 5 or not np.isfinite(values).all():
+        raise ValueError(f"{method} detection needs at least five finite rows")
+    # 在 ndarray 上拟合：推理时同样传 ndarray，避免 sklearn 的"特征名不一致"警告。
+    scaler = StandardScaler().fit(values)
+    return cols, scaler, scaler.transform(values)
+
+
+def _finish_detector(
+    method: str,
+    data: pd.DataFrame,
+    cols: list[str],
+    scaler: StandardScaler,
+    estimator: Any,
+    scores: np.ndarray,
+    threshold: float,
+    details: dict[str, Any],
+) -> dict[str, Any]:
+    """把分数、阈值与附加信息打包成与其他检测器一致的返回值。"""
+    flags = scores > threshold
+    model = FittedUnsupervisedDetector(method, cols, scaler, estimator, float(threshold), details)
+    prediction = pd.DataFrame({"anomaly_score": scores, "is_anomaly": flags}, index=data.index)
+    metrics = {
+        "algorithm": method,
+        "threshold": float(threshold),
+        "anomaly_count": int(flags.sum()),
+        "anomaly_rate": float(flags.mean()),
+        "sample_count": len(data),
+        **details,
+        "warnings": [
+            "Detector threshold was fitted on the complete input dataset.",
+            *(
+                ["Anomaly rate comes from eps/min_samples, the contamination parameter is not used."]
+                if method == "dbscan"
+                else []
+            ),
+        ],
+    }
+    return {"model": model, "prediction": prediction, "metrics": metrics}
+
+
+def fit_dbscan_detector(
+    data: pd.DataFrame,
+    columns: list[str] | None = None,
+    eps: float = 1.0,
+    min_samples: int = 5,
+    metric: str = "euclidean",
+) -> dict[str, Any]:
+    """DBSCAN 检测：把"落在任何簇之外"的点当作异常。
+
+    **异常率由 ``eps`` 与 ``min_samples`` 决定，不来自 ``contamination``**——这与 KNN /
+    隔离森林那套"给定污染率"的检测器是不同的假设：这里异常是数据里"密度不够"的客观结果，
+    而不是一个预算。分数统一取"到最近核心样本的距离"，因此可以排序、可以画图。
+    找不到任何核心样本会直接报错（数据整体太稀疏），而不是返回一堆看似正常的噪声标记。
+    """
+    cols, scaler, scaled = _detector_inputs(data, columns, "DBSCAN")
+    estimator = DBSCAN(eps=eps, min_samples=min_samples, metric=metric).fit(scaled)
+    core = estimator.components_
+    if len(core) == 0:
+        raise ValueError("DBSCAN found no core samples; increase eps or lower min_samples for this data")
+    neighbors = NearestNeighbors(n_neighbors=1, metric=metric).fit(core)
+    scores = neighbors.kneighbors(scaled, n_neighbors=1)[0].ravel()
+    labels = estimator.labels_
+    clusters = int(len(set(labels.tolist()) - {-1}))
+    details = {
+        "eps": float(eps),
+        "min_samples": int(min_samples),
+        "metric": metric,
+        "cluster_count": clusters,
+        "core_sample_count": int(len(core)),
+        "noise_count": int(np.sum(labels == -1)),
+    }
+    # 存 NearestNeighbors 而不是 DBSCAN 本身：DBSCAN 没有 kneighbors，无法给新数据打分。
+    return _finish_detector("dbscan", data, cols, scaler, neighbors, scores, float(eps), details)
+
+
+def fit_pca_detector(
+    data: pd.DataFrame,
+    columns: list[str] | None = None,
+    n_components: int = 0,
+    contamination: float = 0.05,
+    random_state: int = 42,
+) -> dict[str, Any]:
+    """PCA 检测：用前若干主成分重构每一行，**重构误差大**的行判为异常。
+
+    ``n_components=0`` 表示自动取"能解释 95% 方差"的主成分数（``svd_solver="full"``，
+    结果确定、不随机）；给正数则固定主成分数。``contamination`` 决定被判异常的比例，
+    是**假设**而不是发现——报告里必须一起写出来。重构误差是"这条记录有多少信息无法由
+    正常模式解释"，对多通道同时偏置这类故障比单变量阈值敏感。
+    """
+    if isinstance(n_components, bool) or not isinstance(n_components, int) or n_components < 0:
+        raise ValueError("n_components must be an integer >= 0 (0 = keep 95% variance)")
+    if not 0 < contamination < 1:
+        raise ValueError("contamination must be between 0 and 1")
+    cols, scaler, scaled = _detector_inputs(data, columns, "PCA")
+    estimator = PCA(n_components=n_components or 0.95, svd_solver="full", random_state=random_state)
+    estimator.fit(scaled)
+    reconstructed = estimator.inverse_transform(estimator.transform(scaled))
+    scores = np.mean((scaled - reconstructed) ** 2, axis=1)
+    threshold = float(np.quantile(scores, 1 - contamination))
+    details = {
+        "contamination": float(contamination),
+        "n_components": int(estimator.n_components_),
+        "explained_variance_ratio_sum": float(np.sum(estimator.explained_variance_ratio_)),
+        "input_columns": int(len(cols)),
+    }
+    return _finish_detector("pca", data, cols, scaler, estimator, scores, threshold, details)
+
+
+def _fit_kmeans_model(
+    scaled: np.ndarray,
+    n_clusters: int,
+    max_clusters: int,
+    batch_size: int,
+    random_state: int,
+    silhouette_sample: int,
+) -> tuple[Any, dict[str, Any]]:
+    """拟合 MiniBatchKMeans；``n_clusters=0`` 时用轮廓系数自动选簇数。
+
+    "自动给出合理聚类"的落点就是这里：在 ``2..max_clusters`` 上逐个试，挑轮廓系数最高的。
+    轮廓系数只在 ``silhouette_sample`` 行子样本上算——它是 O(n²) 的，全量计算在大表上
+    会直接卡死，而子样本足以比较不同 k 的高低。
+    """
+    best_k, best_score = int(n_clusters), None
+    if n_clusters == 0:
+        sample = scaled[:silhouette_sample]
+        upper = min(max_clusters, max(2, int(np.sqrt(len(scaled)))))
+        best_k, best_score = 2, -1.0
+        for candidate in range(2, upper + 1):
+            if candidate >= len(sample):
+                break
+            trial = MiniBatchKMeans(
+                n_clusters=candidate, batch_size=batch_size, n_init=3, random_state=random_state
+            ).fit(sample)
+            if len(set(trial.labels_.tolist())) < 2:
+                continue
+            score = float(silhouette_score(sample, trial.labels_))
+            if score > best_score:
+                best_k, best_score = candidate, score
+    if best_k >= len(scaled):
+        raise ValueError("n_clusters must be smaller than the row count")
+    estimator = MiniBatchKMeans(
+        n_clusters=best_k, batch_size=batch_size, n_init=3, random_state=random_state
+    ).fit(scaled)
+    return estimator, {
+        "n_clusters": int(best_k),
+        "auto_selected": n_clusters == 0,
+        "silhouette": None if best_score is None else float(best_score),
+        "cluster_sizes": np.bincount(estimator.labels_, minlength=best_k).tolist(),
+        "inertia": float(estimator.inertia_),
+    }
+
+
+def fit_min_cluster_detector(
+    data: pd.DataFrame,
+    columns: list[str] | None = None,
+    n_clusters: int = 0,
+    contamination: float = 0.05,
+    max_clusters: int = 8,
+    batch_size: int = 1024,
+    random_state: int = 42,
+    silhouette_sample: int = 5000,
+) -> dict[str, Any]:
+    """簇距离检测：先用 MiniBatchKMeans 找正常工况簇，再按"离最近簇心的距离"判异常。
+
+    ``n_clusters=0`` 时**自动选簇数**：在 2..``max_clusters`` 内用轮廓系数挑选（轮廓系数
+    最多在 ``silhouette_sample`` 行子样本上计算，避免大数据集上爆炸）。这条路径对应
+    组件清单里的"自动给出合理聚类"。自动选出的簇数与轮廓系数都会写进 metrics——
+    轮廓系数低（例如 < 0.2）说明数据本来就没有清晰簇结构，这时结论应当谨慎引用。
+
+    与 PCA 检测器一样，``contamination`` 是异常预算假设，不是发现。
+    """
+    if isinstance(n_clusters, bool) or not isinstance(n_clusters, int) or n_clusters < 0:
+        raise ValueError("n_clusters must be an integer >= 0 (0 = choose automatically)")
+    if not 0 < contamination < 1:
+        raise ValueError("contamination must be between 0 and 1")
+    if max_clusters < 2:
+        raise ValueError("max_clusters must be at least 2")
+    cols, scaler, scaled = _detector_inputs(data, columns, "MinCluster")
+    estimator, cluster_details = _fit_kmeans_model(
+        scaled, n_clusters, max_clusters, batch_size, random_state, silhouette_sample
+    )
+    scores = estimator.transform(scaled).min(axis=1)
+    threshold = float(np.quantile(scores, 1 - contamination))
+    details = {"contamination": float(contamination), **cluster_details}
+    return _finish_detector("min_cluster", data, cols, scaler, estimator, scores, threshold, details)
+
+
+@dataclass
+class FittedClusterModel:
+    """训练好的聚类模型：列模式 + 标准化器 + 簇心，``predict`` 返回簇编号。
+
+    单独一个类而不是复用检测器，是因为语义不同：检测器回答"这条记录异常吗"，
+    聚类回答"这条记录属于哪一个工况簇"。塞进同一个返回结构会让人误以为"簇编号"就是
+    "异常等级"。
+    """
+
+    columns: list[str]
+    scaler: StandardScaler
+    estimator: Any
+
+    def _scaled(self, data: pd.DataFrame) -> np.ndarray:
+        """按训练时的列与尺度取值；缺列立刻报错。"""
+        missing = set(self.columns) - set(data.columns)
+        if missing:
+            raise ValueError(f"Clustering data is missing columns: {sorted(missing)}")
+        values = data[self.columns].to_numpy(dtype=float)
+        if not np.isfinite(values).all():
+            raise ValueError("Clustering data must be finite numeric values")
+        return self.scaler.transform(values)
+
+    def predict(self, data: pd.DataFrame) -> np.ndarray:
+        """返回每一行所属的簇编号（0 起）。"""
+        return np.asarray(self.estimator.predict(self._scaled(data)), dtype=int)
+
+    def transform(self, data: pd.DataFrame) -> np.ndarray:
+        """返回到每个簇心的距离矩阵（行 = 样本，列 = 簇）。"""
+        return np.asarray(self.estimator.transform(self._scaled(data)), dtype=float)
+
+
+def fit_kmeans(
+    data: pd.DataFrame,
+    columns: list[str] | None = None,
+    n_clusters: int = 0,
+    max_clusters: int = 8,
+    batch_size: int = 1024,
+    random_state: int = 42,
+    silhouette_sample: int = 5000,
+) -> dict[str, Any]:
+    """KMeans 聚类：把记录分到若干工况簇，输出簇编号与到最近簇心的距离。
+
+    ``n_clusters=0`` 用轮廓系数在 ``2..max_clusters`` 内自动选簇数。**这不是异常检测**：
+    它不给"正常/异常"的判决、不做阈值——什么算异常要你自己在簇与距离上定义。
+    返回的 ``silhouette`` 是"簇结构是否真实存在"的证据：低于约 0.2 时簇边界基本是硬切的，
+    报告里不能只说"分成了 3 类"。
+    """
+    if isinstance(n_clusters, bool) or not isinstance(n_clusters, int) or n_clusters < 0:
+        raise ValueError("n_clusters must be an integer >= 0 (0 = choose automatically)")
+    if max_clusters < 2:
+        raise ValueError("max_clusters must be at least 2")
+    cols, scaler, scaled = _detector_inputs(data, columns, "KMeans")
+    estimator, details = _fit_kmeans_model(
+        scaled, n_clusters, max_clusters, batch_size, random_state, silhouette_sample
+    )
+    labels = estimator.predict(scaled)
+    distances = estimator.transform(scaled).min(axis=1)
+    model = FittedClusterModel(cols, scaler, estimator)
+    prediction = pd.DataFrame(
+        {"cluster": labels.astype(int), "distance_to_centre": distances}, index=data.index
+    )
+    metrics = {
+        "algorithm": "kmeans",
+        "sample_count": len(data),
+        **details,
+        "warnings": [
+            "Cluster ids are labels, not severity: this is a descriptive grouping on the "
+            "complete input, not a validated anomaly detector.",
+        ],
+    }
+    return {"model": model, "prediction": prediction, "metrics": metrics}
+
+
+def fit_one_class_svm(
+    data: pd.DataFrame,
+    columns: list[str] | None = None,
+    nu: float = 0.05,
+    kernel: str = "rbf",
+    gamma: str = "scale",
+) -> dict[str, Any]:
+    """单类 SVM（novelty detection）：只学"正常长什么样"，边界之外判为异常。
+
+    与二分类 SVM 的区别是**不需要标签**，适合"故障样本几乎没有、只有正常运行数据"的早期
+    场景。``nu`` 是训练时落在边界外的样本比例**上界**（也是支持向量比例的下界），
+    实际异常比例通常低于它——两个数都会写进 metrics，不能把 ``nu`` 当异常率。
+
+    标准化在完整输入上拟合（属于描述性筛查），因此带探索性警告；核宽 ``gamma`` 对结果
+    影响很大，换一份数据就该重新看一次分数分布。
+    """
+    if not 0 < nu <= 1:
+        raise ValueError("nu must be in (0, 1]")
+    if kernel not in {"rbf", "linear", "poly", "sigmoid"}:
+        raise ValueError(f"Unknown kernel: {kernel}")
+    cols, scaler, scaled = _detector_inputs(data, columns, "One-class SVM")
+    estimator = OneClassSVM(nu=nu, kernel=kernel, gamma=gamma).fit(scaled)
+    decision = np.asarray(estimator.decision_function(scaled), dtype=float)
+    # 统一口径"越大越异常"：决策函数是"越大越正常"，取负号即可，阈值恰好是 0。
+    scores = -decision
+    flags = decision < 0
+    model = FittedUnsupervisedDetector("one_class_svm", cols, scaler, estimator, 0.0, {"nu": float(nu)})
+    prediction = pd.DataFrame({"anomaly_score": scores, "is_anomaly": flags}, index=data.index)
+    metrics = {
+        "algorithm": "one_class_svm",
+        "nu": float(nu),
+        "kernel": kernel,
+        "gamma": gamma,
+        "threshold": 0.0,
+        "support_vector_count": int(len(estimator.support_)),
+        "support_vector_share": float(len(estimator.support_) / len(data)),
+        "anomaly_count": int(flags.sum()),
+        "anomaly_rate": float(flags.mean()),
+        "sample_count": len(data),
+        "warnings": [
+            "Fit on the complete input: this is a descriptive screen, not a validated detector.",
+            "nu bounds the training outlier fraction; the observed rate can be lower and is not "
+            "an estimate of the real fault rate.",
+        ],
     }
     return {"model": model, "prediction": prediction, "metrics": metrics}

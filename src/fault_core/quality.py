@@ -60,7 +60,13 @@ def quality_report(
     zeros = sorted(
         name for name in numeric if frame[name].notna().any() and bool((frame[name].dropna() == 0).all())
     )
-    duplicates = int(data.duplicated().sum())
+    # 重复行按**参与检查的列**判定，不按整张表。
+    #
+    # 这条曾经是 `data.duplicated()`（整表）：于是加了一列簿记信息（`data.concat` 的
+    # `source_column`、上游 `data.input` 的同名列）就会让重复数变小——同一个检查的含义
+    # 被一个与数据质量无关的列改变了。现在它只回答"被建模的这些列里，有没有完全相同的行"，
+    # 并在 detail 里写明范围。
+    duplicates = int(data.duplicated(subset=numeric).sum())
 
     per_group: list[dict[str, Any]] = []
     group_constants = 0
@@ -111,7 +117,11 @@ def quality_report(
             "count": group_constants,
             "detail": f"scanned {len(per_group)} groups",
         },
-        {"check": "duplicate rows", "count": duplicates, "detail": ""},
+        {
+            "check": "duplicate rows",
+            "count": duplicates,
+            "detail": f"identical in the {len(numeric)} checked column(s)",
+        },
         {
             "check": "columns with flat windows",
             "count": sum(1 for value in flat_ratio.values() if value > 0),

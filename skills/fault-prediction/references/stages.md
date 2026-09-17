@@ -5,6 +5,8 @@
 
 ## 阶段 1 — 工作区与数据准备（§2）
 
+**这个阶段的作用：** 把平台看不见的外部文件变成"能按列名取用的表"，并钉死实例 / 资产 / 时间 / 标签四个角色。它是唯一一个**错了就全盘作废**的阶段：路径错、列角色错，后面每一个数字都在回答另一个问题。
+
 ### 平台接受哪些格式
 
 只有 `.csv`、`.parquet`、`.pq`。其它格式必须在平台**之外**先转换，而且你要说明你转换过：
@@ -17,6 +19,28 @@
 | 历史库／数据库 | 导出一段列式切片成 Parquet |
 
 转换时目标是**一行一个采样**：`asset_id`、`instance_id`、`time`、测量列、标签。窗口组件就认这个形状。
+
+### 多份同构数据怎么进来
+
+| 场景 | 做法 | 代价 / 注意 |
+| --- | --- | --- |
+| 这批数据以后就一起用 | `data.input` 的 `paths`（按顺序追加在 `path` 后面） | 持久改图 → 已有结果失效并重算；列集合必须一致 |
+| 想在前端一眼看见来源 | 摆几个 `data.input`，各接 `data.concat` 的 `first`/`second`（`third`/`fourth` 可选） | `first`/`second` 必填，只接一条会被 `validate_pipeline` 拦下；超过四个源就串联下一个 concat |
+| 同一张图换一批数据跑 | `execute_pipeline(dataset_overrides={"<输入节点>": ["a.csv","b.csv"]})` | **不是编辑**：图不变、结果不失效；文件指纹变 → 下游自动重算；单文件写字符串即可，多文件写列表（整组替换） |
+| 想区分每行来自哪个文件 | `data.input` 的 `source_column` | 多一列；默认不加，保持表结构不变 |
+| 想区分每行来自哪条分支 | `data.concat` 的 `source_column` | 写的是**输入端口名**（`first`/`second`…），不是文件路径 |
+
+合并规则：列集合必须与第一份一致（缺列/多列报错并点名），列顺序按第一份对齐，索引重排为 `0..N-1`，`source_id` 覆盖全部文件。流式（`streaming=true`）只支持单源。两份路都会写警告，汇报里要写清"读的是哪几份"。
+
+### 窗口之前该做的数据层变换
+
+这三件事改的是"列或行的语义"，所以必须在阶段 3 之前做，放到窗口之后含义完全不同：
+
+| 要做的事 | 组件 | 关键提醒 |
+| --- | --- | --- |
+| 平方项与交互项（`a*b`、`a^2`） | `data.polynomial_features` | 项数按 `C(n+d, d)` 增长，`max_columns` 会拦住列爆炸；`interaction_only` 只留交互项 |
+| 把连续列切成档位 | `data.discretize` | `strategy=uniform/quantile/kmeans`；**箱边界在整表上拟合**，所以结果带探索性警告；`encode=onehot-dense` 会展开成多个列 |
+| 同比口径（与上一周期比） | `data.seasonal_difference` | `mode=difference`（`y_t − y_{t−period}`）或 `ratio`（比值，要求基线严格为正）；**每组前 `period` 行必然是 NaN**，默认保留并写警告，`drop_missing=true` 才删行 |
 
 ### 检查清单
 
@@ -32,6 +56,8 @@
  - 把实例当成资产。趁原始数据还在眼前，把两列都记下来。
 
 ## 阶段 2 — 质量预检（§3）
+
+**这个阶段的作用：** 在通道变成特征之前判它的死法——全空、整列恒定、**每组内**恒定、被量化产生的平窗口。它挡掉的是"平台不报错、模型照学、结论照错"的那一类问题。
 
 ### `data.quality` 报告什么
 
@@ -64,7 +90,26 @@
  - 全局统计会掩盖组内恒定：一列可以缺失率 0%、整列非常数，但在每一口井里都是常数。
  - 跳过这一阶段不会让运行失败，但会让**结论**失败。
 
+### 这一步还能回答的问题（探索面）
+
+`data.quality` 只回答"能不能用"。下面这些问题它答不了，但它们同样属于"看见数据"，而且全是**终端分支**（不进模型）：
+
+| 问题 | 用什么 | 结果里必须一起报的东西 |
+| --- | --- | --- |
+| 这条序列是平稳的、还是有单位根 | `explore.stationarity`（ADF） | 统计量 + 三档**渐近**临界值；**没有 p 值**是刻意的，短序列临界值偏保守 |
+| 趋势和周期各占多少 | `explore.hp_filter` | **λ 的值**（它是选择不是事实；周期 24 的正弦在 λ=1600 处约 1/4 方差进趋势）+ `cycle_share` |
+| 记忆有多长、是不是白噪声 | `explore.acf` | `lag_1`、置信带、`white_noise`；多实例数据要给 `group_column` |
+| 有几个峰、峰间距多少 | `explore.peaks` | `prominence` 与 `distance`（量化台阶会造出假峰）；同样要给 `group_column` |
+| 这个通道像不像正态 | `explore.normality` | 结论只能写"没有足够证据拒绝正态"，并照抄 `caveat` |
+| 两段时间的分布差多少 | `explore.kl_divergence`（`reference`+`current` 两个输入） | KL 有方向（本平台定义 `KL(current‖reference)`），跨列比较用 JS |
+| 两条序列形状像不像／差多少 | `explore.sbd`（有界、可跨样本比较）、`explore.dtw`（允许时间轴伸缩、**没有天然阈值**） | SBD 要报 `best_lag` 并确认这个平移在物理上说得通 |
+| 两条序列是否同向变化 | `explore.slope_cosine` | 窗口内**增量向量**的余弦 + 各自滚动斜率 |
+| 单调关系是什么形状 | `explore.isotonic` | `blocks`（平台段数）与 `spearman`；**它的 R² 是样本内的，不能和线性/多项式比** |
+| 这些列能解释多少目标 | `explore.gbr_fit` | 默认只报样本内 R²（会警告）；要下结论请走 `validation.*` |
+
 ## 阶段 3 — 窗口、分组与标签（§4）
+
+**这个阶段的作用：** 决定"一行特征代表哪段时间"以及标签从哪儿来。它是唯一**无法事后补救**的决定：切分方式和标签一旦定错，后面所有分数都是在回答另一个问题。
 
 窗口生产者是 `feature.statistical`、`feature.fitting`、`feature.spectral`、`feature.entropy`。它们共享这些参数：
 
@@ -118,6 +163,8 @@
 
 ## 阶段 4 — 特征（§5）
 
+**这个阶段的作用：** 决定"从什么角度看这段信号"。同一个通道，换一个分支就是从另一个问题里取证据——水平与形状、趋势、旋转与共振、不规则性、短时动态、多尺度、离散档位。漏掉一个角度，模型就永远看不见那类证据；这也是唯一"多挂一个分支通常划算"的阶段。
+
 ### 哪类问题用哪个分支
 
 | 关于信号的问题 | 用哪个分支 |
@@ -128,8 +175,20 @@
 | 复杂度与不规则性 | `feature.entropy`（`approximate_entropy`、`information_entropy`） |
 | 不切窗的短时动态 | `feature.temporal`（差分、滚动自相关） |
 | 保持行对齐的滚动汇总 | `feature.rolling_statistics` |
+| 波动集中在哪个尺度、有几个细节峰 | `feature.wavelet`（Haar 多尺度能量占比 + 主尺度 + 细节峰个数；逐行对齐，行数不变） |
 | 离散属性（类别、模式、等级） | `feature.categorical` → `encoder` 端口 |
 | 特征已经算好在表里 | `feature.select` |
+
+### 枚举值在两轮里扩过（别按旧清单挑）
+
+| 组件 | 新增的枚举值 | 用途 |
+| --- | --- | --- |
+| `feature.statistical` | `count`、`argmax_first/last`、`argmin_first/last`（位置按 0..1 归一化）、`count_above/below_mean`、`longest_above/below_mean`、`mean_delta`、`mean_abs_delta`、`mean_second_derivative`、`duplicate_point_ratio`、`repeated_value_ratio`、`duplicate_sum`、`time_reversal_asymmetry`、`std_gt_range`、`variance_gt_std`、`max_repeated`、`min_repeated`（共 35 项） | 结构类证据：位置、计数、最长连续段、重复率、变化率；`repeated_value_ratio` / `duplicate_sum` 对"保持值/卡死"通道特别灵 |
+| `feature.rolling_statistics` | `variance`（与 `std` 同口径 ddof=0）、`max`、`min` | 逐行滚动上/下包络 |
+| `feature.temporal` | `sum_abs_change`（窗口内 \|Δ\| 之和）、`peak_count`（山峰数，配 `prominence`） | 走得多远、抖了几次 |
+| `feature.entropy` | `binned_entropy`（与 `information_entropy` 同一实现） | 对齐组件清单里的叫法 |
+
+四个"字面比较项"（`std_gt_range`、`variance_gt_std`、`max_repeated`、`min_repeated`）按清单字面实现为 0/1，**是否对模型有用需要单独评估**——不要因为存在就默认加进特征集。
 
 ### 被强制执行的规则
 
@@ -152,6 +211,36 @@
 特征分支可以直接检查：`visual.overview`（行数、列名、类型、缺失率）、`visual.histogram`（分布）、`visual.line`（看几路通道）、`explore.correlation`（冗余度）都同时接受 `FeatureDataset` 与原始 `Dataset`。往你真正建模的那条分支上挂一个，只花一个节点，就把"Agent 说特征没问题"变成故障工程师能直接看的东西；把它的数字写进汇报。
 
 ## 阶段 5 — 验证（§6）
+
+**这个阶段的作用：** 决定这个分数回答的是**哪一个问题**——见过的实例？没见过的资产？未来的时间？——并把它限制在能兑现的说法里。分数高低是次要的，"这个数字配不配得上结论"才是主要的。
+
+### 先按问题挑方法，再按参数调
+
+| 用户问的是 | 用什么 | 必须一起报的东西 |
+| --- | --- | --- |
+| 这台设备属于哪一类故障 | `validation.random_forest`（默认基线）、`validation.decision_tree`（要解释）、`validation.svm`、`validation.reservoir_classifier`（轻量非线性）、`validation.xgboost`（可选依赖） | `coverage`（留出的是实例还是资产）、混淆矩阵、每类召回 |
+| 找出最好的超参 | `validation.grid_search` | `best_score` 是**交叉验证**分、`best_params`、候选数；它**没有**留出分数，别当泛化能力 |
+| 某个连续量是多少 | `validation.linear_regression`、`validation.ridge`（特征相关时的稳定版）；只想看"这些列能解释多少"则用探索分支的 `explore.gbr_fit` | R²/MAE/RMSE + 切分方式；ridge 的 `alpha` |
+| 未来会怎么走 | `validation.arma`（单序列自回归）、`validation.exponential_smoothing`（Holt / Holt–Winters）、`validation.arima`（需要可选依赖） | 平滑系数 / 阶数（它们是**输入**）、AIC/BIC 只用于初筛 |
+| 没有标签，哪些行不正常 | `validation.knn_detector`、`validation.isolation_forest_detector`、`validation.pca_detector`、`validation.dbscan_detector`、`validation.min_cluster_detector`、`validation.one_class_svm`、`validation.persistence_detector`（规则型） | **阈值是怎么来的**：`contamination` 是假设、`eps` 是密度定义、`nu` 是上界；三者不可混着讲 |
+| 数据分成几类工况 | `validation.kmeans`（`n_clusters=0` 自动选） | `silhouette`；低说明簇结构本来就勉强，**它不给异常判决** |
+| 换个配置结论还成立吗 | `validation.compare`（最多三个，要求同一批测试行） | 三个模型必须在特征、标签、切分、`test_size`、`random_state` 上完全一致 |
+
+### 结构变化检测（批次 3 的七个检测器）
+
+它们回答的不是"这条记录异常吗"，而是"**结构从哪一刻开始不一样了**"。七个都输出"逐行分数 + 布尔标记"，但**分数口径不同，不能互相比较**，报分数时必须写明方法名与阈值：
+
+| 组件 | 判定量 | 阈值 | 读结果时要看什么 |
+| --- | --- | --- | --- |
+| `validation.level_shift_detector` | 候选点前后各 `window` 点的均值差的 Welch t | `threshold`（t 量纲） | 报警只应集中在真正的阶跃附近；窗口不足处 `anomaly_score` 是 NaN |
+| `validation.volatility_shift_detector` | 方差之比的对数，按原假设抽样标准差归一化 | 同量纲的 `threshold` | 标准差放大 4 倍 = 方差放大 16 倍 → z≈8.5；两段同分布时误报回到 4σ 水平 |
+| `validation.seasonal_detector` | 偏离参考段季节剖面的稳健 z | `threshold` | `seasonal_strength` 只在参考段上算（回答"有多季节"，不回答"后来变没变"） |
+| `validation.autoregression_detector` | 参考段之外的一步预测残差 z | `threshold` | 训练段分数一律为空；`scored_count` 说明评了多少行 |
+| `validation.esd_detector` | Rosner 广义 ESD 的 R 统计量 | `alpha` + t 分布 λ | `R`/`lambda` 对照表 + `outliers` 位置；取最后一个 R > λ 的步数 |
+| `validation.nsigma_detector` | 偏离中心多少倍尺度 | `sigma` | `mode=global/group/rolling` 的结论本来就会不同，中心/尺度都写在 metrics 里 |
+| `validation.mean_drift_detector` | Page 的 CUSUM 累积量 | `slack` + `decision` | 警报是**锁存**的：看 `first_alarm_index`，不是报警了多少行 |
+
+**多实例数据一定要给 `group_column`**：不给的话"设备 A 的尾部 + 设备 B 的头部"会被判成一次阶跃。这一条有回归测试守着（七个检测器在组边界上必须 0 报警）。
 
 `split_method` 出现在 `validation.random_forest`、`validation.svm`、`validation.decision_tree`、`validation.reservoir_classifier` 上（默认 `stratified`，支持 `asset`）。回归是例外：`validation.linear_regression` 只有 `random`（默认）、`group`、`temporal`，没有资产留出——如实说明这个限制，而不是假装有。
 
@@ -189,12 +278,17 @@
 | `balanced_accuracy` | 按类别规模校正过的准确率——故障稀少时优先看它 |
 | `roc_auc`、`average_precision` | 排序质量；稀有故障看 PR-AUC |
 | `per_class_recall`、`train_class_counts`、`test_class_counts` | 哪个类被悄悄漏掉了（是原始标签，不是编码后的） |
+| `train_class_rates`、`test_class_rates` | 训练/测试**各自**的正负样本占比——`test_count=228` 不等于"228 行里有一半是故障" |
 | `confusion_matrix` | 错在哪里 |
 | `positive_class`、`miss_rate` | 故障类的漏报率；标签顺序不明确时显式指定 `positive_class` |
 | `coverage` | `train_instances`/`test_instances`/`test_instances_unseen` 及对应的资产口径 |
 | `warnings` | 泄漏、AUC 不可用、平窗口、缓存驱逐 |
 
 永远把 `coverage` 和分数一起报："3 个测试井全是训练时没见过的"这句话才让那个数字有意义。
+
+**先报占比，再报分数。** 训练/测试的类别占比是判断其它数字能不能读的前提：测试集里一个正类都没有时，
+`accuracy=1.0` 只说明"模型全判正常"。这种情况平台会自己写一条 `warnings`（`Holdout split has no 1 rows`、
+`The test set contains no positive (1) rows`），把那条警告**原样带进汇报**，不要只抄 accuracy。
 
 `validation.compare` 比较最多三份指标载荷，前提是**留出行完全相同**，测试索引不一致会直接拒绝；所以只有特征、标签、切分方式、`test_size`、`random_state` 都一致的运行才能互相比较。
 
@@ -207,6 +301,8 @@
  - [ ] 警告都和它的数字一起报出来了
 
 ## 阶段 6 — 执行与排错（§7）
+
+**这个阶段的作用：** 区分"我配错了"和"数据/组件拒绝了这次输入"，并且只重算需要重算的部分。失败信息是用来定位下一步的，不是用来重跑整张图的。
 
 ### 状态词表
 
@@ -235,6 +331,8 @@
 
 ## 阶段 7 — 读取结果（§8）
 
+**这个阶段的作用：** 分清哪些数字能进汇报（留出指标 + `coverage`）、哪些只能当描述（阈值、样本内分数、探索性警告）。用户最终听到的是不是真的，由这一步决定。
+
 各 `kind` 的载荷形状：
 
 | `kind` | 内容 |
@@ -250,6 +348,8 @@
 指标从验证器的 `metrics` 端口读，并保持 `include_indices=false`。载荷里已经有混淆矩阵、每类召回与类别计数，所以描述一个结果根本不需要 `train_indices`/`test_indices`；把它们拉出来曾经把 8000 个行号灌进上下文。只有"行本身就是交付物"时才展开索引。
 
 ## 阶段 8 — 持久化与交接（§9）
+
+**这个阶段的作用：** 让这次运行能被**别人**复核：数据从哪来、图长什么样、当时用的是哪一版参数。没有这一步，结论只能被相信，不能被检查。
 
  - `save_pipeline(pipeline_id, filename="...xml")` 把图写到 `storage_root` 下（只写 XML，路径被限制在存储目录内）。`get_pipeline_xml` 直接返回同一份文档；`load_pipeline(xml)` 导入为新方案（id 冲突时生成新 id）；`replace_pipeline(graph, expected_version=...)` 是带乐观并发的覆盖，版本过期会被拒绝（`Graph changed in another client; reload before editing`）。
  - `save_checkpoint` / `load_checkpoint` / `list_checkpoints` 快照图**与**工作区（在内存里，随进程消失）。恢复一个产物已被释放的检查点会给出警告并重算受影响节点。

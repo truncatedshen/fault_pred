@@ -20,7 +20,7 @@ def execute(registry, context, component_type, inputs, **parameters):
 
 
 def test_registry_exposes_complete_component_inventory(registry):
-    assert len(registry.list(limit=100)) == 56
+    assert len(registry.list(limit=100)) == 88
     expected = {
         "data.asset_key",
         "feature.imputation",
@@ -55,7 +55,10 @@ def test_registry_exposes_complete_component_inventory(registry):
     assert {item["component_type"] for item in registry.search("互协方差")} == {"explore.cross_relation"}
     assert {item["component_type"] for item in registry.search("可预测性")} == {
         "validation.linear_regression",
+        "validation.ridge",
         "validation.arma",
+        "validation.exponential_smoothing",
+        "validation.arima",
     }
 
 

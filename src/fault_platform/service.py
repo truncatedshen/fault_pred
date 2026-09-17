@@ -32,6 +32,7 @@ from pydantic import ValidationError, validate_call
 from fault_platform.events import EventBus, Subscription
 from fault_platform.examples import create_dataset, example_graph
 from fault_platform.graph import ComponentGraph, Connection
+from fault_platform.python_export import render_python, slugify
 from fault_platform.registry import ComponentRegistry, default_registry
 from fault_platform.runtime import ExecutionContext, ExecutionEngine
 from fault_platform.version import PLATFORM_VERSION
@@ -73,6 +74,7 @@ CONTROL_OPERATIONS = (
     "get_node_result",
     "get_pipeline_result",
     "get_pipeline_xml",
+    "export_python",
     "save_checkpoint",
     "load_checkpoint",
     "list_checkpoints",
@@ -699,6 +701,7 @@ class PipelineService:
         incremental: bool = True,
         mode: str = "all",
         node_id: str | None = None,
+        dataset_overrides: dict[str, str | list[str]] | None = None,
     ) -> dict[str, Any]:
         """启动一次异步执行，立即返回 ``RUNNING`` 与 ``workspace_id``。
 
@@ -708,15 +711,53 @@ class PipelineService:
         * 提交给线程池的是图的**克隆**，因此运行期间前端/Agent 的编辑不会影响这次执行；
         * ``mode``：``all`` 全图、``node`` 单节点、``from`` 该节点及其全部下游；
         * 引擎的事件回调接进事件总线，网页因此能看到实时节点状态与耗时。
+
+        ``dataset_overrides`` 是"同一张图，换数据跑"的入口：``{"<data.input 节点 id>": "<data_root
+        内的相对路径>"}``。它是**执行参数而不是编辑**——图不变（不失效已有结果、不用重新导出），
+        但外部文件指纹会跟着变，所以增量复用不会把上一份数据的结果当成本次结果。没被这次
+        ``mode`` 覆盖到的节点会忽略它（覆盖不是命令）。键写错、指向非 ``data.input`` 节点、
+        或路径越界/不存在，都会在执行前报错并点名。
         """
         graph = self._graph(pipeline_id, editable=True)
         if mode not in {"all", "node", "from"}:
             raise ValueError("Invalid execution mode")
         if mode != "all":
             graph.get_node(node_id or "")
+        overrides: dict[str, Any] = {}
+        for override_node, override_value in dict(dataset_overrides or {}).items():
+            node = graph.get_node(override_node)
+            if node.component.component_type != "data.input":
+                raise ValueError(
+                    f"dataset_overrides targets {override_node}, which is a "
+                    f"{node.component.component_type} node; only data.input nodes can be overridden"
+                )
+            # 字符串 = 只读这一个文件；列表 = 只读这几个文件（顺序即拼接顺序）。整组替换，不混合。
+            if isinstance(override_value, str):
+                paths = [override_value]
+            elif isinstance(override_value, (list, tuple)):
+                paths = [str(item) for item in override_value]
+            else:
+                raise ValueError(
+                    f"dataset_overrides[{override_node}] must be a path or a list of paths, "
+                    f"got {type(override_value).__name__}"
+                )
+            if not paths or any(not item.strip() for item in paths):
+                raise ValueError(f"dataset_overrides[{override_node}] must name at least one non-empty path")
+            overrides[override_node] = override_value if isinstance(override_value, str) else paths
         errors = self.validate_pipeline(pipeline_id)["errors"]
         if errors:
             raise ValueError("; ".join(errors))
+        if overrides:
+            # 覆盖路径也在这里先判一次：与组件用的是同一套解析规则（必须在 data_root 内、
+            # 存在、后缀受支持），但失败发生在**提交之前**，不占用线程池、也不产生半截工作区。
+            probe = ExecutionContext(FaultWorkspace(pipeline_id), self.data_root)
+            for override_node, override_value in overrides.items():
+                paths = [override_value] if isinstance(override_value, str) else override_value
+                for value in paths:
+                    try:
+                        probe.resolve_data_path(value)
+                    except ValueError as exc:
+                        raise ValueError(f"dataset_overrides[{override_node}] is invalid: {exc}") from exc
         key = workspace_id or self.latest.get(pipeline_id)
         ws = self._workspace(pipeline_id, key) if key else self.workspaces.create_workspace(pipeline_id)
         self.latest[pipeline_id] = ws.workspace_id
@@ -738,13 +779,19 @@ class PipelineService:
                 ws,
                 self.data_root,
                 event,
+                dataset_overrides=overrides,
                 on_event=lambda event_type, data: self.bus.publish(pipeline_id, event_type, **data),
             ),
             mode,
             node_id,
             incremental,
         )
-        return {"pipeline_id": pipeline_id, "workspace_id": ws.workspace_id, "status": "RUNNING"}
+        return {
+            "pipeline_id": pipeline_id,
+            "workspace_id": ws.workspace_id,
+            "status": "RUNNING",
+            "dataset_overrides": overrides,
+        }
 
     def execute_node(self, pipeline_id: str, node_id: str, workspace_id: str | None = None) -> dict[str, Any]:
         """只执行一个节点（强制重算，不走增量复用）。"""
@@ -846,11 +893,15 @@ class PipelineService:
                 "outputs": {},
                 "warnings": ["Graph changed; run to refresh results."],
             }
+        with ws.lock:
+            node_warnings = list(ws.node_warnings.get(node_id, []))
         return {
             "pipeline_id": pipeline_id,
             "workspace_id": ws.workspace_id,
             **ws.get_node_result(node_id, limit, include_indices),
-            "warnings": self._workspace_warnings(pipeline_id, workspace_id),
+            # 两类警告都要给：节点自己的（组件这次执行返回的，例如"这次读的是覆盖数据源"），
+            # 以及方案级提示（例如"你读的不是最新工作区"）。只给后者会让节点级警告白收集。
+            "warnings": [*node_warnings, *self._workspace_warnings(pipeline_id, workspace_id)],
         }
 
     def get_pipeline_result(
@@ -884,6 +935,53 @@ class PipelineService:
     def get_pipeline_xml(self, pipeline_id: str) -> dict[str, Any]:
         """直接把图导出成 XML 文本（不落盘），便于外部系统取用。"""
         return {"pipeline_id": pipeline_id, "xml": XMLSerializer().dumps(self._graph(pipeline_id))}
+
+    def export_python(
+        self, pipeline_id: str, filename: str | None = None, include_code: bool = False
+    ) -> dict[str, Any]:
+        """把当前方案导出成一个**可直接运行**的 Python 脚本（封装好的图 API）。
+
+        与 ``save_pipeline`` 的分工：XML 是给平台自己再导入用的；Python 脚本是给人改、
+        给版本管理、给别的环境跑的——它用 ``fault_platform`` 的 Python API 在本地重建同一张图，
+        **不连服务**（换机器只要带走脚本 + 数据目录即可）。
+
+        路径规则与 ``save_pipeline`` 完全一致（限制在 ``storage_root`` 内、后缀 ``.py``、
+        先写临时文件再原子替换）。导出时会把当前图的结构校验问题一并返回：未完成的图也能导出，
+        但 ``validation_problems`` 会告诉你它缺什么，跑之前就能看见。
+        """
+        graph = self._graph(pipeline_id)
+        if not graph.nodes:
+            raise ValueError("Pipeline is empty; nothing to export")
+        chosen = filename or f"{slugify(graph.name, pipeline_id)}.py"
+        destination = (self.storage_root / chosen).resolve()
+        if not destination.is_relative_to(self.storage_root) or destination.suffix.lower() != ".py":
+            raise ValueError("Export path must be a Python file within the pipeline storage directory")
+        source = render_python(graph, data_root=self.data_root, storage_hint=str(destination))
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        # 与 XML 保存同一套写法：崩溃时最多留一个临时文件，不会写出半个脚本。
+        temporary = destination.with_suffix(".tmp")
+        temporary.write_text(source, encoding="utf-8")
+        temporary.replace(destination)
+        payload: dict[str, Any] = {
+            "pipeline_id": pipeline_id,
+            "path": str(destination),
+            "filename": destination.name,
+            "node_count": len(graph.nodes),
+            "edge_count": len(graph.edges),
+            "lines": source.count("\n") + 1,
+            "characters": len(source),
+            "graph_version": graph.version,
+            # 用 require_complete=True：这里要回答的是"这个脚本能不能跑起来"，
+            # 所以缺参数、必填输入没连线都算问题（编辑态检查会漏掉这两类）。
+            "validation_problems": graph.validate_graph(require_complete=True),
+            "hint": (
+                "Run it with the platform installed: python <file> --data-root <dir>; "
+                "add --no-execute to only rebuild and validate the graph."
+            ),
+        }
+        if include_code:
+            payload["code"] = source
+        return payload
 
     def get_history(
         self, pipeline_id: str, workspace_id: str | None = None, limit: int = 100

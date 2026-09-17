@@ -97,6 +97,22 @@ def test_compatibility_requirements_are_checked():
     assert "future" in message and "fault-platform>=9.0" in message and PLATFORM_VERSION in message
 
 
+def test_every_component_can_be_found_by_its_own_display_name() -> None:
+    """组件做出来但检索不到，对 Agent 等于不存在。
+
+    这是比"某个具体意图能不能命中"更基础的不变量：展示名是我们自己写的元数据，如果连它都
+    检不到自己，说明 `tags`/`search_keywords` 与展示名脱节了。上一轮就出现过一次同类问题
+    （能力做出来了、但中文关键词里没有对应说法，检索返回 0 条），所以这条要由测试盯着。
+    """
+    registry = default_registry()
+    misses: list[str] = []
+    for item in registry.list(limit=500):
+        hits = {hit["component_type"] for hit in registry.retrieve(intent=item["display_name"], limit=3)}
+        if item["component_type"] not in hits:
+            misses.append(item["component_type"])
+    assert not misses, f"components that cannot be found by their own display name: {misses}"
+
+
 def test_prediction_capability_is_discoverable() -> None:
     """新能力必须能被 Agent 的检索入口找到，否则等于不存在。
 

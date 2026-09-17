@@ -43,7 +43,7 @@ before(async () => {
   window.eval(fs.readFileSync("src/fault_platform/web/app.js", "utf8") +
     "\nwindow.testApp={state,api,init,openGraph,addNode,commit,activeNode,applyParameters,portClick,copySelection,removeSelection,undo,showResult,orthogonalRoute,edgePathD,claimLane,runPipeline,fitCanvas,autoLayout,renderInspector,renderCatalog,toggleGroup,toggleAllGroups,setPanelSize,panelCeiling,persistLayout,updateSplitterPositions,resetLayout,DEFAULT_LAYOUT,PANEL_LIMITS};");
   app = window.testApp;
-  await until(() => app.state.graph && window.document.querySelectorAll(".component-item").length === 56,
+  await until(() => app.state.graph && window.document.querySelectorAll(".component-item").length === 88,
     "UI failed to initialize");
 }, {timeout:15000});
 after(() => {
@@ -52,7 +52,7 @@ after(() => {
 });
 
 test("registry renders catalog and typed parameter forms", async () => {
-  assert.equal(window.document.querySelector("#catalog-count").textContent, "56");
+  assert.equal(window.document.querySelector("#catalog-count").textContent, "88");
   await app.addNode("data.input", {x:20,y:20}, {path:"anything.csv"});
   assert.equal(app.activeNode().type, "data.input");
   assert.equal(window.document.querySelector("#parameter-0").value, "anything.csv");
@@ -94,10 +94,26 @@ test("example executes and renders actual model metrics and charts", async () =>
   await until(() => !app.state.running, "UI did not observe run completion");
   assert.equal(window.document.querySelector("#pipeline-status").textContent, "SUCCESS");
   app.state.selected = new Set(["forest"]); await app.showResult();
-  assert.equal(window.document.querySelectorAll(".metric-card").length, 5);
-  assert.match(window.document.querySelector("#result-content").textContent, /Accuracy/);
+  // 卡片数量随"该报哪些指标"演进：这里只钉住面板确实画了卡片，具体清单由断言内容决定。
+  assert.ok(window.document.querySelectorAll(".metric-card").length >= 5);
+  const metricsText = window.document.querySelector("#result-content").textContent;
+  assert.match(metricsText, /Accuracy/);
+  assert.match(metricsText, /Balanced acc\./);
+  assert.match(metricsText, /漏报率/);
+  // 正负样本构成是"能不能读这个分数"的前提，必须出现在结果面板里。
+  assert.match(metricsText, /正负样本构成/);
+  assert.match(metricsText, /训练集/);
+  assert.match(metricsText, /测试集/);
+  assert.match(metricsText, /占比/);
   app.state.selected = new Set(["line"]); await app.showResult();
   assert.ok(window.document.querySelector("svg.chart"));
+  // 数据概览也要报正负样本比例（示例图的 overview 配了 label_column）。
+  app.state.selected = new Set(["overview"]); await app.showResult();
+  const overviewText = window.document.querySelector("#result-content").textContent;
+  assert.match(overviewText, /标签构成/);
+  assert.match(overviewText, /占比/);
+  // 示例数据是三分类：没有唯一"正类"，三类的占比都要画出来（各 33.33%）。
+  assert.match(overviewText, /33\.33%/);
   app.state.tab = "history"; await app.showResult();
   assert.match(window.document.querySelector("#result-content").textContent, /SUCCESS/);
   app.state.tab = "xml"; await app.showResult();
@@ -116,8 +132,8 @@ test("component library folds into a directory and stays searchable", async () =
   const document = window.document;
   const library = document.querySelector("#component-library");
   const collapsedCount = () => library.querySelectorAll(".group-body.collapsed").length;
-  // 56 个组件超过自动折叠阈值：默认给目录，但组件节点仍全部留在 DOM 中（拖拽与计数依赖它们）。
-  assert.equal(library.querySelectorAll(".component-item").length, 56);
+  // 88 个组件超过自动折叠阈值：默认给目录，但组件节点仍全部留在 DOM 中（拖拽与计数依赖它们）。
+  assert.equal(library.querySelectorAll(".component-item").length, 88);
   assert.ok(collapsedCount() > 0, "a large catalog should start with collapsed subgroups");
 
   const selector = '.subcategory-title[data-group="sub:feature/频域 Frequency"]';

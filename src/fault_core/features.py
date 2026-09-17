@@ -55,6 +55,27 @@ STATISTICS = (
     "mad",
     "peak",
     "crest_factor",
+    # ── 结构类窗口特征（对应《完整组件》清单里的"位置/计数/重复/变化"那一批）──
+    "count",
+    "argmax_first",
+    "argmax_last",
+    "argmin_first",
+    "argmin_last",
+    "count_above_mean",
+    "count_below_mean",
+    "longest_above_mean",
+    "longest_below_mean",
+    "mean_delta",
+    "mean_abs_delta",
+    "mean_second_derivative",
+    "duplicate_point_ratio",
+    "repeated_value_ratio",
+    "duplicate_sum",
+    "time_reversal_asymmetry",
+    "std_gt_range",
+    "variance_gt_std",
+    "max_repeated",
+    "min_repeated",
 )
 
 SPECTRAL = (
@@ -334,6 +355,23 @@ def windows_in_frame(
         yield start, chunk, chunk.index.tolist()
 
 
+def _longest_run(mask: np.ndarray) -> int:
+    """最长连续 True 的长度（"大于均值的最长时段"这类特征用）。"""
+    best = current = 0
+    for flag in mask:
+        current = current + 1 if flag else 0
+        best = max(best, current)
+    return best
+
+
+def _half_delta(x: np.ndarray) -> float:
+    """窗口后半段均值减前半段均值；样本少于两个时返回 0（不产生 NaN 特征）。"""
+    if len(x) < 2:
+        return 0.0
+    middle = len(x) // 2
+    return float(np.mean(x[middle:]) - np.mean(x[:middle]))
+
+
 def _stat(x: np.ndarray, name: str, quantile: float) -> float:
     """计算单个统计量；``quantile`` 只在 ``name="quantile"`` 时使用。
 
@@ -357,6 +395,38 @@ def _stat(x: np.ndarray, name: str, quantile: float) -> float:
         "mad": lambda: np.median(np.abs(x - np.median(x))),
         "peak": lambda: np.max(np.abs(x)),
         "crest_factor": lambda: np.max(np.abs(x)) / rms if rms else 0.0,
+        # ── 结构类特征：位置、计数、重复、变化 ──
+        "count": lambda: len(x),
+        # 位置按 0..1 归一化，跨窗口长度可比；首/末分别指该极值第一次与最后一次出现。
+        "argmax_first": lambda: float(np.argmax(x)) / max(len(x) - 1, 1),
+        "argmax_last": lambda: float(len(x) - 1 - np.argmax(x[::-1])) / max(len(x) - 1, 1),
+        "argmin_first": lambda: float(np.argmin(x)) / max(len(x) - 1, 1),
+        "argmin_last": lambda: float(len(x) - 1 - np.argmin(x[::-1])) / max(len(x) - 1, 1),
+        "count_above_mean": lambda: float(np.sum(x > np.mean(x))),
+        "count_below_mean": lambda: float(np.sum(x < np.mean(x))),
+        "longest_above_mean": lambda: float(_longest_run(x > np.mean(x))),
+        "longest_below_mean": lambda: float(_longest_run(x < np.mean(x))),
+        "mean_delta": lambda: _half_delta(x),
+        "mean_abs_delta": lambda: abs(_half_delta(x)),
+        "mean_second_derivative": lambda: float(np.mean(np.diff(x, n=2))) if len(x) > 2 else 0.0,
+        "duplicate_point_ratio": lambda: float(1.0 - len(np.unique(x)) / len(x)),
+        "repeated_value_ratio": lambda: float(
+            sum(int(count) for count in pd.Series(x).value_counts() if count > 1) / len(x)
+        ),
+        "duplicate_sum": lambda: float(
+            sum(
+                float(value) * (int(count) - 1)
+                for value, count in pd.Series(x).value_counts().items()
+                if count > 1
+            )
+        ),
+        # 时间反转不对称：对 (x[t+2] - x[t])² 取均值，正/负向变化在这一统计量上不对称。
+        "time_reversal_asymmetry": lambda: float(np.mean((x[2:] - x[:-2]) ** 2)) if len(x) > 2 else 0.0,
+        # 以下四个是清单里的"比较型"特征，按字面实现；它们是否对模型有用需要单独评估。
+        "std_gt_range": lambda: float(np.std(x) > np.ptp(x)),
+        "variance_gt_std": lambda: float(np.var(x) > np.std(x)),
+        "max_repeated": lambda: float(np.sum(x == np.max(x)) > 1),
+        "min_repeated": lambda: float(np.sum(x == np.min(x)) > 1),
     }
     return float(funcs[name]())
 

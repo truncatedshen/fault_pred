@@ -10,9 +10,12 @@
 
 from __future__ import annotations
 
+import hashlib
+
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import GroupShuffleSplit, train_test_split
+from sklearn.preprocessing import KBinsDiscretizer, PolynomialFeatures
 
 from fault_core.data import numeric_columns
 from fault_core.preprocessing import mark_fitted
@@ -39,6 +42,8 @@ def impute(
 
     ``mean``：按 ``group_column`` 分组求均值填充（同一台设备的均值），组内仍缺则回退到整列
     均值；这是"全表拟合"操作，因此打上探索性警告。
+    ``max``/``min``：同样的回退顺序，但用组内（再退到整列）极值填充——适合"越限即异常"的
+    通道：宁可用边界值兜底，也不要用均值把缺口抹平；同样属于拟合操作，会被标记。
     ``interpolate``：按行序在组内做线性/最近邻插值（``limit_direction="both"`` 允许向两端
     外推边界缺失）；插值只依赖邻点，不引入全表统计量，因此不标记。
     整列都是缺失值时无法填充，直接报错让使用者自己决定删列。
@@ -47,16 +52,17 @@ def impute(
     result = data.copy()
     if group_column and group_column not in data.columns:
         raise ValueError(f"Missing group column: {group_column}")
-    if method == "mean":
+    if method in {"mean", "max", "min"}:
+        fallback = data[cols].mean() if method == "mean" else getattr(data[cols], method)()
         if group_column:
             # transform 保持原索引与行数，可以直接参与 fillna。
-            values = data.groupby(group_column, sort=False, dropna=False)[cols].transform("mean")
-            result[cols] = data[cols].fillna(values).fillna(data[cols].mean())
+            values = data.groupby(group_column, sort=False, dropna=False)[cols].transform(method)
+            result[cols] = data[cols].fillna(values).fillna(fallback)
         else:
-            result[cols] = data[cols].fillna(data[cols].mean())
+            result[cols] = data[cols].fillna(fallback)
         if result[cols].isna().any().any():
-            raise ValueError("Mean imputation cannot fill a column containing only missing values")
-        return mark_fitted(_with_attrs(data, result), "mean imputation")
+            raise ValueError(f"{method.capitalize()} imputation cannot fill an all-missing column")
+        return mark_fitted(_with_attrs(data, result), f"{method} imputation")
     if method != "interpolate":
         raise ValueError(f"Unknown imputation method: {method}")
     if interpolation_method not in {"linear", "nearest"}:
@@ -267,3 +273,205 @@ def binarize(
             raise ValueError(f"Binarized column already exists: {name}")
         result[name] = (data[column] > threshold).astype("int8")
     return _with_attrs(data, result)
+
+
+def _polynomial_names(columns: list[str], transformer: PolynomialFeatures) -> list[str]:
+    """把 sklearn 的 ``powers_`` 矩阵翻译成可读列名，例如 ``vibration*temperature``。"""
+    names = []
+    for powers in transformer.powers_:
+        parts = [
+            column if power == 1 else f"{column}^{power}" for column, power in zip(columns, powers) if power
+        ]
+        names.append("*".join(parts) if parts else "bias")
+    return names
+
+
+def concat_by_rows(frames: list[tuple[str, pd.DataFrame]], source_column: str = "") -> pd.DataFrame:
+    """把多份同构表按顺序纵向拼成一份（多数据源在**图里**合并的实现）。
+
+    ``frames`` 是 ``[(输入端口名, 表), ...]``，顺序即拼接顺序，**第一个是列顺序与 schema 的基准**。
+    与 ``data.input.paths`` 的规则刻意保持一致，因为它们是同一件事的两种入口（一个是节点参数，
+    一个是画布上连几条线）：列集合必须相同（缺列/多列直接报错并点名），列顺序按基准对齐，
+    索引重排成 ``0..N-1``。
+
+    几个刻意不做的事：
+
+    * **不按列名求并集、不补 NaN**。静默补列会让"两条分支结构不同"一路漂到模型里，
+      而报告上看不出任何异常；
+    * **不丢空输入**。空表往往是"过滤条件什么都没匹配到"，静默拼进去等于把这个问题藏起来；
+    * **单输入时原样返回**（连索引都不动），这样"先接一条、以后再扩"不会改变已有结果。
+
+    ``source_column`` 写的是**输入端口名**（``first``/``second``/…）：concat 坐在数据源之上，
+    端口名是唯一一个在"单文件、多文件、覆盖、串联"四种情况下都成立的说法；想知道具体文件，
+    看上游 ``data.input`` 的 ``source_column``（它写的是文件路径）。
+    """
+    if not frames:
+        raise ValueError("Concat needs at least one input")
+    reference = frames[0][1].columns.tolist()
+    prepared: list[pd.DataFrame] = []
+    for port, frame in frames:
+        if frame.empty:
+            raise ValueError(f"Input {port} has no rows; check the upstream filter before concatenating")
+        if not frame.columns.is_unique:
+            raise ValueError(f"Input {port} has duplicate column names")
+        missing = [name for name in reference if name not in frame.columns]
+        extra = [name for name in frame.columns if name not in reference]
+        if missing or extra:
+            raise ValueError(
+                f"Input {port} has a different schema than {frames[0][0]} "
+                f"(missing {missing}, extra {extra}); concat needs the same columns"
+            )
+        prepared.append(frame.loc[:, reference])
+    if source_column:
+        if source_column in reference:
+            raise ValueError(f"source_column {source_column!r} already exists in the data")
+        prepared = [frame.assign(**{source_column: port}) for (port, _), frame in zip(frames, prepared)]
+        reference = [source_column, *reference]
+    if len(prepared) == 1:
+        result = prepared[0]
+    else:
+        result = pd.concat([frame.loc[:, reference] for frame in prepared], ignore_index=True)
+    # attrs 手工合并：来源路径取并集（保序）、source_id 覆盖全部输入、警告逐条去重。
+    source_paths: list[str] = []
+    source_ids: list[str] = []
+    evaluation: list[str] = []
+    for _, frame in frames:
+        paths = frame.attrs.get("source_paths")
+        if paths is None:
+            paths = [frame.attrs["source_path"]] if frame.attrs.get("source_path") else []
+        for path in paths:
+            if str(path) not in source_paths:
+                source_paths.append(str(path))
+        if frame.attrs.get("source_id"):
+            source_ids.append(str(frame.attrs["source_id"]))
+        for note in frame.attrs.get("evaluation_warnings", []):
+            if note not in evaluation:
+                evaluation.append(note)
+    result.attrs = {
+        **frames[0][1].attrs,
+        "source_paths": source_paths or None,
+        "source_path": " + ".join(source_paths) if source_paths else None,
+        "source_id": (hashlib.sha256("\n".join(source_ids).encode()).hexdigest() if source_ids else None),
+        "concatenated_inputs": [port for port, _ in frames],
+    }
+    if len(frames) > 1:
+        evaluation = [
+            *evaluation,
+            "Concatenated "
+            + f"{len(frames)} inputs ({len(result)} rows, index renumbered): "
+            + ", ".join(port for port, _ in frames),
+        ]
+    result.attrs["evaluation_warnings"] = evaluation
+    return result
+
+
+def polynomial_features(
+    data: pd.DataFrame,
+    columns: list[str],
+    degree: int = 2,
+    interaction_only: bool = False,
+    include_bias: bool = False,
+    keep_original: bool = True,
+    max_columns: int = 512,
+) -> pd.DataFrame:
+    """在选定数值列上生成多项式项与交互项，例如 ``vibration^2``、``vibration*temperature``。
+
+    **必须在窗口切分之前使用**：它改变表的列结构，而窗口组件按列名取数并把窗口内的列
+    压成统计量；放到窗口之后的结果是"在特征上再做二次项"，与这里的目的完全不同。
+
+    生成项数量随列数与阶数组合增长（``C(n + d, d)``），因此设了 ``max_columns`` 上限，
+    超出直接报错而不是把内存吃光。``keep_original=True`` 时保留原列，只追加真正的
+    新项（一次项就是原列本身，不重复生成）；``include_bias`` 默认关闭，因为常数列在
+    窗口特征里没有意义，而且会让线性模型出现多余自由度。
+    """
+    cols = numeric_columns(data, columns)
+    if not cols:
+        raise ValueError("Polynomial features need at least one numeric column")
+    if isinstance(degree, bool) or not isinstance(degree, int) or degree < 2:
+        raise ValueError("Polynomial degree must be an integer >= 2")
+    values = data[cols].astype(float)
+    if not np.isfinite(values.to_numpy()).all():
+        raise ValueError("Polynomial features require finite values; clean missing/infinite first")
+    transformer = PolynomialFeatures(
+        degree=degree, interaction_only=interaction_only, include_bias=include_bias
+    )
+    generated = transformer.fit_transform(values)
+    names = _polynomial_names(cols, transformer)
+    if len(names) > max_columns:
+        raise ValueError(
+            f"Polynomial features would create {len(names)} columns (limit {max_columns}); "
+            "lower the degree or select fewer columns"
+        )
+    result = data.copy() if keep_original else data.drop(columns=cols).copy()
+    for name, column_values in zip(names, generated.T):
+        # 一次项就是原列本身，keep_original 时跳过，避免"同名列覆盖"这类静默行为。
+        if name in cols and keep_original:
+            continue
+        if name in result.columns:
+            raise ValueError(f"Polynomial column already exists: {name}")
+        result[name] = column_values
+    result.attrs = {
+        **data.attrs,
+        "polynomial_degree": degree,
+        "polynomial_columns": cols,
+    }
+    return result
+
+
+def discretize(
+    data: pd.DataFrame,
+    columns: list[str],
+    n_bins: int = 5,
+    strategy: str = "quantile",
+    encode: str = "ordinal",
+    keep_original: bool = True,
+    suffix: str = "_bin",
+    random_state: int = 42,
+) -> pd.DataFrame:
+    """把连续列切成 ``n_bins`` 个箱，输出箱序号或独热指示。
+
+    ``strategy`` 三选一：``uniform`` 等宽（受极值影响大）、``quantile`` 等频（每箱样本数
+    相近，工业数据里最常用）、``kmeans`` 一维聚类（箱边界落在数据密度低谷）。
+
+    **箱边界是在整张表上拟合的**，所以结果带探索性警告：同一份映射用在训练集与线上
+    会有分布漂移问题。输出列名前缀/后缀固定（``<列名>_bin`` 或 ``<列名>_bin_<序号>``），
+    便于下游按名接线。``keep_original=True`` 时保留原列。
+    """
+    cols = numeric_columns(data, columns)
+    if not cols:
+        raise ValueError("Discretization needs at least one numeric column")
+    if isinstance(n_bins, bool) or not isinstance(n_bins, int) or n_bins < 2:
+        raise ValueError("n_bins must be an integer >= 2")
+    if strategy not in {"uniform", "quantile", "kmeans"}:
+        raise ValueError(f"Unknown discretization strategy: {strategy}")
+    if encode not in {"ordinal", "onehot-dense"}:
+        raise ValueError(f"Unknown discretization encoding: {encode}")
+    values = data[cols].astype(float)
+    if not np.isfinite(values.to_numpy()).all():
+        raise ValueError("Discretization requires finite values; clean missing/infinite first")
+    # subsample=None：默认会随机抽样定箱边界，同一份数据两次运行结果可能不同。
+    transformer = KBinsDiscretizer(
+        n_bins=n_bins,
+        encode=encode,
+        strategy=strategy,
+        subsample=None,
+        random_state=random_state,
+    )
+    generated = transformer.fit_transform(values)
+    if encode == "ordinal":
+        names = [f"{column}{suffix}" for column in cols]
+    else:
+        # 等频/一维聚类会合并空箱，因此每个特征的真实箱数要按 bin_edges 数出来。
+        names = [
+            f"{column}{suffix}_{index}"
+            for column, edges in zip(cols, transformer.bin_edges_)
+            for index in range(len(edges) - 1)
+        ]
+    if len(names) != generated.shape[1]:
+        raise ValueError("Discretization produced an unexpected number of columns")
+    result = data.copy() if keep_original else data.drop(columns=cols).copy()
+    for name, column_values in zip(names, generated.T):
+        if name in result.columns:
+            raise ValueError(f"Discretized column already exists: {name}")
+        result[name] = column_values
+    return mark_fitted(_with_attrs(data, result), f"{strategy} discretization")

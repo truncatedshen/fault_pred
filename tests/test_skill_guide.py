@@ -184,7 +184,7 @@ def test_recon_demands_a_capability_shortlist() -> None:
     text = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
     recon = text.split("## 1. 侦察", 1)[1].split("## 2. 阶段 1", 1)[0]
     assert "能力清单" in _flatten(recon)
-    assert "不要枚举全部 56 个组件" in _flatten(recon)
+    assert "不要枚举全部 88 个组件" in _flatten(recon)
 
 
 def test_entrypoint_stays_lean_and_links_every_reference() -> None:
