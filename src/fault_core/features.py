@@ -57,6 +57,7 @@ STATISTICS = (
     "crest_factor",
     # ── 结构类窗口特征（对应《完整组件》清单里的"位置/计数/重复/变化"那一批）──
     "count",
+    "distinct_count",
     "argmax_first",
     "argmax_last",
     "argmin_first",
@@ -397,6 +398,11 @@ def _stat(x: np.ndarray, name: str, quantile: float) -> float:
         "crest_factor": lambda: np.max(np.abs(x)) / rms if rms else 0.0,
         # ── 结构类特征：位置、计数、重复、变化 ──
         "count": lambda: len(x),
+        # 窗口内**不同取值个数**。给"地址/编号/档位"这类标识列用：它们不该被求均值
+        # （地址是坐标，不是物理量），但"这一小段时间里错误落到多少个不同的 bank / col 上"
+        # 是真实的物理问题。等价于 `count × (1 - duplicate_point_ratio)`，单独给出来是因为
+        # 调用方要从枚举里直接选到它，而不是自己拼算术。
+        "distinct_count": lambda: float(len(np.unique(x))),
         # 位置按 0..1 归一化，跨窗口长度可比；首/末分别指该极值第一次与最后一次出现。
         "argmax_first": lambda: float(np.argmax(x)) / max(len(x) - 1, 1),
         "argmax_last": lambda: float(len(x) - 1 - np.argmax(x[::-1])) / max(len(x) - 1, 1),
@@ -1813,6 +1819,50 @@ def categorical(
 ) -> pd.DataFrame:
     """只返回训练特征的兼容入口（等价于 ``fit_categorical(...)["features"]``）。"""
     return fit_categorical(data, columns, method, target_column, random_state, handle_unknown)["features"]
+
+
+def carried_columns_notice(columns: list[str]) -> str:
+    """``keep_columns`` 的警告原文（核心库与组件层共用一份，避免两处说法漂移）。"""
+    return (
+        f"keep_columns={list(columns)} are carried through unchanged so a window component can "
+        "group/time/label by them; they are NOT model inputs — sending this table straight to a "
+        "validation component would leak the label or the equipment identity."
+    )
+
+
+def carry_columns(encoded: pd.DataFrame, source: pd.DataFrame, columns: list[str] | None) -> pd.DataFrame:
+    """把原始列**原样**带进编码后的表，供下游窗口组件按它们分组/切窗。
+
+    为什么需要这一步：``feature.categorical`` 的输出只有编码列（独热/序数/频率…），
+    实体列、时间列、标签列全被丢掉——于是"先编码、再按窗口聚合"这条路在平台里是断的
+    （2026-09-18 实测：`feature.merge` 也合不了，因为行数与来源对不上）。把需要的列带过去，
+    窗口组件就有得可依。
+
+    两条硬规矩：
+
+    * 列必须真的存在，且不能与编码列重名——重名会静默覆盖掉编码结果；
+    * 索引必须对齐（编码保持原索引），否则 pandas 会悄悄填 NaN。
+
+    带过去的列只该用于下游的 ``group_column``/``time_column``/``label_column``。它们会被写进
+    ``evaluation_warnings`` 一路传到模型指标里：直接把它们当特征喂给验证组件就是标签泄漏。
+    """
+    if not columns:
+        return encoded
+    missing = [name for name in columns if name not in source.columns]
+    if missing:
+        raise ValueError(f"keep_columns not found in the data: {missing}")
+    clashes = [name for name in columns if name in encoded.columns]
+    if clashes:
+        raise ValueError(f"keep_columns collide with encoded columns: {clashes}")
+    if not encoded.index.equals(source.index):
+        raise ValueError("keep_columns requires the encoded table to share the source row index")
+    for name in columns:
+        encoded[name] = source[name]
+    encoded.attrs["evaluation_warnings"] = [
+        *encoded.attrs.get("evaluation_warnings", []),
+        carried_columns_notice(list(columns)),
+    ]
+    return encoded
 
 
 def merge_features(left: pd.DataFrame, right: pd.DataFrame) -> pd.DataFrame:

@@ -46,8 +46,32 @@
 
  - [ ] 已经知道 `data_root`；文件能在 `list_datasets` 里看到，或者你已明确请操作者放进来
  - [ ] 实例／资产／时间／标签／测量列都已确认（问出来的，或推断出来并说明了推断依据）
+ - [ ] 每列分过"数值 / 标识 / 类别"三类，标识列没有混进 `columns`（见下）
  - [ ] `data.input.path` 是相对路径且能解析（不确定就单独跑一下 `data.input`）
  - [ ] 文件超过约 1 GB？先选有界读取（`columns`、`max_rows`、Parquet `filters`）或 `streaming`
+
+### 标识列：看着是数值，其实是地址
+
+本阶段的最后一个决定是"哪几列进 `columns`"。把每列分成三类，别按 dtype 分：
+
+| 类别 | 判据 | 处置 |
+| --- | --- | --- |
+| 数值列 | 取值本身有量纲，差值有意义 | 进 `columns` |
+| **标识列** | 取值是地址、编号、序号；`min/max/mean` 没有物理含义 | **不进 `columns`**；要取证就用 `distinct_count` |
+| 类别列 | 字符串或少量枚举（工况、型号） | 不进窗口统计；用 `feature.categorical` 编码，或先问清它是不是标签的一部分 |
+
+实测依据（HBM ECC 日志，`stack/row/col/bank_group` 都是十六进制地址）：把这些列当数值算统计量，`data.quality` 报出 **`pcid` 在 98% 的窗口里只有一个取值**——窗口内恒定，于是这些"特征"整体退化成每台服务器的身份指纹。同一批数据上，`bank_group__max` 的单特征 AUC 在全量上是 **0.849**，而真正留出的时间切分只有 **0.609**：多出来的那部分是"认出是哪台机器"，一旦按实体留出就作废。
+
+地址里也不是没有信息。"这段时间的错误落在多少个不同的 bank / col 上"是实打实的空间扩散程度，用窗口特征的 **`distinct_count`** 回答它（窗口内不同取值个数）：
+
+```jsonc
+{"component_type": "feature.statistical", "parameters": {
+  "columns": ["voltage", "current", "stack", "col"],   // 数值列照常
+  "features": ["mean", "std", "count", "distinct_count"],  // 标识列只取 distinct_count
+  "group_column": "entity", "window_size": 16}}
+```
+
+**它只该用在整数/离散编码列上**：连续量每个取值都不同，`distinct_count` 恒等于 `count`。等价形式是 `count × (1 - duplicate_point_ratio)`——单独给出来是为了让你能从枚举里直接选，而不是自己拼算术。
 
 ### 注意事项
 
@@ -161,6 +185,21 @@
 
 两条硬规矩：视野超出可用数据的窗口**不能标 0**（"没看到故障"不等于"没有故障"）；窗口自身已经故障的样本也不属于预测任务。两者都由平台丢弃并计数，写进 `attrs` 并以警告形式给出。
 
+### 正类可行性预检（接模型之前必须过）
+
+窗口建好之后先报四个数，再决定要不要往下走：
+
+| 数 | 从哪来 | 不达标的后果 |
+| --- | --- | --- |
+| 合格窗口数 | 特征表的行数 | 太少 → 任何分数都是噪声 |
+| 正类数 / 正类率 | 标签向量的和；训练/测试各自的 `train_class_rates` / `test_class_rates` | 正类 4.5% 时"全判正常"也有 95% accuracy |
+| **贡献正类的实体数** | 按 `attrs` 的 `groups` 分组，统计哪些实体的标签和 > 0 | 只有 1–2 个实体有正类 → `group`/`asset` 留出切不出带正类的测试集 |
+| 两类丢弃计数 | `attrs` 的 `horizon_dropped_current_fault` / `horizon_dropped_unknown_future` | 说明样本为什么变少，以及这批数据撑不撑得起预测 |
+
+实测反例（HBM 原始 ECC 日志，2h 窗口 / 7d 视野 / `current_fault_policy=drop`）：20,391 行、50 台服务器、334 次 UER，听起来够用；但**只有 9 台**能切出合格窗口，**41 个正类全部来自 2 台**，其余 7 台共 607 个窗口全是负类。于是按服务器留出（`group`）时测试集 155 个窗口里 **0 个正类**，`accuracy=1.0`、`balanced_accuracy=1.0` 纯属假象；换成时间留出（`temporal`）后测试集有 13 个正类，但模型 `miss_rate=1.0`、ROC-AUC 0.609。**这两个切分一个都撑不起结论**——而按"先建模、再看结果"的顺序，这一点是看不出来的。
+
+所以这份预检的产出是一句话：**这次能评估什么**。写不出这句话（例如只有两台机器有正类、时间上还挤在同一季度），就先回阶段 1/3 改窗口与视野，或者明确告诉用户这份数据只能做描述性分析。
+
 ## 阶段 4 — 特征（§5）
 
 **这个阶段的作用：** 决定"从什么角度看这段信号"。同一个通道，换一个分支就是从另一个问题里取证据——水平与形状、趋势、旋转与共振、不规则性、短时动态、多尺度、离散档位。漏掉一个角度，模型就永远看不见那类证据；这也是唯一"多挂一个分支通常划算"的阶段。
@@ -179,11 +218,11 @@
 | 离散属性（类别、模式、等级） | `feature.categorical` → `encoder` 端口 |
 | 特征已经算好在表里 | `feature.select` |
 
-### 枚举值在两轮里扩过（别按旧清单挑）
+### 枚举值在三轮里扩过（别按旧清单挑）
 
 | 组件 | 新增的枚举值 | 用途 |
 | --- | --- | --- |
-| `feature.statistical` | `count`、`argmax_first/last`、`argmin_first/last`（位置按 0..1 归一化）、`count_above/below_mean`、`longest_above/below_mean`、`mean_delta`、`mean_abs_delta`、`mean_second_derivative`、`duplicate_point_ratio`、`repeated_value_ratio`、`duplicate_sum`、`time_reversal_asymmetry`、`std_gt_range`、`variance_gt_std`、`max_repeated`、`min_repeated`（共 35 项） | 结构类证据：位置、计数、最长连续段、重复率、变化率；`repeated_value_ratio` / `duplicate_sum` 对"保持值/卡死"通道特别灵 |
+| `feature.statistical` | `count`、`distinct_count`、`argmax_first/last`、`argmin_first/last`（位置按 0..1 归一化）、`count_above/below_mean`、`longest_above/below_mean`、`mean_delta`、`mean_abs_delta`、`mean_second_derivative`、`duplicate_point_ratio`、`repeated_value_ratio`、`duplicate_sum`、`time_reversal_asymmetry`、`std_gt_range`、`variance_gt_std`、`max_repeated`、`min_repeated`（共 36 项） | 结构类证据：位置、计数、**不同取值个数**、最长连续段、重复率、变化率；`repeated_value_ratio` / `duplicate_sum` 对"保持值/卡死"通道特别灵，`distinct_count` 是标识列（地址/编号）唯一该用的统计量 |
 | `feature.rolling_statistics` | `variance`（与 `std` 同口径 ddof=0）、`max`、`min` | 逐行滚动上/下包络 |
 | `feature.temporal` | `sum_abs_change`（窗口内 \|Δ\| 之和）、`peak_count`（山峰数，配 `prominence`） | 走得多远、抖了几次 |
 | `feature.entropy` | `binned_entropy`（与 `information_entropy` 同一实现） | 对齐组件清单里的叫法 |
@@ -195,6 +234,7 @@
  - **合并要求来源完全一致。** `feature.merge` 需要索引完全相同、来源行相同、`groups`/`assets`/`source_path`/`source_id` 相同，并且**列名不相交**（重叠会报 `Feature names overlap; rename before merging`）。用同样的 columns/window/step/group 建出来的分支永远能合；被过滤、重采样或改过窗口的那条合不了。
  - **NaN 不能进模型。** NaN 的来源：频域平窗口（`flat_policy=nan`）、过短的组、原始缺失值。在特征与模型之间插 `feature.imputation`（`mean`、`median`、`zero`、`drop_columns`，常数用 `fill_value`）。忘了插的话，模型报错会点名具体列。填了多少要报出来。
  - **类别特征是拟合出来的配对。** `feature.categorical` 会拟合并输出 `encoder`；新数据上通过 `feature.categorical_transform` 复用它，不要重新拟合。验证器会把上游的类别编码器内嵌进训练好的模型。
+ - **先编码、再按窗口聚合**（"窗口内各档位占多少"这类问题）：`feature.categorical(columns=[档位列], method=onehot, keep_columns=[实体列, 时间列, 标签列]) → feature.statistical(...)`。四个窗口组件的输入端口**同时接受 `Dataset` 与 `FeatureDataset`**，编码表可以直接接进去；独热列的 `mean` 就是"该类别在这一窗里的占比"。`keep_columns` 是必需的——编码输出只剩编码列，不带的话窗口组件连分组列都找不到（实测报 `Missing columns: [...]`）。带过去的列**不是模型输入**，平台会把它写进 `evaluation_warnings` 一路传到模型指标；只要窗口组件的 `columns` 里不写它们就不会泄漏（窗口组件本身也拒绝把分组列/标签列当特征）。只想回答"有几类"时不用绕这一圈，直接用原始列的 `distinct_count`。
  - **探索类输出是终端。** `visual.*`、`explore.*` 以及 `report`/`plot`/`StatisticsResult`/`CorrelationMatrix` 端口是给人看的，不是模型的输入。
  - **`feature.score_select` 与 `feature.pca` 在全部行上拟合**，因此见过留出集。两种可接受的用法：在检查分支上理解结构；或在模型前使用，但把泄漏警告当作前提条件一起汇报。它们的排序永远不是验证过的证据。
  - **`feature.spectral` 需要已知采样率。** `sampling_rate` 必填且无默认值；没人知道就问，不要猜。保持值或量化值的通道会产生平窗口：默认 `flat_policy=nan` 会保住行对齐、给出 NaN 频谱（之后再填补），`skip` 会丢掉这些窗口（只有当没有东西必须与它们合并时才安全），`error` 恢复硬失败。只在窗口两端出现的波动也算平窗口，因为 Hann 窗在两端为零。
@@ -291,6 +331,8 @@
 `The test set contains no positive (1) rows`），把那条警告**原样带进汇报**，不要只抄 accuracy。
 
 `validation.compare` 比较最多三份指标载荷，前提是**留出行完全相同**，测试索引不一致会直接拒绝；所以只有特征、标签、切分方式、`test_size`、`random_state` 都一致的运行才能互相比较。
+
+**调参与评估必须分开。** `validation.grid_search` 的 `best_score` 是**交叉验证**分，它没有留出分数；留出集只在最后评一次。用测试集调参数得到的是"这份测试集上的最优"，不是性能，而且它的症状很隐蔽——实测过 `miss_rate=1.0` 却 `accuracy=0.94` 的模型：一个故障都没抓出来，头行数字却很好看。稀有故障上的目标应该写成"给定误报预算下的召回"或 PR-AUC，而不是"精准率召回率最高"。
 
 ### 检查清单
 

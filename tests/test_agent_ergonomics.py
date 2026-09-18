@@ -150,6 +150,54 @@ def test_wait_for_pipeline_and_stale_workspace_warning(service):
     assert service.dispatch("wait_for_pipeline", {"pipeline_id": "pipeline_missing"})["success"] is False
 
 
+class _NeverFinishes:
+    """一个永远不结束的任务替身，用来确定性地测超时分支。"""
+
+    def done(self) -> bool:
+        return False
+
+
+def test_wait_returns_immediately_when_nothing_is_in_flight(service):
+    """没在跑就别等：漏看 `execute_pipeline` 的返回值不该换来一次满超时的白等。"""
+    pipeline_id = service.create_pipeline("idle")["pipeline_id"]
+    build_graph(service, pipeline_id)
+
+    # 1) 从未启动过：立刻返回并说清原因，而不是等满 60 秒。
+    started = time.perf_counter()
+    idle = service.wait_for_pipeline(pipeline_id, timeout_seconds=60, poll_seconds=0.05)
+    assert time.perf_counter() - started < 1.0
+    assert idle["timed_out"] is False and idle["started"] is False
+    assert idle["status"] == "CREATED"
+    assert any("Nothing is running" in note for note in idle["warnings"])
+
+    # 2) 正常跑一次：仍然阻塞到终态。
+    service.execute_pipeline(pipeline_id)
+    done = service.wait_for_pipeline(pipeline_id, timeout_seconds=60, poll_seconds=0.05)
+    assert done["status"] == "SUCCESS"
+    assert done["timed_out"] is False and done["started"] is True
+    assert not any("Nothing is running" in note for note in done["warnings"])
+
+    # 3) 跑完再改图 → 结果失效回到 CREATED：同样不该等。
+    service.configure_component(pipeline_id, "source", {"path": "synthetic_equipment.csv", "max_rows": 100})
+    started = time.perf_counter()
+    stale = service.wait_for_pipeline(pipeline_id, timeout_seconds=60, poll_seconds=0.05)
+    assert time.perf_counter() - started < 1.0
+    assert stale["timed_out"] is False and stale["started"] is False
+    assert any("Nothing is running" in note for note in stale["warnings"])
+
+
+def test_wait_still_times_out_while_a_job_is_in_flight(service):
+    """真的有在途任务时，超时语义不能被我改坏。"""
+    pipeline_id = service.create_pipeline("busy")["pipeline_id"]
+    build_graph(service, pipeline_id)
+    service.jobs[pipeline_id] = _NeverFinishes()
+    started = time.perf_counter()
+    summary = service.wait_for_pipeline(pipeline_id, timeout_seconds=0.3, poll_seconds=0.05)
+    assert time.perf_counter() - started >= 0.3
+    assert summary["timed_out"] is True and summary["started"] is True
+    assert summary["timeout_seconds"] == 0.3
+
+
 def test_server_info_and_dataset_listing(service):
     info = service.get_server_info()
     assert info["data_root"].endswith("data")

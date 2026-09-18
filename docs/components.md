@@ -731,7 +731,7 @@ Shape, dtypes, missing rates, summary, time range and label/class balance
 
 Grouped/windowed statistics with aligned labels; window_span/step_span cut windows by time, label_policy=horizon predicts whether a fault happens inside the prediction horizon
 
-**输入**：dataset : Dataset
+**输入**：dataset : Dataset | FeatureDataset
 
 **输出**：features : FeatureDataset，labels : LabelVector（可选）
 
@@ -751,14 +751,14 @@ Grouped/windowed statistics with aligned labels; window_span/step_span cut windo
 | current_fault_policy | enum | "drop" | 否 | drop, positive, negative |
 | normal_label | string | "0" | 否 |  |
 | label_policy | enum | "strict" | 否 | strict, last, mode, horizon |
-| features | feature_list | ["mean", "std", "rms"] | 是 | mean, std, variance, min, max, median, rms, skewness, kurtosis, quantile, range, iqr, mad, peak, crest_factor, count, argmax_first, argmax_last, argmin_first, argmin_last, count_above_mean, count_below_mean, longest_above_mean, longest_below_mean, mean_delta, mean_abs_delta, mean_second_derivative, duplicate_point_ratio, repeated_value_ratio, duplicate_sum, time_reversal_asymmetry, std_gt_range, variance_gt_std, max_repeated, min_repeated |
+| features | feature_list | ["mean", "std", "rms"] | 是 | mean, std, variance, min, max, median, rms, skewness, kurtosis, quantile, range, iqr, mad, peak, crest_factor, count, distinct_count, argmax_first, argmax_last, argmin_first, argmin_last, count_above_mean, count_below_mean, longest_above_mean, longest_below_mean, mean_delta, mean_abs_delta, mean_second_derivative, duplicate_point_ratio, repeated_value_ratio, duplicate_sum, time_reversal_asymmetry, std_gt_range, variance_gt_std, max_repeated, min_repeated |
 | quantile | float | 0.75 | 否 |  min=0, max=1 |
 
 ## feature.fitting · 拟合特征
 
 Linear, polynomial or exponential trends with residual and R² features; the degradation workhorse, and with label_policy=horizon it feeds failure prediction
 
-**输入**：dataset : Dataset
+**输入**：dataset : Dataset | FeatureDataset
 
 **输出**：features : FeatureDataset，labels : LabelVector（可选）
 
@@ -836,7 +836,7 @@ Rolling Haar multi-scale energies, dominant scale and detail peak counts
 
 Windowed approximate entropy and histogram-based information entropy; with window_span/step_span windows can be cut by time and label_policy=horizon predicts failure inside the horizon
 
-**输入**：dataset : Dataset
+**输入**：dataset : Dataset | FeatureDataset
 
 **输出**：features : FeatureDataset，labels : LabelVector（可选）
 
@@ -876,6 +876,7 @@ Fit a reusable categorical encoder and produce aligned numeric training features
 | target_column | column | null | 否 |  |
 | random_state | integer | 42 | 否 |  min=0, max=None |
 | handle_unknown | enum | "ignore" | 否 | ignore, error |
+| keep_columns | column_list | [] | 否 |  |
 
 ## feature.categorical_transform · 分类特征变换
 
@@ -887,12 +888,13 @@ Apply a fitted categorical encoder without learning from inference data
 
 | 参数 | 类型 | 默认值 | 必填 | 选项 |
 | --- | --- | --- | --- | --- |
+| keep_columns | column_list | [] | 否 |  |
 
 ## feature.spectral · 频域特征
 
 FFT amplitude features per window: dominant frequency, centroid, entropy, band and harmonic ratios; window_span/step_span cut windows by time and label_policy=horizon supports failure prediction
 
-**输入**：dataset : Dataset
+**输入**：dataset : Dataset | FeatureDataset
 
 **输出**：features : FeatureDataset，labels : LabelVector（可选）
 

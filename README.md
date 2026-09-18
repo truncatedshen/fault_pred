@@ -55,8 +55,10 @@ Windows 也可以直接运行 `.\setup.ps1`。Linux / macOS 把 `.venv\Scripts\p
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
 | `--port` | 8765 | 网页与 HTTP 控制 API 端口 |
-| `--data-root` | examples/data | CSV 数据目录，数据输入组件的 path 相对此目录 |
+| `--data-root` | examples/data | CSV / Parquet 数据目录，数据输入组件的 path 相对此目录 |
 | `--storage-root` | .fault-platform/pipelines | 「保存」写入的 XML 目录 |
+| `--artifact-cache-mb` | 不限 | 内存缓存预算；超出后把未被引用的输出落盘或驱逐（见 §8） |
+| `--artifact-spill-dir` | .fault-platform/artifact-spill | 落盘目录；显式设为空则退化为「驱逐 + 标记待重算」 |
 
 ### 1.3 两分钟跑通示例
 
@@ -66,6 +68,8 @@ Windows 也可以直接运行 `.\setup.ps1`。Linux / macOS 把 `.venv\Scripts\p
 
    正负样本比例是读其它指标的前提：测试集里一个故障样本都没有时，`accuracy=1.0` 只说明"模型全判正常"，
    平台会为这种情况直接给出一条警告（`The test set contains no positive (1) rows`），别只抄 accuracy。
+
+   结果面板底部还有一个 **导出数据（CSV）** 入口，可以把这一层的输入/输出数据下载到本机用 Excel 或 pandas 核对（见 §2.7）。
 4. 切换结果区页签：**执行日志** 看每个节点的状态、耗时与缓存命中，**XML 方案** 看完整配置。
 5. 点 **保存** 写入 `.fault-platform/pipelines`，或 **导出 XML** 下载文件。
 
@@ -133,7 +137,19 @@ Windows 也可以直接运行 `.\setup.ps1`。Linux / macOS 把 `.venv\Scripts\p
 
 ### 2.5 端口类型与连线规则
 
-组件之间只能通过声明了数据类型的端口连接，默认两端类型完全一致才能连。**输入端口可以额外声明兼容类型**：16 个检查类组件（`visual.overview`、`visual.line`、`visual.scatter`、`visual.subplot`、`visual.histogram`、`visual.relationship`、`explore.central_tendency`、`explore.dispersion`、`explore.correlation`、`explore.distribution`、`explore.anomaly`、`explore.peaks`、`explore.normality`、`explore.acf`、`explore.isotonic`、`explore.gbr_fit`）既接受 `Dataset` 也接受 `FeatureDataset`，所以特征分支可以直接挂概览——中间产物随时可查。数据转换类组件不放宽，仍然只吃原始 `Dataset`；`explore.concept_drift` / `explore.kl_divergence` 需要两份输入，因此只吃 `Dataset`。
+组件之间只能通过声明了数据类型的端口连接，默认两端类型完全一致才能连。**输入端口可以额外声明兼容类型**：22 个检查类组件既接受 `Dataset` 也接受 `FeatureDataset`，所以特征分支可以直接挂概览——中间产物随时可查。
+
+| 归类 | 组件 |
+| --- | --- |
+| 探索 15 个 | `explore.central_tendency`、`explore.dispersion`、`explore.correlation`、`explore.distribution`、`explore.anomaly`、`explore.peaks`、`explore.normality`、`explore.acf`、`explore.isotonic`、`explore.gbr_fit`、`explore.hp_filter`、`explore.stationarity`、`explore.dtw`、`explore.sbd`、`explore.slope_cosine` |
+| 可视化 6 个 | `visual.overview`、`visual.line`、`visual.scatter`、`visual.subplot`、`visual.histogram`、`visual.relationship` |
+| 验证 1 个 | `validation.kmeans`（聚类本身不看标签，两种表都能吃） |
+
+数据转换类组件不放宽，仍然只吃原始 `Dataset`；`explore.concept_drift` / `explore.kl_divergence` 需要两份输入（reference / current），因此只吃 `Dataset`。
+
+另有 4 个**窗口组件**也接受 `FeatureDataset`：`feature.statistical`、`feature.fitting`、`feature.spectral`、`feature.entropy`。它们放宽是为了让"**先做行级编码、再按窗口聚合**"成立——例如用 `feature.categorical(method="onehot", keep_columns=["entity","time","label"])` 把档位列编码，再交给 `feature.statistical` 求窗口均值，得到的正是"该档位在这一窗里的占比"。`keep_columns` 不能省：编码输出只剩编码列，分组/时间/标签列必须先带过去（否则窗口组件会报 `Missing columns`）；带过去的列只用来分组、切窗、取标签，**不是模型输入**，平台会为此写一条警告并随 `evaluation_warnings` 传到模型指标里。只要"有几类"而不要占比时，直接用原始列的 `distinct_count`。
+
+`visual.overview` 另外多一个**可选**输入端口 `labels`（`LabelVector`）：特征分支上把窗口组件的 `labels` 接过去，概览就会连同**标签的正负样本比例**一起报出来。原始表上则用参数 `label_column` 指列——两条路等价，写错列名会直接报错而不是静默跳过。
 
 | 数据类型 | 运行时对象 | 典型来源 |
 | --- | --- | --- |
@@ -162,13 +178,40 @@ Windows 也可以直接运行 `.\setup.ps1`。Linux / macOS 把 `.venv\Scripts\p
 
 断线后浏览器自动重连，并用 `Last-Event-ID` 补齐断线期间的事件；原有的 500 ms 轮询保留作为兜底。
 
+### 2.7 导出中间数据（在本地核对）
+
+点任意**有数据**的节点，结果面板底部会多出 **导出数据（CSV）**：把这一层的数据下载到本机，用 Excel / pandas 自己核对，而不是只能相信页面上那 20 行预览。
+
+| 项目 | 说明 |
+| --- | --- |
+| 输入侧 | 上游喂给这个组件的那份数据（例如 `feature.statistical` 的输入就是过滤后的原始表）。它等于上游节点的输出，所以两处看到的是同一份 |
+| 输出侧 | 这个组件自己产出的表（特征、标签向量、预测、特征重要性、相关矩阵…） |
+| 不含哪些 | `Metrics` / `Visualization` / `Model` 这类不是表格的产物；对它们会直接说明"不可导出" |
+| 行索引 | 索引有信息时写成第一列：窗口特征表是 `window_id`（窗口键，能追到原始行），过滤后的表是 `row_id`（原表行号）；普通的 0…N-1 不写 |
+| 编码 | UTF-8 **with BOM**：Windows 上双击用 Excel 打开中文列名不乱码，`pandas.read_csv` 也会自动识别 |
+| 大表 | 默认最多导 20 万行；超过时按钮会变成「下载前 20 万行 / 全部 N 行」，并按下去时才决定，响应头 `X-Rows` / `X-Total-Rows` / `X-Truncated` 如实标注 |
+| 流式产物 | 流式是"按块读、不落地"的，导出等于物化，所以会提示先插 `data.materialize`，而不是给你一个不完整的文件 |
+| 时机 | 图被改过而没重算时**拒绝导出**（`Graph changed; run the pipeline to refresh results before exporting`）——宁可让你重跑，也不把上一版图算出的表当成当前的 |
+
+底下是两个文件级接口（给人和脚本用，不是控制动作，因此**不占** MCP 工具名额）：
+
+```http
+GET /api/node-data?pipeline_id=...&node_id=stat
+GET /api/node-data/csv?pipeline_id=...&node_id=stat&direction=output&port=features
+GET /api/node-data/csv?pipeline_id=...&node_id=stat&direction=input&max_rows=0
+```
+
+`direction` 取 `input`（上游喂进来的）或 `output`（本节点产出的）；`port` 留空取该侧第一个可导的表；
+`max_rows=0` 表示不截断。Agent 那边不需要新工具——它照旧用 `get_node_result` 读有界预览，
+需要落文件时告诉你点哪个节点导出即可。
+
 ---
 
 ## 3. 组件库（88 个）
 
 组件定义由 Registry 统一提供，网页组件库、MCP `list_components` 和 XML 校验读取同一份定义。
 
-### 数据处理 Data Processing
+### 数据处理 Data Processing（20）
 
 | type | 名称 | 输入 → 输出 |
 | --- | --- | --- |
@@ -190,9 +233,10 @@ Windows 也可以直接运行 `.\setup.ps1`。Linux / macOS 把 `.venv\Scripts\p
 | `data.polynomial_features` | 多项式特征 | dataset : Dataset → dataset : Dataset |
 | `data.discretize` | 离散化分箱 | dataset : Dataset → dataset : Dataset |
 | `data.seasonal_difference` | 同期差分 | dataset : Dataset → dataset : Dataset |
+| `data.concat` | 数据拼接 | first / second（+ 可选 third / fourth）: Dataset → dataset : Dataset |
 | `data.labels` | 标签向量 | dataset : Dataset → labels : LabelVector |
 
-### 数据探索 Data Exploration
+### 数据探索 Data Exploration（19）
 
 | type | 名称 | 输入 → 输出 |
 | --- | --- | --- |
@@ -216,11 +260,11 @@ Windows 也可以直接运行 `.\setup.ps1`。Linux / macOS 把 `.venv\Scripts\p
 | `explore.sbd` | SBD 相关 | dataset : Dataset → statistics : StatisticsResult |
 | `explore.slope_cosine` | 斜率与余弦夹角 | dataset : Dataset → prediction : Prediction |
 
-### 数据可视化 Data Visualization
+### 数据可视化 Data Visualization（8）
 
 | type | 名称 | 输入 → 输出 |
 | --- | --- | --- |
-| `visual.overview` | 数据概览 | dataset : Dataset → overview : Visualization |
+| `visual.overview` | 数据概览 | dataset : Dataset / FeatureDataset，labels（可选）: LabelVector → overview : Visualization |
 | `visual.scatter` | 散点图 | dataset : Dataset → plot : PlotArtifact |
 | `visual.line` | 折线图 | dataset : Dataset → plot : PlotArtifact |
 | `visual.subplot` | 子图 | dataset : Dataset → plot : PlotArtifact |
@@ -229,7 +273,7 @@ Windows 也可以直接运行 `.\setup.ps1`。Linux / macOS 把 `.venv\Scripts\p
 | `visual.anomaly` | 异常点可视化 | dataset : Dataset, prediction（可选）→ plot : PlotArtifact |
 | `visual.relationship` | 关系图 | dataset : Dataset → plot : PlotArtifact |
 
-### 特征提取 Feature Extraction
+### 特征提取 Feature Extraction（14）
 
 | type | 名称 | 输入 → 输出 |
 | --- | --- | --- |
@@ -249,7 +293,7 @@ Windows 也可以直接运行 `.\setup.ps1`。Linux / macOS 把 `.venv\Scripts\p
 | `feature.pca` | 主成分分析 | features : FeatureDataset → features : FeatureDataset, variance : StatisticsResult |
 窗口族（`feature.statistical` / `feature.fitting` / `feature.spectral` / `feature.entropy`）共享同一套窗口与预测参数：按行 `window_size`/`step`，或按时间 `window_span`/`step_span`（如 `7d`/`1d`）；`label_policy=horizon` 配合 `prediction_horizon`/`prediction_gap` 就能从"检测"切到"预测"。用法见 §4.4，参数细节见 §5。
 
-### 算法验证 Algorithm Validation
+### 算法验证 Algorithm Validation（27）
 
 | type | 名称 | 输入 → 输出 |
 | --- | --- | --- |
@@ -337,7 +381,11 @@ data.input → feature.statistical(window_span="7d", step_span="1d",
   "normal_label": "0"}}
 ```
 
-必须向用户交代的四件事：**窗口与视野**（`window_span`/`step_span`/`prediction_horizon`/`prediction_gap`）；**丢了多少窗口、为什么**（`attrs` 的 `horizon_dropped_current_fault` 与 `horizon_dropped_unknown_future`）；**正类比例**；**切分方式**（时间窗口通常重叠，用 `temporal` 或 `group`/`asset`，`stratified` 会被拒绝）。
+必须向用户交代的五件事：**窗口与视野**（`window_span`/`step_span`/`prediction_horizon`/`prediction_gap`）；**丢了多少窗口、为什么**（`attrs` 的 `horizon_dropped_current_fault` 与 `horizon_dropped_unknown_future`，两者都会变成节点警告）；**训练集与测试集各自的正负样本比例**（`train_class_rates` / `test_class_rates`）；**切分方式**（时间窗口通常重叠，用 `temporal` 或 `group`/`asset`，`stratified` 会被拒绝）；**这份切分到底测到了什么**（测试集里没有正类时指标无意义）。
+
+最后一条由平台自己说：某一边缺类别时，`metrics.warnings` 里会直接出现
+`Holdout split has no 1 rows: train {…}, test {…}` 与 `The test set contains no positive (1) rows`。
+这不是提示音，而是"这个 accuracy 不能当成绩读"的结论——汇报时原样带上。
 
 实测参考（3W 真实数据：489,456 行 / 28 个实例，窗口 `180s`、步长 `60s`、视野 `1h`）：得到 **3370 个窗口、正类 26.9%**，丢弃 4380 个"自身已故障"与 331 个"视野超出数据"的窗口，特征提取 1.0 秒。注意**特征行数只由窗口与步长决定，与输入行数无关**。
 
@@ -354,6 +402,7 @@ data.input → feature.statistical(window_span="7d", step_span="1d",
 | 泄漏检查 | Runtime 会检查训练与测试窗口是否共享原始数据行，发现即报错 |
 | 全量预处理 | 全量缩放/编码会带探索性警告并传递到指标；SVM 的标准化与概率校准只在训练集内拟合 |
 | 频域前置条件 | 需要真实采样率；平台不重采样、不推断转速 |
+| 类别比例优先 | `train_class_rates` / `test_class_rates` 与 `per_class_recall` 一起看；测试集没有正类时 `accuracy=1.0` 只说明"模型全判正常"，平台会给警告 |
 
 ---
 
@@ -385,8 +434,9 @@ equipment,time,label,vibration,temperature,pressure
 | `current_fault_policy` | 窗口自身已故障时：`drop`（默认，属于检测任务）/`positive`/`negative`；丢弃数量会写进 `attrs` 与警告 |
 | `normal_label` | 哪个标签值算正常（默认 `0`），其它取值都算故障 |
 | `label_policy` | 混标签窗口的处理：`strict` 拒绝、`last` 取最后一个、`mode` 取众数；`horizon` 表示**预测**——标签取自窗口之后的未来视野 |
-`window_size`/`step`（或 `window_span`/`step_span`）决定的是**特征行数**：每组大约"组内时长 ÷ 步长"行，尾部不足一个窗口的丢弃；与输入行数无关。48.9 万行原始数据配 `180s`/`60s` 得到 8081 行特征，步长改成 `180s` 只剩 2700 行。
 | `sampling_rate` | 仅频域特征：原始样本采样率（Hz），必填，窗口至少 8 个样本 |
+
+`window_size`/`step`（或 `window_span`/`step_span`）决定的是**特征行数**：每组大约"组内时长 ÷ 步长"行，尾部不足一个窗口的丢弃；与输入行数无关。48.9 万行原始数据配 `180s`/`60s` 得到 8081 行特征，步长改成 `180s` 只剩 2700 行。
 
 频域特征说明：使用 Hann 窗与相干增益归一化，`dominant_frequency` / `dominant_amplitude` / `spectral_rms` 对单音准确；`band_edges` 用 Nyquist 比例表示，`band_energy_ratio_i` 之和为 1；`harmonic_ratio` 统计 2–5 倍主频附近的能量占比。谱质心、谱展宽、谱熵受窗主瓣宽度影响，适合在同一流程内比较样本。
 
@@ -406,6 +456,26 @@ MCP bridge 只是转发到本地 HTTP 控制 API，所以**必须先启动服务
 
 ### 6.2 配置 MCP 客户端
 
+推荐用工程自带的脚本写配置——它**幂等**、只改 `[mcp_servers.fault-prediction]` 这一段、写入前备份，
+并且会先校验原文件仍是合法 TOML 再动它：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\install_mcp_config.py
+# 换路径 / 端口：--python <解释器> --url http://127.0.0.1:8766
+# 只想看会写什么：--dry-run
+```
+
+手工配置也可以。Codex 用的是 **TOML**（`~/.codex/config.toml`）：
+
+```toml
+[mcp_servers.fault-prediction]
+command = 'D:/codespace/python/fault_pred/.venv/Scripts/python.exe'
+args = ["-m", "fault_platform", "mcp", "--url", "http://127.0.0.1:8765"]
+startup_timeout_sec = 60
+```
+
+其它客户端用 JSON（字段名是 `mcpServers`，写法与内容一样）：
+
 ```json
 {
   "mcpServers": {
@@ -417,7 +487,7 @@ MCP bridge 只是转发到本地 HTTP 控制 API，所以**必须先启动服务
 }
 ```
 
-工程移动后要修改 `command` 的绝对路径；配置文件位置由客户端决定，本工程不改全局配置。也可以手动运行 bridge：`python -m fault_platform mcp --url http://127.0.0.1:8765`。
+工程移动后要改 `command` 的绝对路径（重跑一次安装脚本即可）；配置文件位置由客户端决定。**改完要重启会话**——MCP 服务器与 skill 在会话启动时加载，当前会话不会热加载。也可以手动运行 bridge：`python -m fault_platform mcp --url http://127.0.0.1:8765`。
 
 配好后建议先跑一次冒烟脚本：它会按配置里的命令真实拉起 bridge，只用 MCP 工具完成「发现组件 → 建图 → 校验 → 执行 → 取结果 → 导出 XML → 检查点」的闭环，并打印每一步的结果。
 
@@ -425,17 +495,20 @@ MCP bridge 只是转发到本地 HTTP 控制 API，所以**必须先启动服务
 .\.venv\Scripts\python.exe scripts\mcp_smoke.py --from-config
 ```
 
-`--from-config` 直接读取 `~/.codex/config.toml` 的 `[mcp_servers.fault-prediction]`；去掉该参数则用当前解释器和 `--url` 启动，方便 CI 或其它客户端复用。
+`--from-config` 直接读取 `~/.codex/config.toml` 的 `[mcp_servers.fault-prediction]`；去掉该参数则用当前解释器和 `--url` 启动，方便 CI 或其它客户端复用。**配置里没有这个条目时 `--from-config` 会直接失败**，先跑一次 `install_mcp_config.py` 再试。
 
 ### 6.3 工具清单（39 个高层操作）
 
 | 用途 | 工具 |
 | --- | --- |
-| 方案管理 | `create_pipeline`、`list_pipelines`、`get_pipeline`、`replace_pipeline`、`load_pipeline`、`save_pipeline`、`create_example` |
-| 组件发现 | `list_components`、`search_components`、`get_component_schema` |
-| 图编辑 | `add_component`、`remove_component`、`configure_component`、`connect_components`、`disconnect_components`、`validate_pipeline` |
-| 执行 | `execute_pipeline`、`execute_node`、`execute_from_node`、`retry_node`、`cancel_pipeline`、`get_pipeline_status`、`get_node_result`、`get_pipeline_result`、`get_history` |
-| 检查点与导出 | `save_checkpoint`、`load_checkpoint`、`list_checkpoints`、`get_pipeline_xml`、`export_python` |
+| 侦察（7） | `get_server_info`、`list_datasets`、`get_component_facets`、`list_components`、`search_components`、`retrieve_components`、`get_component_schema` |
+| 方案生命周期（9） | `create_pipeline`、`list_pipelines`、`get_pipeline`、`replace_pipeline`、`load_pipeline`、`save_pipeline`、`get_pipeline_xml`、`delete_pipeline`、`create_example` |
+| 图编辑（9） | `add_component`、`add_components`、`remove_component`、`configure_component`、`configure_components`、`connect_components`、`connect_many`、`disconnect_components`、`validate_pipeline` |
+| 执行（7） | `execute_pipeline`（`mode` = all / node / from，可配 `incremental`）、`execute_node`、`execute_from_node`、`retry_node`、`cancel_pipeline`、`get_pipeline_status`、`wait_for_pipeline` |
+| 读取（3） | `get_pipeline_result`、`get_node_result`、`get_history` |
+| 检查点与导出（4） | `save_checkpoint`、`load_checkpoint`、`list_checkpoints`、`export_python` |
+
+`recon → 建图 → 执行 → 读结果 → 持久化` 的完整走法就是上表自上而下的顺序；`wait_for_pipeline` 是唯一会阻塞的工具，它在服务锁之外运行，默认 300 秒超时；**如果根本没有在途任务（从没启动过，或被改图失效），它立刻返回 `started=false` 并说明原因**，而不是空等满超时。`export_python` 写出的是**给人用**的独立脚本（用 `fault_platform` 的 Python API 在本地重建同一张图并执行，不连服务），与给平台自己再导入的 XML 是两条路。
 
 大对象不经过 MCP：Agent 只用 `pipeline_id`、`workspace_id`、`node_id` 操作，读回的是有界预览（最多 100 行 / 50 列）和元数据，不返回完整训练矩阵或模型权重。
 
@@ -446,7 +519,7 @@ MCP bridge 只是转发到本地 HTTP 控制 API，所以**必须先启动服务
 | `add_components` / `connect_many` / `configure_components` 批量接口 | 9 个节点从 26 次调用降到 3–4 次 |
 | `include_graph=false`（批量接口默认即为 false） | 每次编辑只回 `version + 节点/边数量 + added`，不再回吐整张图 |
 | `get_node_result` 默认紧凑 | `train_indices`/`test_indices` 折叠为 `*_count`；确需原始索引时传 `include_indices=true` |
-| `wait_for_pipeline(timeout_seconds=…)` | 取代 sleep + 轮询，终态直接返回 `timed_out` |
+| `wait_for_pipeline(timeout_seconds=…)` | 取代 sleep + 轮询，终态直接返回 `timed_out`；没有在途任务时立刻返回 `started=false`，不空等 |
 | `get_server_info` / `list_datasets` | 查 data_root、storage_root、缓存预算与可读文件，无需读进程命令行 |
 | `delete_pipeline` | 清理失败的方案、工作区、落盘文件与检查点 |
 | 工作区陈旧提示 | 传了非最新的 `workspace_id` 时返回警告，而不是静默给出旧状态 |
@@ -491,7 +564,7 @@ get_pipeline_xml(...)
 
 | 文件 | 内容 |
 | --- | --- |
-| `SKILL.md` | 入口（385 行）：决策、硬约束、路由、阶段自检闸门、39 个工具的用途表与 5 类能力索引 |
+| `SKILL.md` | 入口（364 行）：决策、硬约束、路由、阶段自检闸门、39 个工具的用途表与 5 类能力索引 |
 | `references/recipes.md` | 可直接照抄的调用序列（常规分类、onset 数据、资产留出、无监督、超大文件、失败后重跑、三模型对比） |
 | `references/stages.md` | 每个阶段的细节：参数表、实测数字、检查清单与「注意事项」（入口把它挪出来，只留决策与闸门） |
 | `references/troubleshooting.md` | 报错原文 → 原因 → 修法，以及每条护栏为什么存在 |
@@ -530,10 +603,23 @@ extracted = features.extract_features(
 metrics = models.validate_model(
     extracted["features"], extracted["labels"], "random_forest", split_method="group",
 )["metrics"]
-print(metrics["accuracy"], metrics["test_count"])
+print(metrics["accuracy"], metrics["test_count"], metrics["test_class_rates"])
+# 先看比例再看分数：测试集里没有正类时 accuracy=1.0 只说明"模型全判正常"
 ```
 
-模块划分：`fault_core.data`（过滤、行/列操作）、`fault_core.preprocessing`（缩放、转换）、`fault_core.exploration`、`fault_core.visualization`、`fault_core.features`（统计/拟合/分类/频域）、`fault_core.selection`、`fault_core.reduction`、`fault_core.models`。
+模块划分（18 个，全部可以脱离平台单独用）：
+
+| 模块 | 内容 |
+| --- | --- |
+| `fault_core.data` / `advanced_data` | 过滤、行/列操作、重采样、切分、拼接、离散化、多项式与同期差分 |
+| `fault_core.preprocessing` | 缩放、标准化、数值转换、二值化、缺失值填充 |
+| `fault_core.features` | 窗口与标签（按行 / 按时间 / 未来视野）、统计与拟合特征、频域特征、特征合并与派生 |
+| `fault_core.sequence_features` / `series_analysis` | 滚动统计、差分、自相关、熵；趋势分离、平稳性、形状相似度、小波 |
+| `fault_core.exploration` / `advanced_analysis` | 集中趋势、离散度、相关性、分布、周期性、漂移、异常 |
+| `fault_core.change_detection` | 水平漂移、波动率变化、季节性、自回归等结构与变点检测器 |
+| `fault_core.models` / `advanced_models` | 分类验证（含切分与泄漏复查）、回归、ARMA、无监督检测器 |
+| `fault_core.forecasting` / `model_selection` | 指数平滑与 ARIMA 预测；交叉验证与超参搜索 |
+| `fault_core.quality` / `assets` / `visualization` / `selection` / `reduction` | 质量预检、资产键派生、可视化规格、特征评分选择、PCA |
 
 ### 7.2 用 Graph API 执行方案
 
@@ -628,23 +714,28 @@ class MyFeatureComponent(BaseComponent):
 ## 11. 项目结构
 
 ```
-src/fault_core/           纯数值库（数据、预处理、探索、可视化、特征、选择、降维、模型）
+src/fault_core/           纯数值库（18 个模块，见 §7.1；不 import fault_platform）
 src/fault_platform/
   components/             BaseComponent、端口/参数定义、内置组件
   registry.py             组件定义统一来源
   graph.py                ComponentGraph、节点、连接、循环检测、拓扑排序
   runtime.py              ExecutionContext、ExecutionEngine、增量失效、失败传播
   workspace.py            FaultWorkspace、WorkspaceManager、历史、检查点、ArtifactStore
+  streaming.py            分块流式数据集（窗口组件按块消费）
+  events.py               SSE 事件流（网页与 Agent 实时同步）
   xml_io/                 XML 序列化/反序列化与 XSD
   service.py              网页与 MCP 共用的控制 API
   api.py / cli.py         本地 HTTP 服务与命令行
   mcp_server.py           MCP stdio bridge
+  python_export.py        把当前方案导出成可独立运行的 Python 文件
   web/                    可视化编辑器（原生 JS，无构建步骤）
-skills/fault-prediction/  Agent 技能
-examples/                 合成数据、示例 XML、Python API 示例
-docs/                     架构、组件参考、MCP、验证记录
-tests/                    pytest 与 DOM 集成测试
-scripts/                  组件目录导出、浏览器验收脚本
+skills/fault-prediction/  Agent 技能（SKILL.md + 4 份参考）
+examples/                 合成数据、示例 XML、Python API 示例、HBM 多源示例
+docs/                     架构、设计、组件参考、MCP、部署、验证记录
+tests/                    26 个 pytest 文件 + DOM 集成测试
+scripts/                  部署与验收（deploy / verify_deploy / export_release / install_mcp_config /
+                          mcp_smoke / browser_check）与工具脚本（export_catalog / memory_bench /
+                          prepare_hbm_raw / mcp_wait_probe）
 ```
 
 源码注释约定：模块与函数的 docstring 保留英文摘要（与既有代码风格一致），
@@ -657,11 +748,11 @@ scripts/                  组件目录导出、浏览器验收脚本
 ## 12. 验证
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest -q                 # 228 项通过（1 项按可选依赖跳过）
+.\.venv\Scripts\python.exe -m pytest -q                 # 283 项通过（1 项按可选依赖跳过）
 .\.venv\Scripts\python.exe -m ruff check src tests scripts
 .\.venv\Scripts\python.exe -m pip check
 node --check src/fault_platform/web/app.js
-npm ci; npm test                                        # 4 项 DOM 集成测试
+npm ci; npm test                                        # 8 项 DOM 集成测试（jsdom）
 npm run browser-check                                   # Chrome headless 真实浏览器验收
 .\.venv\Scripts\python.exe scripts\mcp_smoke.py --from-config   # MCP 闭环（先启动服务）
 .\.venv\Scripts\python.exe scripts\memory_bench.py --rows 1000000   # 大文件内存基准
@@ -669,26 +760,30 @@ npm run browser-check                                   # Chrome headless 真实
 .\.venv\Scripts\python.exe scripts\export_release.py --build        # 打可交付的部署包
 ```
 
-`npm run browser-check` 会启动临时服务与 Chrome，通过 DevTools 协议验证 16 组检查：组件库渲染、布局尺寸、**组件库折叠与搜索展开**、**分隔条拖拽改变面板宽高、方向跟手、刷新后保持**、**窄窗口下三栏钳制不溢出**、节点与连线绘制、**连线是圆角正交折线（端点误差 ≤1.5px、除圆角外无斜向行程）**、真实指针拖拽持久化、缩放与适应画布、组件放置与参数表单、**Agent 改动实时出现在页面**、**Agent 触发执行时页面显示进度**、方案执行与结果面板、历史与 XML 面板；截图写到 `.fault-platform/screenshots`（`01c`/`01d` 是组件库与分隔条的 3x 放大图，`02b-edges-zoom.png` 是连线折角的 2x 放大图、`04-feature-overview.png` 是特征表概览，供人工目视评审）。
+需要服务在运行的验收（`mcp_smoke` / `verify_deploy` 的端到端部分）请先 `serve`；`--from-config` 还要求 `config.toml` 里已有 `[mcp_servers.fault-prediction]`，没有就先跑 `install_mcp_config.py`。
 
-依赖快照见 `requirements-win-py311.lock`（Windows / Python 3.11 验证环境），`dist/` 内含可安装 wheel。详细结果见 [docs/validation.md](docs/validation.md)。
+`npm run browser-check` 会启动临时服务与 Chrome，通过 DevTools 协议跑 20 组检查：组件库渲染、布局尺寸、**组件库折叠与搜索展开**、**分隔条拖拽改变面板宽高、方向跟手、刷新后保持**、**窄窗口下三栏钳制不溢出**、节点与连线绘制、**连线是圆角正交折线（端点误差 ≤1.5px、除圆角外无斜向行程）**、真实指针拖拽持久化、缩放与适应画布、组件放置与参数表单、**Agent 改动实时出现在页面**、**Agent 触发执行时页面显示进度**、方案执行与结果面板、历史与 XML 面板；截图写到 `.fault-platform/screenshots`（`01c`/`01d` 是组件库与分隔条的 3x 放大图，`02b-edges-zoom.png` 是连线折角的 2x 放大图、`04-feature-overview.png` 是特征表概览，供人工目视评审）。
+
+依赖快照见 `requirements-win-py311.lock`（Windows / Python 3.11 验证环境）；跑过 `export_release.py --build` 之后 `dist/` 里会有可安装 wheel 与部署包。详细结果见 [docs/validation.md](docs/validation.md)。
 
 ---
 
 ## 13. 当前边界与后续计划
 
-首版面向本机单用户开发，已验证：CSV / Parquet 数据源（含列裁剪、行数上限、谓词下推）、**分块流式特征提取**、**按时间切窗与未来视野标签（故障预测）**、图形化 DAG 编辑、以引用为主的 Workspace 与可落盘的缓存、检查点、XML 往返、MCP 控制、分类模型验证。
+面向本机单用户开发，已验证：CSV / Parquet 数据源（含列裁剪、行数上限、谓词下推）、**分块流式特征提取**、**按时间切窗与未来视野标签（故障预测）**、图形化 DAG 编辑、以引用为主的 Workspace 与可落盘的缓存、检查点、XML 往返、MCP 控制（39 个工具）、**方案导出为可独立运行的 Python 文件**、多数据源（入口 `paths` / 画布 `data.concat` / 运行期 `dataset_overrides`）、分类与回归验证、无监督检测与结构变点检测、指数平滑与 ARIMA 预测、交叉验证与超参搜索、**按资产留出**、**训练/测试正负样本比例与类别退化告警**。
 
 尚未包含：
 
 - 跨进程持久化（结果可落盘但元数据仍在内存，重启即丢失）
 - 流式的**全图**处理：只有窗口特征提取与数据概览支持分块，模型的训练样本仍需一次性驻留（特征表本身已经小得多）；单组行数极大（例如单个设备上百万行）时该组仍需整体缓冲
 - 增量/流式摄取、数据库或时序库数据源（当前是文件型 CSV / Parquet）
-- RUL、生存分析与回归任务（当前是分类验证）
+- RUL / 剩余寿命与生存分析（有回归验证器与 ARMA/ARIMA，但都不是"到失效还剩多久"的寿命模型）
 - 远程多用户、鉴权、分布式队列与生产部署
-- 预测已支持"用历史时间窗口预测未来视野内是否故障"（`window_span` + `label_policy=horizon`，见 §4.4）；**还没有**的是按故障类型分别设视野（例如"2 天内会不会发生水合物"），以及把"视野内没有任何故障样本"这类退化情形做成显式警告（现在由 agent 自己看正类比例）
+- 预测支持"用历史时间窗口预测未来视野内是否故障"（`window_span` + `label_policy=horizon`，见 §4.4），也支持把窗口自身已故障的样本按 `drop`/`positive`/`negative` 处理并计数；**还没有**的是按故障类型分别设视野（例如"2 天内会不会发生水合物"）
 
-规划中的扩展：按行数上限的分组缓冲（把超大单组也切成流式）、小波 / STFT / 变点特征、交叉验证与超参数搜索、参数面板基于上游列元数据的自动补全。
+关于"退化情形"的说明：窗口层面的丢弃（自身已故障、视野超出数据）会写进 `attrs` 与节点警告；切分层面的类别缺失（测试集一个正类都没有）会写进 `metrics.warnings`；标签本身的失衡（正类低于 10%）会写进概览的 `label_distribution.findings`。三处都不静默。
+
+规划中的扩展：按行数上限的分组缓冲（把超大单组也切成流式）、STFT / 时频图特征、参数面板基于上游列元数据的自动补全。
 
 ---
 
@@ -697,6 +792,7 @@ npm run browser-check                                   # Chrome headless 真实
 - [总体架构](docs/architecture.md)：对象职责、边界、数据流与实现约定
 - [项目设计文档](docs/design.md)：完整设计（对象模型、执行语义、端口/参数系统、XML、UI、MCP、领域约定、ADR）
 - [组件与参数参考](docs/components.md)：88 个组件的端口与参数表
+- [完整组件清单](docs/完整组件.md)：按能力分组的中文说明（含"什么时候不该用"），另有机器可读的 [component-registry.json](docs/component-registry.json)
 - [MCP 接入](docs/mcp.md)：bridge 配置与调用约定
 - [Agent Skill](skills/fault-prediction/SKILL.md)：Agent 搭方案的专业流程
 - [验证记录](docs/validation.md)：测试、浏览器验收与首版边界

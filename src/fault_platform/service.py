@@ -27,6 +27,7 @@ from threading import Event, RLock
 from typing import Any
 from uuid import uuid4
 
+import pandas as pd
 from pydantic import ValidationError, validate_call
 
 from fault_platform.events import EventBus, Subscription
@@ -35,6 +36,7 @@ from fault_platform.graph import ComponentGraph, Connection
 from fault_platform.python_export import render_python, slugify
 from fault_platform.registry import ComponentRegistry, default_registry
 from fault_platform.runtime import ExecutionContext, ExecutionEngine
+from fault_platform.streaming import StreamedDataset
 from fault_platform.version import PLATFORM_VERSION
 from fault_platform.workspace import FaultWorkspace, PipelineStatus, WorkspaceManager, json_safe
 from fault_platform.xml_io import XMLParser, XMLSerializer
@@ -84,6 +86,13 @@ CONTROL_OPERATIONS = (
 
 #: Operations that block on purpose; they must not hold the service lock.
 BLOCKING_OPERATIONS = frozenset({"wait_for_pipeline"})
+
+#: 运行终态：出现其中之一就说明这次运行已经结束，等待方可以停了。
+TERMINAL_STATUSES = (PipelineStatus.SUCCESS, PipelineStatus.FAILED, PipelineStatus.CANCELLED)
+
+#: 单次 CSV 导出的默认行数上限。够本地核对，又不至于"点一下"就把内存和浏览器打满；
+#: 传 ``max_rows=0`` 表示不截断（调用方自己承担体积）。
+DEFAULT_EXPORT_ROWS = 200_000
 
 
 class PipelineService:
@@ -848,23 +857,49 @@ class PipelineService:
 
         ``timed_out`` is set when the deadline passes so an agent can decide to keep
         waiting, cancel, or inspect partial results.
+        ``started`` is False when nothing is in flight at all — then this returns
+        **immediately** instead of burning the timeout, because waiting cannot change
+        anything (a run that was never started, or one invalidated by a graph edit).
 
         中文说明：这是唯一会阻塞的操作，因此**不持有全局锁**（见模块文档）。
         轮询间隔限制在 0.05~5 秒：太密空转，太稀会让短任务白等。
         超时不是错误——返回 ``timed_out=True`` 与当前状态，让调用方自行决定继续等、
         取消，还是先看部分结果。
+
+        为什么还要看"有没有在途任务"：调用方漏看 ``execute_pipeline`` 的返回值是常见事故
+        （它可能因图未完成、参数缺失而根本没启动）。只等状态的话，一个从未启动的方案会让
+        ``wait_for_pipeline`` 白等满超时（默认 300 秒）才返回 ``timed_out``——那是纯粹的浪费，
+        而且掩盖了真正的问题。所以"没有在途任务且状态非终态"直接返回，并带上原因。
         """
         self._graph(pipeline_id)
         deadline = time.monotonic() + max(0.0, float(timeout_seconds))
         interval = max(0.05, min(float(poll_seconds), 5.0))
         while True:
-            summary = self.get_pipeline_status(pipeline_id, workspace_id)
-            if summary.get("status") in {"SUCCESS", "FAILED", "CANCELLED"}:
-                return {**summary, "timed_out": False}
+            # 状态与"在途任务"必须在同一把锁下取：execute_pipeline 也是在锁内先置 RUNNING
+            # 再提交任务，所以这里不会读到"已经开始但看起来没在跑"的中间态。
+            # 本方法本身仍不在锁里 sleep（见模块文档），只在这一小段拿锁。
+            with self.lock:
+                summary = self.get_pipeline_status(pipeline_id, workspace_id)
+                job = self.jobs.get(pipeline_id)
+                in_flight = job is not None and not job.done()
+            if summary.get("status") in TERMINAL_STATUSES:
+                return {**summary, "timed_out": False, "started": True}
+            if not in_flight:
+                return {
+                    **summary,
+                    "timed_out": False,
+                    "started": False,
+                    "warnings": [
+                        *summary.get("warnings", []),
+                        f"Nothing is running for this pipeline (status={summary.get('status')}); "
+                        "call execute_pipeline and check its result — waiting would not change anything.",
+                    ],
+                }
             if time.monotonic() >= deadline:
                 return {
                     **summary,
                     "timed_out": True,
+                    "started": True,
                     "timeout_seconds": timeout_seconds,
                 }
             time.sleep(interval)
@@ -982,6 +1017,189 @@ class PipelineService:
         if include_code:
             payload["code"] = source
         return payload
+
+    def _node_data_items(self, pipeline_id: str, node_id: str) -> list[dict[str, Any]]:
+        """列出某个节点两侧的表格产物：**输入侧**是上游端口，**输出侧**是本节点的端口。
+
+        为什么输入侧要沿着边去上游取：workspace 只保存每个节点的**输出**；组件这次收到的
+        输入在运行时是上游产物的一份副本，而图里那条边就是它的来源。所以"这个组件吃的是什么"
+        等于"上游那个端口产出了什么"，这比事后补录一份输入更不容易和实际执行对不上。
+
+        非表格产物（``Metrics`` / ``Visualization`` / ``Model`` …）不进清单：它们导不出 CSV，
+        列出来只会让人以为丢了东西。流式产物单独标注，因为导出等于物化。
+        """
+        graph = self._graph(pipeline_id)
+        node = graph.get_node(node_id)
+        ws = self._workspace(pipeline_id)
+        if ws.metadata.get("graph_changed"):
+            raise ValueError("Graph changed; run the pipeline to refresh results before exporting")
+        items: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for edge in graph.edges:
+            if edge.target_node != node_id:
+                continue
+            key = (edge.source_node, edge.source_port)
+            if key in seen:  # 同一个上游端口分叉到两个输入口时只列一次
+                continue
+            seen.add(key)
+            item = self._describe_artifact(ws, edge.source_node, edge.source_port, "input", edge.target_port)
+            if item:
+                items.append(item)
+        for port in node.component.output_ports:
+            item = self._describe_artifact(ws, node_id, port.name, "output", port.name)
+            if item:
+                items.append(item)
+        return items
+
+    @staticmethod
+    def _describe_artifact(
+        ws: FaultWorkspace, owner: str, owner_port: str, direction: str, port: str
+    ) -> dict[str, Any] | None:
+        """把一个端口上的产物描述成"可不可导、多大"；非表格返回 None。"""
+        base: dict[str, Any] = {
+            "direction": direction,
+            "port": port,
+            "owner": owner,
+            "owner_port": owner_port,
+        }
+        try:
+            value = ws.get_output(owner, owner_port, copy=False)
+        except ValueError:
+            return {
+                **base,
+                "available": False,
+                "kind": "unavailable",
+                "reason": f"{owner}.{owner_port} has no result; run the pipeline first",
+            }
+        if isinstance(value, StreamedDataset):
+            return {
+                **base,
+                "available": False,
+                "kind": "streamed",
+                "reason": "Streamed artifacts are read in chunks; insert data.materialize to export them.",
+            }
+        if isinstance(value, pd.Series):
+            return {
+                **base,
+                "available": True,
+                "kind": "vector",
+                "rows": int(len(value)),
+                "columns": [str(value.name) if value.name is not None else "value"],
+            }
+        if isinstance(value, pd.DataFrame):
+            return {
+                **base,
+                "available": True,
+                "kind": "table",
+                "rows": int(len(value)),
+                "columns": [str(name) for name in value.columns],
+            }
+        return None
+
+    @staticmethod
+    def _as_frame(value: Any) -> pd.DataFrame:
+        """把产物变成可写 CSV 的表：Series 补一列，DataFrame 原样。"""
+        if isinstance(value, pd.Series):
+            return value.to_frame(name=value.name if value.name is not None else "value")
+        return value
+
+    @staticmethod
+    def _index_is_informative(index: Any) -> bool:
+        """行索引要不要写进 CSV。
+
+        特征表的索引是窗口键（``g3_w1080``），那是排查"这行特征来自哪段数据"的唯一线索，
+        必须留下；CSV 读进来的普通行号（RangeIndex 从 0 开始步长 1）留了只是多一列重复。
+        过滤之后的行号（原表里的第几行）算有信息，也留下——否则"哪几行活下来了"就查不到。
+        """
+        if isinstance(index, pd.RangeIndex):
+            return not (index.start == 0 and index.step == 1)
+        return len(index) > 0
+
+    def list_node_data(self, pipeline_id: str, node_id: str) -> dict[str, Any]:
+        """列出该节点可导出的表格产物（输入侧 + 输出侧），供网页渲染"导出 CSV"入口。
+
+        这是**文件级**接口，不进 ``CONTROL_OPERATIONS``：它服务于"人来点"，不代表一种
+        可编程的控制动作，也不该变成第 40 个 MCP 工具。
+        """
+        self._graph(pipeline_id).get_node(node_id)
+        ws = self._workspace(pipeline_id)
+        items = self._node_data_items(pipeline_id, node_id)
+        return {
+            "pipeline_id": pipeline_id,
+            "workspace_id": ws.workspace_id,
+            "node_id": node_id,
+            "data": items,
+            "default_max_rows": DEFAULT_EXPORT_ROWS,
+            "warnings": [item["reason"] for item in items if not item["available"]],
+        }
+
+    def export_node_data(
+        self,
+        pipeline_id: str,
+        node_id: str,
+        direction: str = "output",
+        port: str | None = None,
+        max_rows: int = DEFAULT_EXPORT_ROWS,
+    ) -> dict[str, Any]:
+        """把某节点某一侧的表格产物导出成 CSV 文本（本地用 Excel / pandas 核对）。
+
+        ``direction``：``output`` 导本节点的产物，``input`` 导上游喂给它的那份数据；
+        ``port`` 留空时取该侧第一个可导的表格。``max_rows<=0`` 表示不截断。
+
+        返回体里 ``truncated``/``total_rows`` 与 ``rows`` 一起给：截断了就说截断了，
+        而不是让人拿一个"看起来完整"的文件去下结论。
+        """
+        if direction not in {"input", "output"}:
+            raise ValueError("direction must be 'input' or 'output'")
+        graph = self._graph(pipeline_id)
+        graph.get_node(node_id)  # 先确认节点存在，报错才指向"节点不存在"而不是"没有数据"
+        items = self._node_data_items(pipeline_id, node_id)
+        candidates = [item for item in items if item["direction"] == direction]
+        if direction == "input" and port:
+            # 输入侧指的是**目标端口**（这个组件用哪个入口收下的），所以按 port 过滤。
+            candidates = [item for item in candidates if item["port"] == port]
+        elif direction == "output" and port:
+            candidates = [item for item in candidates if item["port"] == port]
+        usable = [item for item in candidates if item["available"]]
+        if not usable:
+            if candidates:
+                raise ValueError(f"No exportable data on the {direction} side: {candidates[0]['reason']}")
+            exportable = [item["port"] for item in items if item["direction"] == direction]
+            if port and exportable:
+                # 端口写错时要能一眼看出"这个口为什么不在列表里"，而不是笼统的"没有数据"。
+                raise ValueError(
+                    f"{direction} port {port!r} on {node_id} is not an exportable table; "
+                    f"exportable {direction} ports: {exportable}"
+                )
+            raise ValueError(f"Node {node_id} has no exportable data on the {direction} side")
+        chosen = usable[0]
+        value = self._workspace(pipeline_id).get_output(chosen["owner"], chosen["owner_port"], copy=False)
+        frame = self._as_frame(value)
+        total = int(len(frame))
+        limit = int(max_rows or 0)
+        truncated = limit > 0 and total > limit
+        if truncated:
+            frame = frame.iloc[:limit]
+        keep_index = self._index_is_informative(frame.index)
+        # 索引没有名字时补一个列名：否则表头第一格是空的，打开的人得猜那列是什么。
+        # 有名字（如 window_id）时不能用 index_label，否则会把原名顶掉。
+        label = None if (not keep_index or frame.index.name) else "row_id"
+        csv = frame.to_csv(index=keep_index, index_label=label)
+        return {
+            "pipeline_id": pipeline_id,
+            "node_id": node_id,
+            "direction": direction,
+            "port": chosen["port"],
+            "source_node": chosen["owner"],
+            "source_port": chosen["owner_port"],
+            "rows": int(len(frame)),
+            "total_rows": total,
+            "truncated": truncated,
+            "columns": [str(name) for name in frame.columns],
+            "filename": f"{slugify(graph.name, pipeline_id)}_{node_id}_{direction}_{chosen['port']}.csv",
+            # 带 BOM：Windows 上双击用 Excel 打开中文列名不会乱码；pandas 读它也会自动识别。
+            "csv": "\ufeff" + csv,
+        }
 
     def get_history(
         self, pipeline_id: str, workspace_id: str | None = None, limit: int = 100

@@ -9,7 +9,8 @@
 * 工具签名照抄服务方法的类型注解（``get_type_hints``），客户端因此能看到参数名与类型；
 * 工具描述取 :data:`DESCRIPTIONS`，**每个操作都必须有一条**——没有描述时兜底生成的一句
   "Wait For Pipeline." 等于让 Agent 靠猜，``tests/test_mcp_bridge.py`` 会守住这条；
-* **超时按工具区分**：``wait_for_pipeline`` 会阻塞到服务端等满 ``timeout_seconds``，
+* **超时按工具区分**：``wait_for_pipeline`` 会阻塞到服务端等满 ``timeout_seconds``
+  （没有在途任务时立即返回 ``started=false``，不再空等，见服务端 docstring），
   所以客户端超时必须跟着这个参数走（默认 300 s），其余操作 60 s。
   早期版本一律 60 s，于是真实数据上跑两分钟的任务会在第 60 秒被误报成"服务不可达"
   （实测 60.2 s 返回 CONTROL_API_UNAVAILABLE、服务端仍在 RUNNING，见
@@ -67,7 +68,7 @@ DESCRIPTIONS = {
     "retry_node": "Retry a failed node and its descendants.",
     "cancel_pipeline": "Stop a running pipeline and keep the partial workspace.",
     "get_pipeline_status": "Overall status, per-node status, warnings and errors. This is the polling call while a run is in flight.",
-    "wait_for_pipeline": "Block until the run reaches a terminal status (default timeout_seconds=300). On real datasets this can take minutes; a long wait is not evidence that the service died.",
+    "wait_for_pipeline": "Block until the run reaches a terminal status (default timeout_seconds=300). Returns immediately with started=false if nothing is running (never started, or invalidated by a graph edit) instead of burning the timeout. On real datasets a long wait is not evidence that the service died.",
     "get_node_result": "Return bounded preview, metadata and artifact references, never a full dataset or model.",
     "get_pipeline_result": "Return bounded node summaries and metrics.",
     "get_history": "Per-node attempts with timings and the cached flag.",

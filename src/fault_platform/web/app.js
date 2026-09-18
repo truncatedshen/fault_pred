@@ -896,6 +896,63 @@ function labelDistributionView(d) {
   return '<h4 class="metric-title">标签构成（' + esc(String(d.source)) + "）" + headline + "</h4>" +
     table(rows) + (d.findings || []).map((f) => '<div class="warning">' + esc(f) + "</div>").join("");
 }
+/* 导出该节点的中间产物：输入侧=上游喂给它的数据，输出侧=它自己产出的表。
+   走的是 /api/node-data 这对文件级接口，浏览器直接下载，不用把大表塞进 JSON 响应。 */
+function exportUrl(row, nodeId, extra = {}) {
+  const query = new URLSearchParams({
+    pipeline_id: state.graph.id, node_id: nodeId,
+    direction: row.direction, port: row.port, ...extra,
+  });
+  return "/api/node-data/csv?" + query.toString();
+}
+function exportView(spec, nodeId) {
+  const usable = (spec.data || []).filter((row) => row.available);
+  if (!usable.length) {
+    const blocked = (spec.data || []).filter((row) => !row.available);
+    if (!blocked.length) return "";
+    return '<section class="result-port export-block"><h3>导出数据（CSV）</h3>' +
+      blocked.map((row) => '<div class="export-row"><div>' + exportLabel(row) +
+        '</div><span class="metric-note">' + esc(row.reason || "不可导出") + "</span></div>").join("") +
+      "</section>";
+  }
+  const rows = spec.data.map((row) => {
+    const label = exportLabel(row);
+    if (!row.available) {
+      return '<div class="export-row">' + label +
+        '<span class="metric-note">' + esc(row.reason || "不可导出") + "</span></div>";
+    }
+    const size = row.rows.toLocaleString() + " 行 × " + row.columns.length + " 列";
+    const cap = spec.default_max_rows || 0;
+    const big = cap > 0 && row.rows > cap;
+    const buttons = ['<a class="export-button" download href="' +
+      esc(exportUrl(row, nodeId, big ? {max_rows: cap} : {})) + '">' +
+      (big ? "下载前 " + cap.toLocaleString() + " 行" : "下载 CSV") + "</a>"];
+    if (big) buttons.push('<a class="export-button muted" download href="' +
+      esc(exportUrl(row, nodeId, {max_rows: 0})) + '">全部 ' + row.rows.toLocaleString() + " 行</a>");
+    return '<div class="export-row"><div>' + label +
+      ' <span class="metric-note">' + size + "</span></div><div>" + buttons.join("") + "</div></div>";
+  }).join("");
+  return '<section class="result-port export-block"><h3>导出数据（CSV）</h3>' +
+    '<p class="metric-note">在本机用 Excel / pandas 核对这一层的中间产物：' +
+    "输入侧 = 上游喂给它的数据，输出侧 = 它自己产出的表。UTF-8 with BOM，特征表保留窗口键索引。</p>" +
+    rows + "</section>";
+}
+function exportLabel(row) {
+  const side = row.direction === "input" ? "输入" : "输出";
+  const owner = row.direction === "input" && row.owner !== state.exportNode ?
+    '<span class="metric-note"> 来自 ' + esc(row.owner) + " · " + esc(row.owner_port) + "</span>" : "";
+  return '<span class="export-tag ' + row.direction + '">' + side + "</span>" +
+    "<code>" + esc(row.port) + "</code>" + owner;
+}
+async function nodeDataView(nodeId) {
+  try {
+    const query = new URLSearchParams({pipeline_id: state.graph.id, node_id: nodeId});
+    const response = await fetch("/api/node-data?" + query.toString());
+    const spec = await response.json();
+    if (!response.ok || !spec.data) return "";
+    return exportView(spec, nodeId);
+  } catch (e) { return ""; }
+}
 function chart(spec) {
   const width = 660, height = 190, colors = ["#527edf", "#21a992", "#d5a353", "#ad7ecb", "#e08585"];
   const series = (spec.series || []).slice(0, 12);
@@ -992,6 +1049,8 @@ async function showResult() {
           return '<section class="result-port"><h3>' + esc(port) + "</h3>" + content + "</section>";
         }).join("");
       if (!html) html = '<div class="empty-result">此节点尚无有效输出。配置参数后运行方案。</div>';
+      // 导出入口单独取一次：拿不到就静默省略，绝不让它把已经渲染好的结果顶掉。
+      html += await nodeDataView(node.id);
     } else html = '<div class="empty-result"><span>◈</span>点击节点查看中间数据、特征、图形与模型指标。</div>';
   } catch (error) {
     html = '<div class="empty-result">' + esc(error.message.includes("not been executed") ? "方案尚未执行。" : error.message) + "</div>";

@@ -107,6 +107,19 @@ test("example executes and renders actual model metrics and charts", async () =>
   assert.match(metricsText, /占比/);
   app.state.selected = new Set(["line"]); await app.showResult();
   assert.ok(window.document.querySelector("svg.chart"));
+  // 点含数据的节点时，结果面板要给出"导出 CSV"入口，而且链接真的能下到文件。
+  app.state.selected = new Set(["stat"]); await app.showResult();
+  const exportBlock = window.document.querySelector(".export-block");
+  assert.ok(exportBlock, "节点结果面板应出现导出数据入口");
+  const links = [...exportBlock.querySelectorAll("a.export-button")];
+  assert.ok(links.length >= 2, "输入侧与输出侧都应可导出");
+  for (const link of links) assert.match(link.getAttribute("href"), /\/api\/node-data\/csv\?/);
+  const outputLink = links.find((a) => a.closest(".export-row").querySelector(".export-tag.output"));
+  assert.ok(outputLink, "输出侧应有导出链接");
+  const download = await fetch(new URL(outputLink.getAttribute("href"), origin));
+  assert.ok(download.ok, "导出链接应当真的返回文件");
+  assert.match(download.headers.get("content-type"), /text\/csv/);
+  assert.match(await download.text(), /window_id/);
   // 数据概览也要报正负样本比例（示例图的 overview 配了 label_column）。
   app.state.selected = new Set(["overview"]); await app.showResult();
   const overviewText = window.document.querySelector("#result-content").textContent;

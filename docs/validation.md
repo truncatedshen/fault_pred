@@ -726,6 +726,127 @@ data.input(c.csv) ─┘   first / second（必填）+ third / fourth（可选�
 `docs/components.md` 与 `docs/component-registry.json` 重生成（`visual.overview` 多一个可选输入端口与一个参数）。
 文档同步：skill `SKILL.md` §12.8、`references/stages.md` 指标字典与阶段 5、`references/components.md` 可视段。
 
+## 第二十五轮：点节点导出中间数据为 CSV（2026-09-17）
+
+触发原因：使用反馈"增加校验机制：点击含有数据的组件时，可以把它这一层的数据导出为 CSV 供我本地检查"。核心诉求是**把中间产物交到人手里**——页面上只有 20 行预览，工程师要拿真实文件去 `pandas` / Excel 里核对，才能判断 Agent 的结论站不站得住。
+
+实现分两层，刻意不做成一个控制操作：
+
+| 层 | 内容 |
+| --- | --- |
+| `PipelineService.list_node_data` / `export_node_data` | 解析"这一层的数据"并产出 CSV 文本 |
+| `GET /api/node-data`、`GET /api/node-data/csv` | 清单与附件下载（文件级接口，与 `/api/data` 同级） |
+
+几个决定与理由：
+
+| 决定 | 理由 |
+| --- | --- |
+| **输入侧沿边去上游取**，而不是让组件补录一份输入 | workspace 只保存每个节点的输出；组件这次收到的输入在运行时就是上游产物，"图里那条边"是它的唯一来源。补录会存在两套说法不一致的可能 |
+| 是文件级接口，**不进 `CONTROL_OPERATIONS`** | 该表里的每一项都会自动变成 MCP 工具。这是"人来点"的动作，不该把工具数从 39 变成 41；Agent 照旧用 `get_node_result` 读有界预览 |
+| 行索引**有信息才写**，且补列名 | 窗口特征表的索引是窗口键（`window_id`，能追回原始行），过滤后的表写 `row_id`（原表行号）；普通 0…N-1 不写。没名字的索引列会让表头第一格是空的 |
+| UTF-8 **with BOM** | Windows 上双击用 Excel 打开中文列名会乱码；`pandas.read_csv` 对 BOM 无感 |
+| 默认 20 万行上限，`max_rows=0` 才全量 | 一个手滑的点击不该把服务内存与浏览器一起打满；截断与否用 `X-Rows`/`X-Total-Rows`/`X-Truncated` 三个响应头如实标注，页面上按钮文案也跟着变 |
+| 非表格产物**列进清单但标成不可导** | `Metrics`/`Visualization`/`Model` 导不出 CSV，直接说明比"列表里没有它"更不容易让人以为丢了东西 |
+| 流式产物单独提示 `data.materialize` | 流式本来就是"按块读、不落地"，导出等于物化。给一个不完整的文件比拒绝更糟 |
+| 图改过而没重算时**拒绝导出** | 与 `get_node_result` 同一套 `graph_changed` 语义：宁可让人重跑，也不能把上一版图算出的表当成当前的发出去 |
+
+验收：新增 `tests/test_node_data_export.py` **9 项**（清单含输入侧与输出侧、特征表保留 `window_id`、输入侧行数与上游一致、截断被如实上报、`max_rows=0` 全量、未执行/未知节点/端口不是表的报错文案、编辑后拒绝旧结果、流式产物提示、导出不占 MCP 工具名额），前端 jsdom 集成测试补了"结果面板出现导出入口且链接真的能下到 `text/csv`"。
+全量 `pytest` **269 passed / 1 skipped**；`ruff check` + `format --check` 通过；DOM 集成测试 8/8。
+文档同步：README §1.3、新增 §2.7、`src/fault_platform/api.py` 模块 docstring。
+
+顺带记录一个**当时没有改**的观察（**第二十六轮已修**）：`wait_for_pipeline` 对"从未启动过"的方案会一直等到超时——实测 `execute_pipeline` 失败后调用它，白等满 `timeout_seconds`。
+
+## 第二十六轮：`wait_for_pipeline` 不再为空转的方案白等（2026-09-17）
+
+触发原因：上一轮记录的观察。`wait_for_pipeline` 只看状态是否终态，不看"到底有没有东西在跑"。于是**漏看 `execute_pipeline` 返回值的调用方**（很常见：图没完成、参数缺失时它返回 `success=false` 而图根本没启动）会白等满超时——实测在一次 `Pipeline is empty` 之后空等 180 秒，默认值下是 300 秒。它最后会如实返回 `timed_out: true`，不算错误，但把"我根本没开始跑"伪装成了"跑得很慢"。
+
+修法：在**同一把锁下**取一次"状态 + 有没有在途任务"，三个分支各自返回：
+
+| 情况 | 返回 |
+| --- | --- |
+| 状态已终态（`SUCCESS`/`FAILED`/`CANCELLED`） | `timed_out=false, started=true`，行为不变 |
+| **没有在途任务且状态非终态** | **立刻返回** `timed_out=false, started=false`，并附一条警告写明当前状态、让你回去看 `execute_pipeline` 的返回值 |
+| 有在途任务但超时 | `timed_out=true, started=true`，行为不变 |
+
+两个设计点：
+
+| 决定 | 理由 |
+| --- | --- |
+| 判据是"**没有在途任务**"（`jobs` 里没有条目，或 Future 已完成），不是"状态看起来像没跑" | `execute_pipeline` 是在锁内**先置 RUNNING、再提交任务**，所以不存在"状态 RUNNING 但还没有任务"的窗口；反过来只按状态判断会在"刚提交尚未置位"时误判 |
+| 取快照那一小段仍拿锁，sleep 仍在锁外 | 既避免读到中间态，又不破坏"唯一不持锁阻塞"的既有约定（网页刷新不会被等待卡住） |
+
+验收：`tests/test_agent_ergonomics.py` 新增 2 项——「没在途任务时立刻返回（从未启动 / 改图失效两种，且真的没等）」与「有在途任务时超时语义不变（用永不结束的任务替身确定性触发）」。实测：从未启动 180 秒 → **0.00 秒**；正常跑一次仍在 1.0 秒内等到 `SUCCESS`；改图后同样 0.00 秒返回 `started=false`。全量 `pytest` **271 passed / 1 skipped**。
+
+文档同步：`service.wait_for_pipeline` docstring、MCP 工具描述（`mcp_server.DESCRIPTIONS`）与模块说明、`docs/design.md`、skill `SKILL.md` §0.5 与 `references/troubleshooting.md` 执行段、README §6.3。
+
+## 第二十七轮：把"流程里最贵的三处"写进 skill，并补上 `distinct_count`（2026-09-18）
+
+触发原因：用户拿自己的《故障预测流程提示词》来问"这个流程合理吗"。逐条对照后，有三处是**流程缺口**（不是措辞问题），它们在这份仓库的真实数据上都已经造成过错误结论；另外有一处是**平台能力缺口**——流程要求"标识列用集合数数"，而平台算不出来。
+
+### 平台侧：`feature.statistical` 新增 `distinct_count`（第 36 个统计量）
+
+窗口内**不同取值个数**。为什么不是"用 `mean` 就够了"：HBM 的 `stack/row/col/bank_group` 是十六进制地址，把它们当物理量算均值，等价于把坐标当温度。实测这些列在窗口内往往恒定——`data.quality` 报出 **`pcid` 在 98% 的窗口里只有一个取值**，于是它们整体退化成"每台服务器的身份指纹"：全量上 `bank_group__max` 的单特征 AUC **0.849**，真正留出的时间切分只有 **0.609**，差值就是"认出是哪台机器"。
+
+而地址里确实有物理信息："这段时间错误落到多少个不同的 bank / col 上"就是空间扩散程度。`distinct_count` 把它变成可算的量。它等价于 `count × (1 - duplicate_point_ratio)`——单独放进枚举是因为调用方要在 `features` 里**直接选到它**，而不是自己拼算术。
+
+三个边界写进了文档与测试：只该用在整数/离散编码列上（连续量每个取值都不同，它恒等于 `count`）；恒定窗口上返回 1 且有限；流式与批量逐位一致。**MCP 不需要改**：`features` 的选项来自 `features.STATISTICS`，组件 schema 自动带上——实测工具数仍是 39，`get_component_schema("feature.statistical")` 返回 36 个选项且含 `distinct_count`。
+
+顺带记录一个**发现但没改**的边界：`feature.categorical` 的 one-hot/frequency 是**行级**产物，而 `feature.statistical` 的输入端口只吃 `Dataset`，所以"行级编码出来的列"没有任何办法再进窗口聚合（`feature.merge` 也会因行数与来源不一致而拒绝）。要么用 `distinct_count` 走窗口路径，要么以后让窗口组件接受 `FeatureDataset`——后者是接口语义变更，留待决定。
+
+### skill 侧：三处流程缺口 + 两处收尾
+
+| 缺口 | 为什么它贵 | 写进 skill 的位置 |
+| --- | --- | --- |
+| **标识列没有处置办法** | 判据写在数据处理、处置写在特征提取，中间隔一整个探索阶段；不报错，只会让模型去学"这是哪台机器" | §2 列角色三分类表（数值/标识/类别 + 处置），细节在 `references/stages.md` 阶段 1 |
+| **没有"正类可行性"闸门** | HBM 实测：50 台里只有 9 台能切出合格窗口、41 个正类全来自 2 台；按服务器留出时测试集 155 个窗口里 **0 个正类**，accuracy 1.0 纯属假象 | §4 新增"正类可行性预检"（四个必报的数 + 三条停止线），细节在 `references/stages.md` 阶段 3 |
+| **验证目标定反了** | "按训练与测试效果调参、使精准率召回率最高" = 拿测试集调参；而且稀有故障上追 precision/recall 会得到 `miss_rate=1.0`、`accuracy=0.94` 的模型 | §6 新增三条：调参与评估分开（`grid_search.best_score` 是交叉验证分）、稀有故障看 PR-AUC 与"给定误报预算下的召回"、先报类别占比再报分数 |
+| 流程是纯线性的 | 真实数据上必然回退：窗口切不出来、模型全判正常、平窗口 100%、训练远高于留出 | §0.7 末尾加"回退规则"表（发现 → 退回哪一步） |
+| 数据可视化被当成一次性可选阶段 | 要看的不是只有原始列，**特征表**才是中间产物证据 | §12.8 早已要求挂 `visual.overview` 到特征分支；本轮在 §0.7 的回退表里把它接上（含"导出 CSV 给人核对"） |
+
+用户原稿里做得好、**没有改**的地方也值得一提，避免下一轮被"优化"掉：实体列可能是多列组合、要求逐实体查重复行、要求"总数/训练集/测试集三处都统计正负样本与实体数"——最后一条正是所有假象的解药。
+
+### 验收
+
+新增 `tests/test_identifier_columns.py` **5 项**（`distinct_count` 数的是类别不是行数、等价于 `count × (1 - duplicate_point_ratio)`、流式与批量一致、schema 里真的暴露且总数 36、恒定窗口上有限）；`tests/test_component_gap_closure.py` 的统计量总数断言 35 → 36 并补了可手算的期望值。
+全量 `pytest` **276 passed / 1 skipped**；`ruff check` + `format --check` 通过；`docs/components.md` 与 `component-registry.json` 重生成；skill 的 `SKILL.md`（402 行，上限 420）与 `references/stages.md`、`references/components.md` 同步，`tests/test_skill_guide.py` 23 项全过。
+
+## 第二十八轮：打通"先编码、再按窗口聚合"（2026-09-18）
+
+触发原因：第二十七轮记下的边界——`feature.categorical` 的 one-hot/frequency 是**行级**产物，而窗口组件只吃 `Dataset`，于是"行级编码出来的列"没有任何办法再进窗口聚合；`feature.merge` 也合不了（行数与来源对不上）。用户要求把它修好。
+
+### 修法：两半，缺一不可
+
+| 改动 | 为什么必须 |
+| --- | --- |
+| 四个窗口组件（`feature.statistical` / `fitting` / `spectral` / `entropy`）的输入端口新增 `accepts=(FeatureDataset,)` | 运行期两者都是 DataFrame，窗口逻辑只关心 `columns`/`group_column`/`time_column` 这些列名——类型限制是多余的 |
+| `feature.categorical` / `feature.categorical_transform` 新增 `keep_columns` | **只放宽端口是不够的**：编码输出只剩编码列，实体/时间/标签列全被丢掉，窗口组件连分组列都找不到（实测报 `Missing columns: [...]`）。把这几列原样带过去，窗口才有得可依 |
+
+改完之后这条链可以端到端跑通，并且独热列的 `mean` 恰好就是**窗口内的类别占比**（测试里手算核对过：实体 A 的窗口里 3/4/5 各出现 2/3/3 次，窗口均值就是 2/8、3/8、3/8）：
+
+```
+data.input → feature.categorical(columns=["stack"], method="onehot",
+                                  keep_columns=["entity","time","label"])
+           → feature.statistical(columns=["stack_3","stack_4",…], features=["mean","count"],
+                                 group_column="entity", time_column="time", label_column="label")
+           → validation.*
+```
+
+### 几个刻意的决定
+
+| 决定 | 理由 |
+| --- | --- |
+| `keep_columns` 默认空，空时不改变任何现有行为 | 编码表直接喂模型是主流用法（列越少越干净），不能让新参数改变它 |
+| 带过去的列**写进 `evaluation_warnings`**，同时在节点上给一条警告 | 这是本轮唯一的真实风险：把 `label` 带过去又直接接验证组件就是标签泄漏。平台的规矩是"能做，但风险必须一路可见"——警告会随 attrs 进模型 `metrics["warnings"]` |
+| 只放宽**窗口组件**，`data.quality` 与 `feature.select` 保持只吃 `Dataset` | 与既有纪律一致：宽容只给确实需要的接收端。质量预检的意义就在原始表上；`feature.select` 本来就要求数值列 |
+| 列必须存在、不能与编码列重名、索引必须对齐 | 三条都是"静默出错"的入口：重名会覆盖编码结果，索引不对齐 pandas 会悄悄填 NaN |
+| skill 里同时给出一条更省事的建议 | 只问"窗口内**有几类**"时不需要编码，直接用原始列的 `distinct_count`（第二十七轮加的）；这一圈只在要"**各占多少**"时才值得走 |
+
+### 验收
+
+新增 `tests/test_categorical_windowing.py` **7 项**：四个窗口组件接受 `FeatureDataset` 而 `data.quality`/`feature.select` 不放宽、独热均值等于窗口内类别占比（含标签按窗口对齐）、`keep_columns` 的警告同时出现在节点与 attrs 里、整条链到模型仍不泄漏（窗口特征列全是 `__mean`/`__count`，没有 entity/time/label）、缺列与重名列各自报错、不带走列时报的是 `Missing columns` 而不是给出错的结果、空 `keep_columns` 是 no-op。
+
+全量 `pytest` **283 passed / 1 skipped**（端口放宽没有引起任何回归）；`ruff check` + `format --check` 通过；`docs/components.md` 与 `component-registry.json` 重生成（含 `keep_columns` 与新的 `accepted_types`）；skill 的 `SKILL.md`（403 行，上限 420）在阶段 4 的"被强制的规则"里加了这条配方，细节写进 `references/stages.md` 与 `references/components.md`。
+
 ## 首版边界
 
 - 核心工程和入口完整；单 DAG 串行调度，两个独立方案可同时执行。

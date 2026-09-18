@@ -87,6 +87,18 @@ DATA_IN = (In("dataset", T.DATASET),)
 #: 检查类输入：概览/绘图/探索在原始表与特征表上语义相同（运行时两者都是 DataFrame）。
 #: "宽容"只放在接收端，因此这些组件可以直接挂到特征分支上，用来检验中间产物。
 TABLE_IN = (In("dataset", T.DATASET, accepts=(T.FEATURE_DATASET,)),)
+#: 窗口生产者的输入：除了原始 `Dataset`，也接受 `FeatureDataset`——这样"先在行级编码
+#: （`feature.categorical`），再按窗口聚合"才能成立。两者运行时都是 DataFrame，
+#: 窗口逻辑只关心 `columns`/`group_column`/`time_column` 这些列名。
+#: 注意配套条件：编码表必须把分组/时间/标签列带过来（`keep_columns`），否则窗口无从下手。
+WINDOW_IN = (
+    In(
+        "dataset",
+        T.DATASET,
+        accepts=(T.FEATURE_DATASET,),
+        description="Rows to window; a FeatureDataset is accepted for row-level encoded columns",
+    ),
+)
 DATA_OUT = (Out("dataset", T.DATASET),)
 FEATURES_IN = (In("features", T.FEATURE_DATASET),)
 #: 四个窗口组件的公共参数：**必须完全一致**才能合并，也才能共享标签与来源信息。
@@ -1684,7 +1696,7 @@ class StatisticalFeatureComponent(BaseComponent):
         ),
     )
     accepts_streaming = True
-    input_ports = DATA_IN
+    input_ports = WINDOW_IN
     output_ports = (Out("features", T.FEATURE_DATASET), Out("labels", T.LABEL_VECTOR, False))
     parameter_schema = (
         *WINDOW,
@@ -1729,7 +1741,7 @@ class FittingFeatureComponent(BaseComponent):
         ),
     )
     accepts_streaming = True
-    input_ports = DATA_IN
+    input_ports = WINDOW_IN
     output_ports = (Out("features", T.FEATURE_DATASET), Out("labels", T.LABEL_VECTOR, False))
     parameter_schema = (
         *WINDOW,
@@ -1846,7 +1858,7 @@ class EntropyFeatureComponent(BaseComponent):
             "early warning",
         ),
     )
-    input_ports = DATA_IN
+    input_ports = WINDOW_IN
     output_ports = (Out("features", T.FEATURE_DATASET), Out("labels", T.LABEL_VECTOR, False))
     parameter_schema = (
         *WINDOW,
@@ -1927,11 +1939,29 @@ class CategoricalFeatureComponent(BaseComponent):
             features.UNKNOWN_CATEGORY_POLICIES,
             "ignore uses all-zero/-1/zero/global-mean values; error rejects unseen categories",
         ),
+        P(
+            "keep_columns",
+            "column_list",
+            [],
+            description=(
+                "Columns carried through unchanged so a window component can group/time/label by "
+                "them (e.g. entity, time, label). Not model inputs."
+            ),
+        ),
     )
 
     def execute(self, inputs: dict[str, Any], context: ExecutionContext) -> Result:
-        """返回训练特征与可复用的 ``encoder``；目标编码走 OOF，结果标记为探索性。"""
-        return Result(features.fit_categorical(inputs["dataset"], **self.parameters))
+        """返回训练特征与可复用的 ``encoder``；目标编码走 OOF，结果标记为探索性。
+
+        ``keep_columns`` 让"先编码、再按窗口聚合"成为可能：编码表只剩编码列，
+        实体/时间/标签列会被带走，窗口组件就无从下手。带过来的列**不是**模型输入。
+        """
+        parameters = dict(self.parameters)
+        keep = parameters.pop("keep_columns", None)
+        result = features.fit_categorical(inputs["dataset"], **parameters)
+        carried = features.carry_columns(result["features"], inputs["dataset"], keep)
+        warnings = [features.carried_columns_notice(list(keep))] if keep else []
+        return Result({"features": carried, "encoder": result["encoder"]}, warnings)
 
 
 class CategoricalTransformComponent(BaseComponent):
@@ -1951,10 +1981,25 @@ class CategoricalTransformComponent(BaseComponent):
         In("encoder", T.FEATURE_TRANSFORMER),
     )
     output_ports = (Out("features", T.FEATURE_DATASET),)
+    parameter_schema = (
+        P(
+            "keep_columns",
+            "column_list",
+            [],
+            description=(
+                "Columns carried through unchanged so a window component can group/time/label by "
+                "them. Must match the training-time choice when the encoded table is windowed."
+            ),
+        ),
+    )
 
     def execute(self, inputs: dict[str, Any], context: ExecutionContext) -> Result:
         """只用传入的编码器做 transform（不重新拟合），因此可以安全地用于推理阶段。"""
-        return Result({"features": inputs["encoder"].transform(inputs["dataset"])})
+        keep = self.parameters.get("keep_columns") or []
+        encoded = inputs["encoder"].transform(inputs["dataset"])
+        carried = features.carry_columns(encoded, inputs["dataset"], keep)
+        warnings = [features.carried_columns_notice(list(keep))] if keep else []
+        return Result({"features": carried}, warnings)
 
 
 class SpectralFeatureComponent(BaseComponent):
@@ -1981,7 +2026,7 @@ class SpectralFeatureComponent(BaseComponent):
         ),
     )
     accepts_streaming = True
-    input_ports = DATA_IN
+    input_ports = WINDOW_IN
     output_ports = (Out("features", T.FEATURE_DATASET), Out("labels", T.LABEL_VECTOR, False))
     parameter_schema = (
         *WINDOW,

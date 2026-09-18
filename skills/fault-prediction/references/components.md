@@ -177,7 +177,9 @@
 四个组件共享 `columns`、`group_column`、`asset_column`、`label_column`、`time_column`、`window_size`、`step`、`label_policy`。**要合并它们的输出，就必须在这些参数上完全一致。** 另外还有时间窗口与预测参数：`window_span`/`step_span`（按时间切窗，如 `7d`/`12h`）与 `prediction_horizon`/`prediction_gap`/`current_fault_policy`/`normal_label`（配合 `label_policy=horizon` 做"预测未来会不会故障"）。
 
 **feature.statistical** — 统计
-`features`：水平/形状类 `mean`、`std`、`variance`、`min`、`max`、`median`、`rms`、`skewness`、`kurtosis`、`quantile`（配 `quantile`）、`range`、`iqr`、`mad`、`peak`、`crest_factor`；结构类 `count`、`argmax_first`/`argmax_last`、`argmin_first`/`argmin_last`（位置按 0..1 归一化，跨窗口长度可比）、`count_above_mean`/`count_below_mean`、`longest_above_mean`/`longest_below_mean`、`mean_delta`/`mean_abs_delta`、`mean_second_derivative`、`duplicate_point_ratio`、`repeated_value_ratio`、`duplicate_sum`、`time_reversal_asymmetry`，以及四个字面比较项 `std_gt_range`、`variance_gt_std`、`max_repeated`、`min_repeated`（0/1）。水平/形状类特征默认就从这里开始；结构类里 `repeated_value_ratio`、`duplicate_sum` 对"保持值/卡死"通道特别有用，但比较项是否对模型有用需要单独评估。
+
+四个窗口组件（`feature.statistical` / `fitting` / `spectral` / `entropy`）的输入端口**同时接受 `Dataset` 与 `FeatureDataset`**：前者是常规用法；后者用于聚合**行级编码出来的列**（`feature.categorical` + `keep_columns`，见上文「先编码、再按窗口聚合」）。
+`features`：水平/形状类 `mean`、`std`、`variance`、`min`、`max`、`median`、`rms`、`skewness`、`kurtosis`、`quantile`（配 `quantile`）、`range`、`iqr`、`mad`、`peak`、`crest_factor`；结构类 `count`、`distinct_count`、`argmax_first`/`argmax_last`、`argmin_first`/`argmin_last`（位置按 0..1 归一化，跨窗口长度可比）、`count_above_mean`/`count_below_mean`、`longest_above_mean`/`longest_below_mean`、`mean_delta`/`mean_abs_delta`、`mean_second_derivative`、`duplicate_point_ratio`、`repeated_value_ratio`、`duplicate_sum`、`time_reversal_asymmetry`，以及四个字面比较项 `std_gt_range`、`variance_gt_std`、`max_repeated`、`min_repeated`（0/1）。水平/形状类特征默认就从这里开始；**标识列（地址/编号）不要用它们求均值，只用 `distinct_count`**——那是"这一窗里出现过几种"，对连续列则恒等于 `count`（等于没信息）。结构类里 `repeated_value_ratio`、`duplicate_sum` 对"保持值/卡死"通道特别有用，但比较项是否对模型有用需要单独评估。
 
 **feature.fitting** — 拟合
 `fitting_method`：`linear`、`polynomial`（配 `degree`）、`exponential`。输出趋势斜率、残差与 R² 类特征。退化/起始点任务的主力。
@@ -200,10 +202,12 @@
 `Dataset → features:FeatureDataset`（无 labels，行数与输入一致）。`window`、`levels`（≤ log2(window)）、`peak_sigma`、`group_column`、`time_column`。输出每层的 Haar 细节能量占比、主尺度与细节峰个数——清单里的"连续小波变换的山峰数"落在这里，但它是**离散 Haar 的近似**，不声称与 Morlet CWT 数值一致；换小波基，峰个数会变，报告里要写清用的是哪一种。
 
 **feature.categorical** — 分类
-`Dataset → features:FeatureDataset, encoder:FeatureTransformer`；`method`、`target_column`、`random_state`、`handle_unknown`。它会拟合一个编码器。新数据上请通过 `feature.categorical_transform` 复用，而不是重新拟合。
+`Dataset → features:FeatureDataset, encoder:FeatureTransformer`；`method`、`target_column`、`random_state`、`handle_unknown`、`keep_columns`。它会拟合一个编码器。新数据上请通过 `feature.categorical_transform` 复用，而不是重新拟合。
+
+**`keep_columns` 是"先编码、再按窗口聚合"的关键。** 编码输出只剩编码列，实体/时间/标签列都不在里面，窗口组件就无从下手；把这几列列进 `keep_columns`（原样带过去，可以是字符串实体名）之后，`feature.categorical → feature.statistical`（窗口组件的输入同时接受 `FeatureDataset`）就能算出"**窗口内各类别的占比**"——独热的均值就是这个占比。带过去的列**不是模型输入**：平台会写一条 `keep_columns=[…] are carried through unchanged … NOT model inputs` 的警告，并随 `evaluation_warnings` 一路传到模型指标里；直接把它接到验证组件就是标签泄漏。
 
 **feature.categorical_transform** — 分类
-`Dataset + encoder:FeatureTransformer → features:FeatureDataset`。套用已拟合的编码器（未知取值的行为由 `handle_unknown` 决定）。编码器要来自同一个方案。
+`Dataset + encoder:FeatureTransformer → features:FeatureDataset`；`keep_columns`。套用已拟合的编码器（未知取值的行为由 `handle_unknown` 决定）。编码器要来自同一个方案；**推理时 `keep_columns` 要和训练时一致**，否则编码表的列集合对不上。
 
 **feature.select** — 组合
 `Dataset → features:FeatureDataset`；`columns`。表里已经有特征（预计算或外部步骤产出）时用它。

@@ -51,16 +51,17 @@ def wave():
 
 
 def test_statistical_features_expose_the_whole_structural_set():
-    """35 个统计量全部可算、全部有限，并对小样本给出可手算的值。"""
+    """36 个统计量全部可算、全部有限，并对小样本给出可手算的值。"""
     registry = default_registry()
     schema = registry.get("feature.statistical").schema()
     options = next(p for p in schema["parameter_schema"] if p["name"] == "features")["options"]
     assert set(features.STATISTICS) <= set(options)
-    assert len(options) == 35
+    assert len(options) == 36
 
     window = np.array([1.0, 2.0, 2.0, 5.0, 1.0])
     expected = {
         "count": 5.0,
+        "distinct_count": 3.0,  # 取值只有 1、2、5 三种
         "argmax_first": 0.75,  # 最大值 5 在第 3 位（0 基），按长度 5 归一化
         "argmax_last": 0.75,
         "argmin_first": 0.0,

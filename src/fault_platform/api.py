@@ -6,6 +6,8 @@
 * **控制 API**：``POST /api/control/{operation}`` 转发到
   :meth:`fault_platform.service.PipelineService.dispatch`，
   ``/api/health`` 与 ``/api/data``、``/api/data/upload`` 提供健康检查与数据文件管理；
+* **文件接口**：``GET /api/node-data`` 列出某节点可导出的中间产物，
+  ``GET /api/node-data/csv`` 把它作为 CSV 附件下载（给人在本机核对，不是控制动作）；
 * **事件流**：``GET /api/events`` 是 SSE，把图修订、节点状态与运行状态实时推给页面。
 
 安全边界：服务只监听回环地址，并额外做了三层防护——
@@ -19,16 +21,17 @@ import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 from uuid import uuid4
 
 import pandas as pd
 from fastapi import FastAPI, File, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from fault_platform.events import HEARTBEAT_SECONDS
-from fault_platform.service import PipelineService
+from fault_platform.service import DEFAULT_EXPORT_ROWS, PipelineService
 from fault_platform.version import PLATFORM_VERSION
 from fault_platform.workspace import json_safe
 
@@ -153,6 +156,52 @@ def create_app(
                 if p.resolve().is_relative_to(control.data_root)
             ]
         }
+
+    @app.get("/api/node-data")
+    def node_data(pipeline_id: str, node_id: str):
+        """列出该节点可导出的表格产物（输入侧来自上游端口，输出侧来自本节点）。
+
+        这是给"点节点 → 导出"用的文件级接口，刻意**不**进控制操作表：它服务的是人来看，
+        不是一个可编程控制动作，因此也不会变成第 40 个 MCP 工具。
+        """
+        try:
+            return control.list_node_data(pipeline_id, node_id)
+        except (ValueError, KeyError) as exc:
+            return JSONResponse({"success": False, "summary": str(exc)}, status_code=400)
+
+    @app.get("/api/node-data/csv")
+    def node_data_csv(
+        pipeline_id: str,
+        node_id: str,
+        direction: str = "output",
+        port: str | None = None,
+        max_rows: int = DEFAULT_EXPORT_ROWS,
+    ):
+        """把某节点某一侧的表格产物作为 CSV 附件下载（``max_rows=0`` 表示不截断）。
+
+        响应头里带 ``X-Rows`` / ``X-Total-Rows`` / ``X-Truncated``：截断了就在文件里截断，
+        但绝不让下载方以为拿到的是全量。
+        """
+        try:
+            payload = control.export_node_data(
+                pipeline_id, node_id, direction=direction, port=port, max_rows=max_rows
+            )
+        except (ValueError, KeyError) as exc:
+            return JSONResponse({"success": False, "summary": str(exc)}, status_code=400)
+        filename = payload["filename"]
+        return Response(
+            content=payload["csv"],
+            media_type="text/csv; charset=utf-8",
+            headers={
+                # 两种写法都给：老客户端读 filename，支持 RFC 5987 的读 filename*。
+                "Content-Disposition": (
+                    f"attachment; filename=\"{filename}\"; filename*=UTF-8''{quote(filename)}"
+                ),
+                "X-Rows": str(payload["rows"]),
+                "X-Total-Rows": str(payload["total_rows"]),
+                "X-Truncated": "true" if payload["truncated"] else "false",
+            },
+        )
 
     @app.post("/api/data/upload")
     async def upload(file: UploadFile = File(...)):

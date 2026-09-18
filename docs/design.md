@@ -916,7 +916,7 @@ Server-Sent Events 而不是 WebSocket，是因为这里只有服务端→浏览
 | 9 节点图需要 26 次往返 | 新增 `add_components` / `connect_many` / `configure_components` 批量操作 |
 | `get_node_result` 把 `train_indices` / `test_indices` 原样返回（数千条），反而埋没了指标 | `summarize` 对长数组折叠为 `*_count` 与 5 条预览，`include_indices=true` 才展开；缺失率同理只看预览行 |
 
-另外补了运行期可观测与生命周期：`get_server_info`（data_root / storage_root / 缓存预算与用量 / 数据文件）、`list_datasets`、`wait_for_pipeline`（阻塞到终态，带 `timed_out`；它是唯一不在全局锁内执行的阻塞操作）、`delete_pipeline`（连工作区、落盘文件与检查点一起回收），以及"读到非最新 workspace 时返回警告"。
+另外补了运行期可观测与生命周期：`get_server_info`（data_root / storage_root / 缓存预算与用量 / 数据文件）、`list_datasets`、`wait_for_pipeline`（阻塞到终态，带 `timed_out`；**没有在途任务时立刻返回 `started=false` 并说明原因**，而不是空等满超时；它是唯一不在全局锁内执行的阻塞操作，但取"状态 + 在途任务"这一小段仍在锁内，避免读到"刚提交还没置 RUNNING"的中间态）、`delete_pipeline`（连工作区、落盘文件与检查点一起回收），以及"读到非最新 workspace 时返回警告"。
 
 结果摘要的变化不改动核心契约：模型指标的结构化字段（accuracy/confusion_matrix/各类指标）原样保留，只是把大数组降级为计数——前端 `metricsView` 与 `validation.compare` 都不受影响。
 
@@ -1027,7 +1027,7 @@ data.input
 | 约定 | 说明 |
 | --- | --- |
 | 加窗 | Hann 窗，抑制频谱泄漏 |
-| 幅值归一化 | 相干增益归一化（`2|X|/Σw`），DC 与 Nyquist 不做双侧加倍 |
+| 幅值归一化 | 相干增益归一化（`2\|X\|/Σw`），DC 与 Nyquist 不做双侧加倍 |
 | 能量 | 谱 RMS 用 Parseval 一致公式，单音信号可还原理论值 |
 | 频带 | `band_edges` 以 Nyquist 比例表示，`band_energy_ratio_i` 之和为 1 |
 | 谐波 | `harmonic_ratio` 统计 2–5 倍主频 ±`harmonic_tolerance` 内的能量占比 |

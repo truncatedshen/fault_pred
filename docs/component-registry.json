@@ -4791,9 +4791,10 @@
         "name": "dataset",
         "data_type": "Dataset",
         "required": true,
-        "description": "",
+        "description": "Rows to window; a FeatureDataset is accepted for row-level encoded columns",
         "accepted_types": [
-          "Dataset"
+          "Dataset",
+          "FeatureDataset"
         ]
       }
     ],
@@ -5019,6 +5020,7 @@
           "peak",
           "crest_factor",
           "count",
+          "distinct_count",
           "argmax_first",
           "argmax_last",
           "argmin_first",
@@ -5092,9 +5094,10 @@
         "name": "dataset",
         "data_type": "Dataset",
         "required": true,
-        "description": "",
+        "description": "Rows to window; a FeatureDataset is accepted for row-level encoded columns",
         "accepted_types": [
-          "Dataset"
+          "Dataset",
+          "FeatureDataset"
         ]
       }
     ],
@@ -5726,9 +5729,10 @@
         "name": "dataset",
         "data_type": "Dataset",
         "required": true,
-        "description": "",
+        "description": "Rows to window; a FeatureDataset is accepted for row-level encoded columns",
         "accepted_types": [
-          "Dataset"
+          "Dataset",
+          "FeatureDataset"
         ]
       }
     ],
@@ -6093,6 +6097,18 @@
           "error"
         ],
         "allow_multiple": false
+      },
+      {
+        "name": "keep_columns",
+        "type": "column_list",
+        "default": [],
+        "required": false,
+        "display_name": "",
+        "description": "Columns carried through unchanged so a window component can group/time/label by them (e.g. entity, time, label). Not model inputs.",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
       }
     ],
     "implementation_class": "fault_platform.components.builtin.CategoricalFeatureComponent"
@@ -6145,7 +6161,20 @@
         "description": ""
       }
     ],
-    "parameter_schema": [],
+    "parameter_schema": [
+      {
+        "name": "keep_columns",
+        "type": "column_list",
+        "default": [],
+        "required": false,
+        "display_name": "",
+        "description": "Columns carried through unchanged so a window component can group/time/label by them. Must match the training-time choice when the encoded table is windowed.",
+        "min": null,
+        "max": null,
+        "options": [],
+        "allow_multiple": false
+      }
+    ],
     "implementation_class": "fault_platform.components.builtin.CategoricalTransformComponent"
   },
   {
@@ -6183,9 +6212,10 @@
         "name": "dataset",
         "data_type": "Dataset",
         "required": true,
-        "description": "",
+        "description": "Rows to window; a FeatureDataset is accepted for row-level encoded columns",
         "accepted_types": [
-          "Dataset"
+          "Dataset",
+          "FeatureDataset"
         ]
       }
     ],

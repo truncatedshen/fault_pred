@@ -108,6 +108,15 @@ description: 通过 MCP 驱动故障预测组件平台：侦察服务、准备�
 **阶段 4 是唯一"越多越好"的阶段**（多看一个角度就多一类证据）；**阶段 6~8 是运维**，
 错了就修、修完能读、读完能复现。
 
+**真实数据上这条线是往回走的。** 每个阶段的结论都可能把方案推回上一步，这是常态而不是返工：
+
+| 发现 | 退回 |
+| --- | --- |
+| 合格窗口切不出来，或正类只来自一两个实体 | 阶段 1/3：重新定窗口与视野，或让数据方补数据（见 §4 的正类可行性预检） |
+| 模型全判正常（`miss_rate=1.0`，accuracy 却很高） | 阶段 3/4：标签口径或特征角度不对 |
+| 频域整段 NaN、某列平窗口接近 100% | 阶段 2：那列是被保持或量化的死通道 |
+| 训练分数远高于留出分数 | 阶段 5：切分不诚实（泄漏，或用随机切分切了重叠窗口） |
+
 ## 1. 侦察 — 三次调用，加一份能力清单
 
 | 调用 | 它回答什么 |
@@ -134,6 +143,18 @@ description: 通过 MCP 驱动故障预测组件平台：侦察服务、准备�
 4. 配置 `data.input`：`path`（相对路径，**必填**）、`format`（默认 `csv`，或 `parquet`），CSV 还要 `separator`/`encoding`。
 
 平台只认 CSV 和 Parquet：`.mat`、`.txt`、MDF/BLF 都必须在平台外先转换，而且你要说明你转了。转换配方与阶段检查清单在 `references/stages.md` 的阶段 1。转换时目标是**一行一个采样**（`asset_id`、`instance_id`、`time`、测量列、标签），窗口组件就认这个形状；同时把实例列和资产列都记下来——趁数据还在你眼前。
+
+**列角色定完之后，再把每列分成"数值 / 标识 / 类别"三类，然后才决定谁进 `columns`。** 这一步不写错代码也不会报错，它只会让模型去学"这是哪台机器"：
+
+| 类别 | 例子 | 处置 |
+| --- | --- | --- |
+| 数值列（物理量） | 电压、电流、温度、振动、流量 | 进 `columns`，统计/拟合/频域都吃它 |
+| **标识列**（长得像数值，其实是地址/编号） | HBM 的 `stack`、`row`、`col`、`bank_group`；机号、通道号、批次号 | **不进 `columns`**（默认）。要对它取证，用窗口特征的 `distinct_count`——"这一窗里出现过几种" |
+| 类别列（字符串/枚举工况） | 工况、型号、告警类型 | 不进窗口统计；用 `feature.categorical` 编码，或先问清它是不是标签的一部分 |
+
+为什么标识列不能进 `columns`：窗口组件会对它算 `mean/std/max`，而它在窗口内常常**是恒定的**——实测 HBM 数据里 `pcid` 在 **98%** 的窗口内只有一个取值。于是这些列变成了"每台服务器的身份指纹"：全量上 `bank_group__max` 的单特征 AUC 就有 **0.849**，真正留出的时间切分只剩 **0.609**；那 0.24 的差值就是"认出是哪台机器"，不是"看出要坏"，而按实体留出时这套指纹直接失效。
+
+反过来，地址里确实有物理信息——"这段时间的错误落到多少个不同的 bank / col 上"就是空间扩散程度。用 `distinct_count` 回答它，而不是把地址当坐标求平均。**注意它只该用在整数/离散编码列上**：连续量每个取值都不同，`distinct_count` 恒等于 `count`（等于没给信息）。
 
 **要在窗口之前做的数据层变换**（顺序错了含义就完全不同）：`data.polynomial_features`（平方项与交互项）、`data.discretize`（等宽/等频/一维聚类分箱，箱边界在整表上拟合，会带探索性警告）、`data.seasonal_difference`（同比口径：`y_t − y_{t−period}` 或比值，`mode=difference|ratio`）。三者都改列或行的语义，所以放在阶段 3 之前。
 
@@ -180,6 +201,17 @@ description: 通过 MCP 驱动故障预测组件平台：侦察服务、准备�
  - `label_policy=strict`（默认）在**一个窗口内的标签发生变化时会让整次运行失败**——而真实故障数据里，变化点恰好就在故障起始处，也就是最有意思的地方。改用 `mode`（多数标签）或 `last`，并说明你选了哪个、为什么。
  - `window_size=0` 的含义是"整组当成一个窗口"：整段分类正确，起始点检测错误。`window_size`/`step` 要按真实采样率定，不要照抄示例。
 
+**正类可行性预检 —— 这一步不过，后面的分数一个都不用看。** 窗口建好、接模型之前，先把这四个数报出来：
+
+| 要报的数 | 它决定什么 |
+| --- | --- |
+| 合格窗口数（不是原始行数） | 特征行数只由窗口与步长决定，与输入行数无关 |
+| 正类数 / 正类率 | 决定该看 accuracy 还是 `balanced_accuracy`——正类 4.5% 时"全判正常"也有 95% accuracy |
+| **贡献正类的实体数**（有几个实体出现正类） | 只有一两个实体有正类时，`group`/`asset` 留出必然切不出带正类的测试集 |
+| 两类丢弃计数：`attrs` 的 `horizon_dropped_current_fault` 与 `horizon_dropped_unknown_future` | 说明样本为什么变少，以及这批数据到底撑不撑得起预测任务 |
+
+三条停止线，命中就回上一步，不要硬上模型：**合格窗口数为 0 或极少** → 回阶段 1/3 改窗口或改口径；**正类只来自一两个实体** → 先跟用户说清"这次只能评估这几台的行为"，或请数据方补数据；**"视野内没有采样"的窗口占大多数** → 这份日志的采样太稀，预测做不了（实测 HBM：50 台里只有 9 台能切出合格窗口，41 个正类全部来自 2 台，按服务器留出时测试集 155 个窗口里 **0 个正类**，accuracy 1.0 纯属假象）。
+
 **阶段自检 — 这一步有问题吗？**
 
 | 自检 | 命中时 |
@@ -198,7 +230,7 @@ description: 通过 MCP 驱动故障预测组件平台：侦察服务、准备�
 
 "哪类信号问题该用哪个分支"（水平与形状、趋势、旋转与共振、不规则性、短时动态、离散属性）已经列在 `references/stages.md` 的阶段 4。照着挑，不要默认只挂统计分支；如果特征已经在表里，用 `feature.select`。
 
-**枚举值已经扩过两轮，别按记忆里的旧清单挑**：`feature.statistical` 的 `features` 现在 **35 项**（新增 `count`、`argmax_first/last`、`argmin_first/last`、`count_above/below_mean`、`longest_above/below_mean`、`mean_delta`、`mean_abs_delta`、`mean_second_derivative`、`duplicate_point_ratio`、`repeated_value_ratio`、`duplicate_sum`、`time_reversal_asymmetry`，以及四个字面比较项）；`feature.rolling_statistics` 多了 `variance`（与 `std` 同口径）/`max`/`min`；`feature.temporal` 多了 `sum_abs_change`（窗口内 |Δ| 之和）与 `peak_count`（山峰数，可用 `prominence` 过滤量化台阶）；`feature.entropy` 的 `methods` 也接受 `binned_entropy`。不确定就 `get_component_schema` 查一次，别猜。
+**枚举值已经扩过三轮，别按记忆里的旧清单挑**：`feature.statistical` 的 `features` 现在 **36 项**（新增 `count`、`distinct_count`、`argmax_first/last`、`argmin_first/last`、`count_above/below_mean`、`longest_above/below_mean`、`mean_delta`、`mean_abs_delta`、`mean_second_derivative`、`duplicate_point_ratio`、`repeated_value_ratio`、`duplicate_sum`、`time_reversal_asymmetry`，以及四个字面比较项）；`feature.rolling_statistics` 多了 `variance`（与 `std` 同口径）/`max`/`min`；`feature.temporal` 多了 `sum_abs_change`（窗口内 |Δ| 之和）与 `peak_count`（山峰数，可用 `prominence` 过滤量化台阶）；`feature.entropy` 的 `methods` 也接受 `binned_entropy`。不确定就 `get_component_schema` 查一次，别猜。
 
 下面几条是**被强制**的，不是风格建议：
 
@@ -207,6 +239,7 @@ description: 通过 MCP 驱动故障预测组件平台：侦察服务、准备�
  - **类别特征是"拟合出来的配对"。** `feature.categorical` 会产出一个 `encoder`；新数据上要用 `feature.categorical_transform` 复用它，而不是重新拟合。
  - **`sampling_rate` 是必填**，没有默认值：没人知道就**问**，不要猜。
  - **`feature.score_select` 与 `feature.pca` 在全部行上拟合**，因此见过留出集：只能当探索用，且必须把泄漏警告写进汇报。
+ - **要"窗口内各档位占多少"，用 `feature.categorical(keep_columns=[实体/时间/标签]) → feature.statistical`。** 四个窗口组件的输入同时接受 `FeatureDataset`，所以行级独热可以接进窗口；独热列的 `mean` 就是类别占比。不带 `keep_columns` 会直接报 `Missing columns`——编码输出里没有分组列。带过去的列不是模型输入，平台会警告并把它传到模型指标里。只问"有几类"时用 `distinct_count`，不要编码。
 
 **阶段自检 — 特征够不够？**
 
@@ -231,6 +264,12 @@ description: 通过 MCP 驱动故障预测组件平台：侦察服务、准备�
 
  - **`group` 不是资产留出。** 一个资产通常贡献多个实例，所以被留出的"组"仍会把该资产的行为泄漏进训练。真实 3W 数据上，同一套特征与模型从实例留出的 ROC-AUC 0.716 掉到留一井的 0.528。
  - **把 `coverage` 跟分数一起报出来**——"3 个测试井全是训练时没见过的"这句话才让那个数字有意义。`validation.compare` 只接受特征、标签、切分方式、`test_size`、`random_state` 完全一致的两个运行。
+
+**目标不是"精准率召回率最高"，而是"这个数字配得上那句结论"。** 三件容易做反的事：
+
+ - **调参与评估必须分开。** `validation.grid_search` 的 `best_score` 是**交叉验证**分；留出集只在最后评一次。照着测试集调参数，调出来的是"这份测试集上的最优"，不是性能——而且它的症状很隐蔽：我们真跑出过 `miss_rate=1.0` 却 accuracy 0.94 的模型，一个故障都没抓出来，头行数字却很好看。
+ - **稀有故障看排序质量，不看判定阈值。** 正类 4.5% 时该盯 `average_precision`（PR-AUC）与"给定误报预算下的召回"，`roc_auc` 次之；`accuracy`、`precision` 单独出现基本没有信息量。
+ - **先报类别占比，再报分数。** `test_class_rates` 里没有正类时，那张表上的 accuracy / balanced_accuracy / `per_class_recall` **一个字都不许抄进结论**。平台对这种情况会自己给 `The test set contains no positive (1) rows` 的警告，把它原样带上。
 
 **方法面也扩过两轮，先按问题挑、再按方法挑**：回归除 `validation.linear_regression` 外还有 `validation.ridge`（窗口统计量几乎总是彼此相关，L2 收缩更稳，代价是系数不再可解释）；无监督检测器除 KNN / 隔离森林 / Persist 外还有 `validation.pca_detector`（重构误差）、`validation.dbscan_detector`（密度，**异常率由 `eps`/`min_samples` 决定，不用 `contamination`**）、`validation.min_cluster_detector`（到簇心的距离）与 `validation.one_class_svm`（只学"正常长什么样"，`nu` 是越界比例的上界而不是异常率）；分组用 `validation.kmeans`（**这不是异常检测**，它不给正常/异常判决）；时序基线多了 `validation.exponential_smoothing`（Holt / Holt–Winters，**平滑系数是输入不是拟合值**）与 `validation.arima`（需要可选依赖 statsmodels，未安装会给安装命令）；要调参用 `validation.grid_search`（`best_score` 是**交叉验证**分，不是留出分）。
 
@@ -318,7 +357,7 @@ create_pipeline(name)
 5. **边界** —— 哪些是探索性的、哪些是合成的、哪些被跳过了、什么会让这个数字失效。
 6. **产物** —— 方案 id、XML 路径、人能打开查看的地址。
 7. **阶段自检** —— 哪些闸门命中过、各自做了什么；以及整场没触及的能力类别（一行说明为什么这次可以接受）。
-8. **中间产物证据** —— 给出一次对你真正建模的那份数据的直接观察：把 `visual.overview` 挂在特征分支上（把 `stat.labels` 接到它的 `labels` 端口，`label_column` 用于原始表），并引用它返回的内容——行数、列名、缺失率、**标签的正负样本比例**——让人不必只凭你的结论。正类占比是读其他所有指标的前提，先报它。
+8. **中间产物证据** —— 给出一次对你真正建模的那份数据的直接观察：把 `visual.overview` 挂在特征分支上（把 `stat.labels` 接到它的 `labels` 端口，`label_column` 用于原始表），并引用它返回的内容——行数、列名、缺失率、**标签的正负样本比例**——让人不必只凭你的结论。正类占比是读其他所有指标的前提，先报它。**另外主动告诉人可以在网页点节点用「导出数据（CSV）」把这一层的输入/输出下到本机核对**（这不是 MCP 工具，是给人用的文件接口）；你只能给有界预览，把完整数据交到人手上才是可检验。
 9. **语言** —— 用用户提问的语言写（默认中文）；工具名、组件类型、参数名与平台报错原文保持英文。
 
 先给结论，再给限定它的那句注意事项。不要把注意事项提前，也永远不要省略它。
@@ -330,11 +369,13 @@ create_pipeline(name)
 | 侦察 | `get_server_info`, `list_datasets`, `get_component_facets`, `list_components`, `search_components`, `retrieve_components`, `get_component_schema` |
 | 方案生命周期 | `create_pipeline`, `list_pipelines`, `get_pipeline`, `delete_pipeline`, `replace_pipeline`, `save_pipeline`, `load_pipeline`, `get_pipeline_xml`, `create_example` |
 | 图编辑 | `add_component`, `add_components`, `remove_component`, `configure_component`, `configure_components`, `connect_components`, `connect_many`, `disconnect_components` |
-| 执行 | `validate_pipeline`, `execute_pipeline` (`mode=all|node|from`, `incremental`), `execute_node`, `execute_from_node`, `retry_node`, `cancel_pipeline` |
+| 执行 | `validate_pipeline`, `execute_pipeline` (`mode=all\|node\|from`, `incremental`), `execute_node`, `execute_from_node`, `retry_node`, `cancel_pipeline` |
 | 观察 | `get_pipeline_status`, `wait_for_pipeline`, `get_node_result`, `get_pipeline_result`, `get_history` |
 | 持久化与导出 | `save_checkpoint`, `load_checkpoint`, `list_checkpoints`, `export_python` |
 
 `wait_for_pipeline` 是唯一会阻塞的工具，并且刻意跑在服务锁之外。如果客户端显示带后缀的重名工具（`list_pipelines_1`），用不带后缀的那个名字。
+
+它返回三个字段要分清：`status` 是状态；`timed_out=true` 说明期限内还没跑完（继续等、取消或先看部分结果）；**`started=false` 说明根本没有在途任务**（没启动过，或被改图失效）——这时它立刻返回，不再空等，你要做的是回去看 `execute_pipeline` 的返回，那里写着为什么没跑起来。
 
 ## 附录 B — 能力地图
 

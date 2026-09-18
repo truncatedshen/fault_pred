@@ -92,6 +92,7 @@
 | --- | --- | --- |
 | `execute_pipeline` 只返回 `RUNNING` | 执行是异步的 | `wait_for_pipeline(pipeline_id, timeout_seconds=…)` |
 | `timed_out: true` | 运行还在继续 | 用更大的超时再等一次，或查状态/历史 |
+| `wait_for_pipeline` 立刻返回 `started: false` | 根本没有在途任务：方案没启动过，或被改图失效 | 回头读 `execute_pipeline` 的返回（`success` 与 `summary` 写着为什么没跑起来），修好后再执行；不要盲目重等 |
 | `success: true` 但 `status: FAILED` | 控制成功不等于运行成功 | 读 `errors` / 逐节点状态 |
 | 节点 `SKIPPED` 且提示 `Upstream results unavailable` | 上游节点失败了 | 先修上游；下游不会跑 |
 | `… cannot consume streamed input; insert data.materialize or turn streaming off on data.input` | 全局组件遇到了流式数据集 | 按报错做；并把这条警告留在汇报里 |
