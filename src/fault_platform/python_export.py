@@ -30,6 +30,7 @@ SUMMARY_KEYS = (
     "algorithm",
     "accuracy",
     "balanced_accuracy",
+    "averaging",
     "precision",
     "recall",
     "f1",
@@ -50,6 +51,11 @@ SUMMARY_KEYS = (
     "split_method",
     # 切分被调整过（时间切点移动）时的说明：不打印它，"留出集不是最后 25%" 就没人知道。
     "split_note",
+    # 逐类指标：精确率/召回率/F1 是宏平均，逐类数值用来跟混淆矩阵对齐复核。
+    "per_class_support",
+    "per_class_precision",
+    "per_class_recall",
+    "per_class_f1",
 )
 
 

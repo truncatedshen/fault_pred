@@ -10609,7 +10609,7 @@
         "default": "",
         "required": false,
         "display_name": "",
-        "description": "Empty = f1_weighted for classifiers, r2 for regressors",
+        "description": "Empty = f1_macro for classifiers (no class weighting: weighted F1 is dominated by the majority class and hides a model that catches no faults), r2 for regressors",
         "min": null,
         "max": null,
         "options": [],

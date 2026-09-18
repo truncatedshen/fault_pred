@@ -857,15 +857,37 @@ function metricsView(m) {
   return '<div class="metric-grid">' + keys.map(([k, title]) => '<div class="metric-card"><span class="label">' +
     title + "</span><strong>" + (typeof m[k] === "number" ? (m[k] * 100).toFixed(1) + "%" : "—") +
     "</strong></div>").join("") + '</div><p class="metric-note">' + esc(m.algorithm) + " · " + esc(m.split_method) +
-    " · 训练 " + m.train_count + " / 测试 " + m.test_count + "</p>" +
+    " · 训练 " + m.train_count + " / 测试 " + m.test_count +
+    /* 口径必须写在脸上：这些分数是留出集的，精确率/召回率/F1 是宏平均而不是加权。 */
+    " · 以上均为留出集指标" + (m.averaging === "macro" ? "，精确率/召回率/F1 为宏平均（各类等权，未加权）" : "") +
+    "</p>" +
     /* 切分被平台调整过（时间切点移动）时必须说出来：否则"留出集为什么不是最后 25%"无解。 */
     (m.split_note ? '<p class="metric-note">' + esc(m.split_note) + "</p>" : "") +
     classBalance(m) +
+    perClassScores(m) +
     (m.warnings || []).map((w) => '<div class="warning">' + esc(w) + "</div>").join("") +
     (m.confusion_matrix ? table(m.confusion_matrix.map((row, i) =>
       Object.fromEntries([["实际 / 预测", m.classes[i]], ...row.map((v, j) => [String(m.classes[j]), v])]))): "");
 }
 function percent(value) { return typeof value === "number" ? (value * 100).toFixed(2) + "%" : "—"; }
+/* 逐类精确率/召回率/F1/支持数：这些数**逐项对应混淆矩阵**，可以手算复核；
+   整体准确率不是"逐类平均"，所以单独放在表头上，避免和宏平均混为一谈。 */
+function perClassScores(m) {
+  const precision = m.per_class_precision, recall = m.per_class_recall, f1 = m.per_class_f1;
+  if (!precision && !recall && !f1) return "";
+  const classes = (m.classes && m.classes.length ? m.classes :
+    Object.keys(recall || precision || f1 || {})).map(String);
+  const rows = classes.map((cls) => ({
+    类别: cls, 角色: cls === m.positive_class ? "正类" : (classes.length === 2 ? "负类" : "—"),
+    支持数: (m.per_class_support || {})[cls] ?? "—",
+    精确率: percent((precision || {})[cls]), 召回率: percent((recall || {})[cls]), F1: percent((f1 || {})[cls]),
+  }));
+  const headline = typeof m.accuracy === "number" ? "整体准确率 " + percent(m.accuracy) : "";
+  return '<h4 class="metric-title">各类指标（留出集）</h4>' + table(rows) +
+    '<p class="metric-note">' + (headline ? esc(headline) + " · " : "") +
+    (m.averaging === "macro" ? "Precision / Recall / F1 为宏平均（各类等权）" : "") +
+    " · 逐类数值与混淆矩阵一一对应（支持数 = 混淆矩阵该行之和）</p>";
+}
 /* 训练集/测试集的正负样本构成：只有数量看不出"228 行测试集里几行是故障"，占比才是那个数字。 */
 function classBalance(m) {
   const sides = [["训练集", m.train_class_counts, m.train_class_rates, m.train_count],

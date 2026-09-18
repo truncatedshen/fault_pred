@@ -107,8 +107,9 @@ def grid_search(
     ``param_grid`` 必须是"参数名 → 候选值列表"的小字典（例如
     ``{"n_estimators": [100, 300], "max_depth": [4, 8]}``）。**故意不提供大网格**：
     候选数量会在返回值里给出，超过几十个就应该先想清楚"为什么要搜这些"，而不是让
-    服务替你跑一整天。分类任务的 ``scoring`` 默认 ``f1_weighted``（类别不平衡时比准确率
-    更能说明问题），回归默认 ``r2``。
+    服务替你跑一整天。分类任务的 ``scoring`` 默认 ``f1_macro``——**不做加权**：加权 F1 在
+    故障稀少时由多数类主导，会把"一个故障都没抓到"的配置排到第一；宏平均让每个类等权。
+    回归默认 ``r2``。（想要旧口径可以显式传 ``scoring="f1_weighted"``。）
 
     ``top_k`` 控制返回多少个候选的分数，用来判断"第一名是不是只赢了第二名一点点"。
     """
@@ -142,7 +143,7 @@ def grid_search(
     estimator = _estimator(algorithm, 0)
     cross_validator = _cross_validator(cv_method, int(cv_folds), features, target, classification)
     folds = int(getattr(cross_validator, "get_n_splits")())
-    chosen_scoring = scoring or ("f1_weighted" if classification else "r2")
+    chosen_scoring = scoring or ("f1_macro" if classification else "r2")
     search = GridSearchCV(
         estimator,
         grid,

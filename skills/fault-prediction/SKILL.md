@@ -274,6 +274,7 @@ description: 通过 MCP 驱动故障预测组件平台：侦察服务、准备�
  - **调参与评估必须分开。** `validation.grid_search` 的 `best_score` 是**交叉验证**分；留出集只在最后评一次。照着测试集调参数，调出来的是"这份测试集上的最优"，不是性能——而且它的症状很隐蔽：我们真跑出过 `miss_rate=1.0` 却 accuracy 0.94 的模型，一个故障都没抓出来，头行数字却很好看。
  - **稀有故障看排序质量，不看判定阈值。** 正类 4.5% 时该盯 `average_precision`（PR-AUC）与"给定误报预算下的召回"，`roc_auc` 次之；`accuracy`、`precision` 单独出现基本没有信息量。
  - **先报类别占比，再报分数。** `test_class_rates` 里没有正类时，那张表上的 accuracy / balanced_accuracy / `per_class_recall` **一个字都不许抄进结论**。平台对这种情况会自己给 `The test set contains no positive (1) rows` 的警告，把它原样带上。
+ - **口径要能对上混淆矩阵。** `accuracy` 是留出集整体准确率；`precision`/`recall`/`f1` 是**宏平均**（`metrics["averaging"] == "macro"`，各类等权、不做加权）；逐类的精确率/召回率/F1/支持数在 `per_class_precision` / `per_class_recall` / `per_class_f1` / `per_class_support`。用户拿混淆矩阵手算的召回率必须和 `per_class_recall` 相等——对不上就是口径没说清，别拿"大概是加权吧"糊过去。
 
 **方法面也扩过两轮，先按问题挑、再按方法挑**：回归除 `validation.linear_regression` 外还有 `validation.ridge`（窗口统计量几乎总是彼此相关，L2 收缩更稳，代价是系数不再可解释）；无监督检测器除 KNN / 隔离森林 / Persist 外还有 `validation.pca_detector`（重构误差）、`validation.dbscan_detector`（密度，**异常率由 `eps`/`min_samples` 决定，不用 `contamination`**）、`validation.min_cluster_detector`（到簇心的距离）与 `validation.one_class_svm`（只学"正常长什么样"，`nu` 是越界比例的上界而不是异常率）；分组用 `validation.kmeans`（**这不是异常检测**，它不给正常/异常判决）；时序基线多了 `validation.exponential_smoothing`（Holt / Holt–Winters，**平滑系数是输入不是拟合值**）与 `validation.arima`（需要可选依赖 statsmodels，未安装会给安装命令）；要调参用 `validation.grid_search`（`best_score` 是**交叉验证**分，不是留出分）。
 

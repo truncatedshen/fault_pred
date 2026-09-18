@@ -902,7 +902,7 @@ Server-Sent Events 而不是 WebSocket，是因为这里只有服务端→浏览
 | `asset_column` | 窗口组件（统计/拟合/频域/熵）把资产随特征写入 `attrs["assets"]`；`feature.merge` 与验证器把它纳入 provenance 校验 |
 | `split_method="asset"` | 验证器按资产分组建模，真正留出整台设备/整口井；缺少资产列或资产不足两个时给出可执行错误 |
 | `metrics["coverage"]` | 报告训练/测试的实例数与资产数、以及**测试中未见过的资产数**——"3/3 测试井未见过"比一个准确率数字更能说明泛化能力 |
-| 成本敏感指标 | `balanced_accuracy`、`average_precision`（PR-AUC）、逐类 `per_class_recall`、原始类别名的 `train/test_class_counts`、可指定正类的 `miss_rate` |
+| 成本敏感指标 | `balanced_accuracy`、`average_precision`（PR-AUC）、逐类 `per_class_precision/recall/f1` 与 `per_class_support`、原始类别名的 `train/test_class_counts`、可指定正类的 `miss_rate` |
 
 同一份 3W 数据（28 实例 / 10 口井，8091 窗口，72 特征，RF 300 棵）实测：按实例划分 AUC=0.716、未见资产 0/6；按资产留一 AUC=0.528、未见资产 3/3。前者包含"同井不同事件"的记忆成分，后者才是部署关心的答案。
 
@@ -1040,7 +1040,7 @@ data.input
 
 ### 12.5 指标语义与诚实性
 
-- 指标集合：`accuracy / precision / recall / f1 / roc_auc` + 混淆矩阵、训练/测试样本数、划分方法、随机种子、训练与测试索引、预测分布、警告列表。
+- 指标集合：`accuracy`（留出集整体准确率）/ `balanced_accuracy` / `precision` `recall` `f1`（**宏平均，各类等权，不做加权**）/ `roc_auc` / `average_precision` + 逐类 `per_class_precision` `per_class_recall` `per_class_f1` `per_class_support` + 混淆矩阵、训练/测试样本数、划分方法、随机种子、训练与测试索引、预测分布、警告列表。逐类数值与混淆矩阵逐项对应，**报告里的宏平均就是它们的算术平均**，因此每个数字都可以手算复核；加权值刻意不给（需要就用逐类值 + 支持数自己合成），因为加权平均在稀有故障上会被多数类盖住。
 - `validation.compare` 要求多个模型使用**完全相同的测试索引**，否则拒绝比较。
 - 文档与示例明确：合成数据上的 100% 准确率只证明工程闭环，不代表工业性能；平台不会把"当前故障识别"包装成"未来故障预测"。
 

@@ -83,11 +83,16 @@ async def run_split(session: ClientSession, split_method: str) -> dict[str, Any]
     status = await call(session, "wait_for_pipeline", pipeline_id=pipeline_id, timeout_seconds=300)
     assert status["status"] == "SUCCESS", status
     result = await call(session, "get_pipeline_result", pipeline_id=pipeline_id, limit=5)
-    metrics = result["result_summary"]["forest"]["outputs"]["metrics"]["value"]
+    forest_outputs = result["result_summary"]["forest"]["outputs"]
+    metrics = forest_outputs["metrics"]["value"]
+    # 指标是**留出集**上的：prediction 端口只覆盖测试行，行数必须等于 test_count。
+    # 这一条断言把"验证器输出的分数来自哪一侧"钉在回归测试里，而不是靠读代码猜。
+    assert forest_outputs["prediction"]["shape"][0] == metrics["test_count"], forest_outputs["prediction"]
     window_attrs = result["result_summary"]["win"]["outputs"]["features"]
     report = {
         "split_method": split_method,
         "windows": window_attrs["shape"][0],
+        "prediction_rows": forest_outputs["prediction"]["shape"][0],
         "train_count": metrics["train_count"],
         "train_class_counts": metrics["train_class_counts"],
         "test_count": metrics["test_count"],

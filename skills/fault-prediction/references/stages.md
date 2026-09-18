@@ -364,10 +364,12 @@
 
 | 键 | 为什么要看 |
 | --- | --- |
-| `accuracy` | 头条数字，类别不平衡时会骗人 |
+| `accuracy` | **整体准确率**（留出集，(TP+TN)/总数）。头条数字，类别不平衡时会骗人——它不分"哪一类错"，故障稀少时全判正常也能有 95% |
 | `balanced_accuracy` | 按类别规模校正过的准确率——故障稀少时优先看它 |
+| `precision`、`recall`、`f1` | **宏平均（各类等权，不做加权）**：等于下面逐类值的算术平均。加权平均在故障稀少时由多数类主导，会把"一个故障都没抓到"藏起来，所以平台不给加权值（需要就自己用逐类值 + 支持数合成） |
+| `per_class_precision`、`per_class_recall`、`per_class_f1`、`per_class_support` | **逐类的四个数 + 支持数**（键是原始类别名）。与 `confusion_matrix` 的行列一一对应：召回率_i = 矩阵[i,i] / 第 i 行之和，精确率_i = 矩阵[i,i] / 第 i 列之和，支持数 = 第 i 行之和。报告里的宏平均就是这四个的算术平均，**可以手算复核** |
 | `roc_auc`、`average_precision` | 排序质量；稀有故障看 PR-AUC |
-| `per_class_recall`、`train_class_counts`、`test_class_counts` | 哪个类被悄悄漏掉了（是原始标签，不是编码后的） |
+| `train_class_counts`、`test_class_counts` | 哪个类在测试集里被悄悄漏掉了（是原始标签，不是编码后的） |
 | `train_class_rates`、`test_class_rates` | 训练/测试**各自**的正负样本占比——`test_count=228` 不等于"228 行里有一半是故障" |
 | `confusion_matrix` | 错在哪里 |
 | `positive_class`、`miss_rate` | 故障类的漏报率；标签顺序不明确时显式指定 `positive_class` |
@@ -375,6 +377,12 @@
 | `warnings` | 泄漏、AUC 不可用、平窗口、缓存驱逐 |
 
 永远把 `coverage` 和分数一起报："3 个测试井全是训练时没见过的"这句话才让那个数字有意义。
+
+**报数字时把口径说全**：`accuracy` 是留出集的整体准确率；`precision`/`recall`/`f1` 是**宏平均**
+（`metrics["averaging"] == "macro"`）；逐类数值在 `per_class_*` 里。三个都要能对上
+`confusion_matrix`——对不上就说明你抄的不是这一份口径（实测踩过：报告用加权平均，用户拿混淆
+矩阵算召回率，两边对不上）。要逐类展开就照 `per_class_*` 列一张表：类别 / 支持数 / 精确率 /
+召回率 / F1，故障类那一行才是重点。
 
 **先报占比，再报分数。** 训练/测试的类别占比是判断其它数字能不能读的前提：测试集里一个正类都没有时，
 `accuracy=1.0` 只说明"模型全判正常"。这种情况平台会自己写一条 `warnings`（`Holdout split has no 1 rows`、

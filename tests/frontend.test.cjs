@@ -105,6 +105,14 @@ test("example executes and renders actual model metrics and charts", async () =>
   assert.match(metricsText, /训练集/);
   assert.match(metricsText, /测试集/);
   assert.match(metricsText, /占比/);
+  // 指标口径必须写在脸上：留出集、宏平均（不加权）、逐类数值 + 整体准确率。
+  assert.match(metricsText, /以上均为留出集指标/);
+  assert.match(metricsText, /宏平均/);
+  assert.match(metricsText, /各类指标（留出集）/);
+  assert.match(metricsText, /整体准确率/);
+  assert.match(metricsText, /支持数/);
+  assert.match(metricsText, /精确率/);
+  assert.match(metricsText, /召回率/);
   app.state.selected = new Set(["line"]); await app.showResult();
   assert.ok(window.document.querySelector("svg.chart"));
   // 点含数据的节点时，结果面板要给出"导出 CSV"入口，而且链接真的能下到文件。

@@ -3028,7 +3028,15 @@ class GridSearchComponent(BaseComponent):
         ),
         enum("cv_method", "stratified", ("stratified", "group", "temporal")),
         P("cv_folds", "integer", 3, min=2, max=10),
-        P("scoring", "string", "", description="Empty = f1_weighted for classifiers, r2 for regressors"),
+        P(
+            "scoring",
+            "string",
+            "",
+            description=(
+                "Empty = f1_macro for classifiers (no class weighting: weighted F1 is dominated by "
+                "the majority class and hides a model that catches no faults), r2 for regressors"
+            ),
+        ),
         P("top_k", "integer", 5, min=1, max=20, description="How many candidates to report"),
     )
 
@@ -3065,8 +3073,22 @@ class CompareModelsComponent(BaseComponent):
         scores = list(inputs.values())
         if any(s["test_indices"] != scores[0]["test_indices"] for s in scores[1:]):
             raise ValueError("Model comparison requires the same test indices")
-        keys = ("algorithm", "accuracy", "precision", "recall", "f1", "roc_auc", "train_count", "test_count")
-        return Result({"comparison": {"rows": [{k: score[k] for k in keys} for score in scores]}})
+        # 对比表只放**标量**：逐类字典放进来会把表格撑成不可读的一坨。精确率/召回率/F1 都是
+        # 宏平均（与验证器口径一致），accuracy 是留出集整体准确率。
+        keys = (
+            "algorithm",
+            "accuracy",
+            "balanced_accuracy",
+            "precision",
+            "recall",
+            "f1",
+            "roc_auc",
+            "average_precision",
+            "miss_rate",
+            "train_count",
+            "test_count",
+        )
+        return Result({"comparison": {"rows": [{k: score.get(k) for k in keys} for score in scores]}})
 
 
 #: 全部内置组件（顺序只影响注册表里的遍历顺序，不影响功能）。

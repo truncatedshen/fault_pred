@@ -32,7 +32,6 @@ from sklearn.metrics import (
     balanced_accuracy_score,
     confusion_matrix,
     precision_recall_fscore_support,
-    recall_score,
     roc_auc_score,
 )
 from sklearn.model_selection import train_test_split
@@ -457,6 +456,12 @@ def validate_model(
     ``xgboost``（按类别数自动选择 objective）/ ``reservoir_classifier``（标准化 + 储备池 + 逻辑回归）。
     额外参数通过 ``**parameters`` 透传给对应 sklearn/xgboost 估计器。
 
+    ``metrics`` 里的**分数全部来自留出集**（训练侧只有 ``train_count`` / ``train_class_counts`` /
+    ``train_class_rates`` / ``train_indices``），且 ``precision`` / ``recall`` / ``f1`` 是
+    **宏平均（各类等权，不做加权）**：加权平均在故障稀少时由多数类主导，会把"一个故障都没抓到"
+    藏起来。逐类数值在 ``per_class_precision`` / ``per_class_recall`` / ``per_class_f1`` /
+    ``per_class_support`` 里，与 ``confusion_matrix`` 的行列一一对应，可以手算复核。
+
     返回 ``{"model", "prediction", "metrics"}``，有特征重要性的算法再带 ``"importance"``。
     """
     # ---- 输入校验：索引、列、provenance、缺失值、类别数 ----
@@ -594,9 +599,15 @@ def validate_model(
         raise ValueError(f"Unknown algorithm: {algorithm}")
     estimator.fit(features.iloc[train], y[train])
     predicted = estimator.predict(features.iloc[test]).astype(int)
-    # 加权平均的精确率/召回率/F1：类别不平衡时比单纯 accuracy 更可读。
-    precision, recall, f1, _ = precision_recall_fscore_support(
-        y[test], predicted, average="weighted", zero_division=0
+    # 逐类精确率/召回率/F1 + 支持数。**不做加权平均**：加权值在故障稀少时由多数类决定，
+    # 会把"一个故障都没抓出来"藏起来（实测过 miss_rate=1.0、accuracy=0.94 的模型）。
+    # ``labels`` 用全部已知类别（而不是只在测试集里出现的那些），这样逐类表与混淆矩阵的行列
+    # 一一对应：召回率_i = 混淆矩阵[i,i] / 第 i 行之和，可以手算复核。
+    # 测试集里没出现的类别，precision/recall/F1 按 zero_division=0 记为 0（support 为 0 说明
+    # 它没被测到），而不是被悄悄排除后让分数看起来更好。
+    class_labels = np.arange(len(encoder.classes_))
+    per_precision, per_recall, per_f1, per_support = precision_recall_fscore_support(
+        y[test], predicted, labels=class_labels, zero_division=0
     )
     auc = None
     if hasattr(estimator, "predict_proba"):
@@ -638,9 +649,13 @@ def validate_model(
         "accuracy": float(accuracy_score(y[test], predicted)),
         # 类别不平衡时 balanced_accuracy 比 accuracy 更能说明问题（等于各类召回的平均）。
         "balanced_accuracy": float(balanced_accuracy_score(y[test], predicted)),
-        "precision": float(precision),
-        "recall": float(recall),
-        "f1": float(f1),
+        # 头条的 precision/recall/f1 = **宏平均**（各类等权，未加权）。数值恒等于下面
+        # per_class_* 的算术平均，所以可以拿混淆矩阵与逐类表手算核对，不需要猜口径。
+        "precision": float(per_precision.mean()),
+        "recall": float(per_recall.mean()),
+        "f1": float(per_f1.mean()),
+        # 口径写在载荷里，别让读的人去猜"这是加权还是宏平均"。
+        "averaging": "macro",
         "roc_auc": auc,
         "average_precision": _average_precision(
             estimator, features.iloc[test], y[test], len(encoder.classes_)
@@ -649,15 +664,13 @@ def validate_model(
             y[test], predicted, labels=np.arange(len(encoder.classes_))
         ).tolist(),
         "classes": encoder.classes_.tolist(),
-        "per_class_recall": {
-            str(label): float(value)
-            for label, value in zip(
-                encoder.classes_,
-                recall_score(
-                    y[test], predicted, average=None, labels=np.arange(len(encoder.classes_)), zero_division=0
-                ),
-            )
+        "per_class_precision": {
+            str(label): float(value) for label, value in zip(encoder.classes_, per_precision)
         },
+        "per_class_recall": {str(label): float(value) for label, value in zip(encoder.classes_, per_recall)},
+        "per_class_f1": {str(label): float(value) for label, value in zip(encoder.classes_, per_f1)},
+        # 支持数 = 测试集里这个类真实出现了多少次（等于混淆矩阵每行之和）。
+        "per_class_support": {str(label): int(value) for label, value in zip(encoder.classes_, per_support)},
         "test_class_counts": test_class_counts,
         "train_class_counts": train_class_counts,
         "test_class_rates": test_class_rates,

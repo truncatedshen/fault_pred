@@ -411,6 +411,7 @@ data.input → feature.statistical(window_span="7d", step_span="1d",
 | 泄漏检查 | Runtime 会检查训练与测试窗口是否共享原始数据行，发现即报错 |
 | 全量预处理 | 全量缩放/编码会带探索性警告并传递到指标；SVM 的标准化与概率校准只在训练集内拟合 |
 | 频域前置条件 | 需要真实采样率；平台不重采样、不推断转速 |
+| 指标口径 | `accuracy` 是**留出集整体准确率**；`precision`/`recall`/`f1` 是**宏平均**（各类等权，不做加权——加权值在故障稀少时由多数类主导）；逐类的精确率/召回率/F1/支持数在 `per_class_precision` / `per_class_recall` / `per_class_f1` / `per_class_support`，与混淆矩阵逐项对应，可手算复核 |
 | 类别比例优先 | `train_class_rates` / `test_class_rates` 与 `per_class_recall` 一起看；测试集没有正类时 `accuracy=1.0` 只说明"模型全判正常"，平台会给警告 |
 
 ---
@@ -768,7 +769,7 @@ docs/                     架构、设计、组件参考、MCP、部署、验证
 tests/                    32 个 pytest 文件 + DOM 集成测试
 scripts/                  部署与验收（deploy / verify_deploy / export_release / install_mcp_config /
                           mcp_smoke / browser_check）与工具脚本（export_catalog / memory_bench /
-                          prepare_hbm_raw / mcp_wait_probe / mcp_split_check）
+                          prepare_hbm_raw / mcp_wait_probe / mcp_split_check / mcp_metric_check）
 ```
 
 源码注释约定：模块与函数的 docstring 保留英文摘要（与既有代码风格一致），
@@ -789,6 +790,7 @@ npm ci; npm test                                        # 8 项 DOM 集成测试
 npm run browser-check                                   # Chrome headless 真实浏览器验收
 .\.venv\Scripts\python.exe scripts\mcp_smoke.py --from-config   # MCP 闭环（先启动服务）
 .\.venv\Scripts\python.exe scripts\mcp_split_check.py           # 窗口默认口径 + 三种切分的正类覆盖（先启动服务）
+.\.venv\Scripts\python.exe scripts\mcp_metric_check.py          # 指标口径：留出集/宏平均/逐类与混淆矩阵逐项对应（先启动服务）
 .\.venv\Scripts\python.exe scripts\memory_bench.py --rows 1000000   # 大文件内存基准
 .\.venv\Scripts\python.exe scripts\verify_deploy.py --from-config   # 部署验收（14 项，含 MCP 端到端）
 .\.venv\Scripts\python.exe scripts\export_release.py --build        # 打可交付的部署包

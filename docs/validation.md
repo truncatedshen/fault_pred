@@ -1089,6 +1089,50 @@ min_window_rows=8 → 1457 窗口（丢弃 1023）
 
 **这些数字不构成"模型变好了"的证据**：同一份数据上 ROC-AUC 在 0.394～0.948 之间随留出的服务器乱跳（见上表），`asset` 那行 `accuracy=0.993` 更是典型的"留出集太小 + 正类只有 10 个"的假象。本轮能确证的只有一件事：**测试集不再缺正类**，指标因此至少是"测到了故障类"的数字。
 
+## 第三十四轮：指标口径写进载荷——宏平均（不加权）+ 逐类精确率/召回率/F1/支持数（2026-09-18）
+
+触发原因：使用反馈"我通过模型最终给出的混淆矩阵计算召回率等，发现和报告的不一致。这是因为报告的指标是经过加权的。我不需要加权的指标。同时我希望计算完整的精准率、精确率、f1 分数、召回率"。
+
+### 先把事实说清楚
+
+报告**确实**是加权口径：`precision_recall_fscore_support(..., average="weighted")`，而使用者用混淆矩阵手算得到的是**逐类/宏平均**口径。两边都没算错，是**口径没写在指标里**——用户只能靠猜。这是本轮真正的缺陷：不是算法错，是载荷不自我描述。
+
+顺带纠正一个容易混的点：**准确率（accuracy）一直都在**（`accuracy_score(y[test], predicted)`，留出集整体准确率），它不分"哪一类"，所以也不存在"逐类准确率"；逐类能给的是精确率/召回率/F1/支持数。
+
+### 改了什么
+
+1. **头条 `precision` / `recall` / `f1` 改为宏平均**（各类等权，`per_class_*` 的算术平均），加权值不再输出。理由与平台一贯立场一致：故障稀少时加权平均由多数类主导，会把"一个故障都没抓到"藏起来（实测过 `miss_rate=1.0` 却 `accuracy=0.94` 的模型）。
+2. **新增逐类指标**：`per_class_precision`、`per_class_recall`、`per_class_f1`、`per_class_support`（键是原始类别名），`labels` 取全部已知类别，因此与 `confusion_matrix` 的行列一一对应：`召回率_i = 矩阵[i,i] / 第 i 行之和`、`精确率_i = 矩阵[i,i] / 第 i 列之和`、`支持数_i = 第 i 行之和`。
+3. **口径写进载荷**：`metrics["averaging"] == "macro"`，读的人不用猜。
+4. **测试集里没有的类别记 0 而不是被排除**（`zero_division=0`，`support=0`）：排除掉会让宏平均看起来更好，那正是要防的假象；平台同时会给 `The test set contains no positive (1) rows` 的警告。
+5. **`validation.compare` 的对比表**加上 `balanced_accuracy` / `average_precision` / `miss_rate`，并改用 `.get()`——老载荷缺字段给 `None` 而不是 `KeyError`。
+6. **`validation.grid_search` 默认评分从 `f1_weighted` 改为 `f1_macro`**：调参目标同样不加权，否则"按加权 F1 选出来的最优配置"仍然可以是"一个故障都没抓到"的那个。
+7. 前端结果面板：指标卡下方明写"以上均为留出集指标，精确率/召回率/F1 为宏平均（各类等权，未加权）"，并新增**「各类指标（留出集）」表**（类别 / 角色 / 支持数 / 精确率 / 召回率 / F1，表头带整体准确率）；Python 导出脚本的 `SUMMARY_KEYS` 也带上 `averaging` 与四个 `per_class_*`。
+
+### 实测：报告值与混淆矩阵逐项对得上
+
+走 MCP 桥跑 HBM 数据（2h 窗 / 7d 视野 / group 留出，244 行留出集、25 个正类；脚本 `scripts/mcp_metric_check.py`）：
+
+```json
+{"averaging": "macro", "accuracy": 0.9016, "balanced_accuracy": 0.6617,
+ "precision_macro": 0.7295, "recall_macro": 0.6617, "f1_macro": 0.6874,
+ "per_class_support": {"0": 219, "1": 25},
+ "per_class_precision": {"0": 0.9295, "1": 0.5294},
+ "per_class_recall":    {"0": 0.9635, "1": 0.36},
+ "per_class_f1":        {"0": 0.9462, "1": 0.4286},
+ "confusion_matrix": [[211, 8], [16, 9]]}
+```
+
+逐项复核：故障类召回率 `9/(16+9) = 0.36` ✔、精确率 `9/(8+9) = 0.5294` ✔、支持数 `16+9 = 25` ✔；头条值等于逐类值的算术平均（`(0.9635+0.36)/2 = 0.6617` 就是 `recall`）✔。
+
+**同一份混淆矩阵，两种口径差多少**：`f1_macro = 0.6874`，而**加权** F1 = `0.8932`——加权值被 219 行的负类拽起来，故障类的 F1 只有 0.43 这件事在加权口径里几乎看不见。这正是本轮要修的东西。
+
+### 验收
+
+新增 `tests/test_per_class_metrics.py` **5 项**：逐类四个数与混淆矩阵逐项相等、头条值等于逐类值的算术平均、与 sklearn 的 `average=None/macro` 逐个对齐、宏平均 ≠ 加权（确保不是"改了个名字"）、测试集缺类时记 0 且给警告、`validation.compare` 带上新标量且老载荷不炸、`grid_search` 默认评分为 `f1_macro`。前端测试新增 7 条断言（留出集/宏平均/各类指标表/整体准确率/支持数/精确率/召回率）。
+
+全量 `pytest` **331 passed / 1 skipped**；`ruff check` + `format --check` 通过；`node --test tests/frontend.test.cjs` 8/8。文档同步：skill（`SKILL.md` 阶段 5、`references/stages.md` 指标字典）、README §4.5、`design.md` §12.5、重生成 `docs/components.md` 与 `docs/component-registry.json`（`grid_search.scoring` 的默认值描述随之变化）。
+
 ## 首版边界
 
 - 核心工程和入口完整；单 DAG 串行调度，两个独立方案可同时执行。
