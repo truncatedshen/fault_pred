@@ -101,6 +101,18 @@ WINDOW_IN = (
 )
 DATA_OUT = (Out("dataset", T.DATASET),)
 FEATURES_IN = (In("features", T.FEATURE_DATASET),)
+#: 逐列指定"这一列要算哪些特征"：{"<列>": "<名字>" 或 ["<名字>", ...]}；
+#: 没列到的列用组件的全局 features/method。真实数据里不同列该看的东西不一样——
+#: 地址/编号列只能取 distinct_count，物理量列才该求均值与标准差。
+COLUMN_FEATURES = P(
+    "column_features",
+    "object",
+    {},
+    description=(
+        'Per-column override for the feature/method list, e.g. {"stack": "distinct_count", '
+        '"vibration": ["mean", "std"]}; columns not listed use the global list'
+    ),
+)
 #: 四个窗口组件的公共参数：**必须完全一致**才能合并，也才能共享标签与来源信息。
 WINDOW = (
     REQUIRED_COLS,
@@ -136,9 +148,15 @@ WINDOW = (
     ),
     enum(
         "current_fault_policy",
-        "drop",
+        "positive",
         ("drop", "positive", "negative"),
-        "Windows that already contain a fault: drop them (they belong to detection), or label them 1/0",
+        (
+            "With label_policy=horizon only: what to do with windows that already contain a fault. "
+            "positive (default) keeps them labelled 1 - faults concentrate on a few assets, so "
+            "dropping them is how a holdout ends up with zero positive rows; drop hands them to "
+            "detection and only counts them; negative marks them 0. Ignored (and recorded in attrs) "
+            "when label_policy is not horizon"
+        ),
     ),
     P(
         "normal_label",
@@ -147,6 +165,16 @@ WINDOW = (
         description="Label value that counts as normal; anything else counts as a fault in the horizon",
     ),
     enum("label_policy", "strict", ("strict", "last", "mode", "horizon")),
+    P(
+        "min_window_rows",
+        "integer",
+        0,
+        min=0,
+        description=(
+            "Drop windows thinner than this and count them (0 = keep every window). Sparse data "
+            "yields one-row windows whose statistics carry no information"
+        ),
+    ),
 )
 #: 监督验证器的公共参数：切分方式、留出比例、随机种子，以及"哪一类算故障"。
 VALIDATION_PARAMS = (
@@ -1702,6 +1730,7 @@ class StatisticalFeatureComponent(BaseComponent):
         *WINDOW,
         P("features", "feature_list", ["mean", "std", "rms"], required=True, options=features.STATISTICS),
         P("quantile", "float", 0.75, min=0, max=1),
+        COLUMN_FEATURES,
     )
 
     def execute(self, inputs: dict[str, Any], context: ExecutionContext) -> Result:
@@ -1790,6 +1819,7 @@ class RollingStatisticsComponent(BaseComponent):
         P("window", "integer", 5, min=2, max=100000),
         P("group_column", "column", None),
         P("time_column", "column", None),
+        COLUMN_FEATURES,
     )
 
     def execute(self, inputs: dict[str, Any], context: ExecutionContext) -> Result:
@@ -1830,6 +1860,7 @@ class TemporalFeatureComponent(BaseComponent):
         ),
         P("group_column", "column", None),
         P("time_column", "column", None),
+        COLUMN_FEATURES,
     )
 
     def execute(self, inputs: dict[str, Any], context: ExecutionContext) -> Result:
@@ -1872,6 +1903,7 @@ class EntropyFeatureComponent(BaseComponent):
         P("bins", "integer", 16, min=2, max=200),
         P("embedding_dimension", "integer", 2, min=1, max=5),
         P("tolerance_ratio", "float", 0.2, min=0),
+        COLUMN_FEATURES,
     )
 
     def execute(self, inputs: dict[str, Any], context: ExecutionContext) -> Result:
@@ -2065,6 +2097,7 @@ class SpectralFeatureComponent(BaseComponent):
             min=0,
             description="Peak-to-peak below this counts as a flat window",
         ),
+        COLUMN_FEATURES,
     )
 
     def execute(self, inputs: dict[str, Any], context: ExecutionContext) -> Result:

@@ -12,3 +12,6 @@ dist/
 node_modules/
 
 mytest/
+test_big_data
+test_hbm_raw
+test_mcp_skill

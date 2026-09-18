@@ -35,7 +35,7 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
 )
-from sklearn.model_selection import GroupShuffleSplit, train_test_split
+from sklearn.model_selection import train_test_split
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.svm import SVC
@@ -45,6 +45,7 @@ from fault_core.features import (
     CategoricalEncoder,
     coverage_subset,
     rows_without_overlap,
+    values_equal,
     windows_share_rows,
 )
 
@@ -205,6 +206,142 @@ def _class_balance(y: np.ndarray, classes: np.ndarray) -> tuple[dict[str, int], 
     return counted, rates
 
 
+def _class_aware_group_split(
+    groups: Any, y: np.ndarray, test_size: float, random_state: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """整组留出，但**按类别分层**——保证训练集与测试集都拿得到故障样本。
+
+    为什么不能直接用 ``GroupShuffleSplit``：它只按组随机分。真实数据里故障往往集中在少数几台
+    设备上，于是很容易分出一个"一个正类都没有"的测试集，而那时的 accuracy / balanced_accuracy
+    全是假象（实测 HBM 原始日志：按服务器留出时测试集 155 个窗口里 0 个正类，accuracy=1.0）。
+
+    做法（确定性，不依赖 sklearn 版本）：
+
+    1. 先随机打乱组的顺序（只吃 ``random_state``，保证同参数可复现、不同种子结果不同）；
+    2. **类越稀有越先安排**：对该类，逐个把它所在的组放进"这一类相对目标份额更缺"的一侧；
+       某一侧还没有这个类时优先放过去——这两条合起来保证**只要 ≥2 个组含这个类，两边就都有**，
+       这正是"测试集不能没有故障样本"要的性质；
+    3. 兜底：万一还有组没落地，就按窗口数从大到小填进"规模相对目标更缺"的一侧。
+       （正常数据上第一步用不到：每组至少含一个类，逐类分配总会把每个组都安排掉。）
+
+    代价要说清楚：这样切出来的测试集**不是均匀随机抽组**，而是为了可评估性刻意分层的。
+    只有一个组含故障时无法两全——那时它必须留在训练集（否则模型学不到这个类），
+    测试集仍然没有正类，调用方会收到明说这一点的警告。
+
+    这个"某一侧还没有这个类就放过去"的规则是实测补上的：只按份额比例分配时，两个各含 4 个
+    正类的组会被**同时**放进训练集（比例 4/6 < 4/2），测试集于是又是 0 个正类——正是这条
+    函数要解决的问题本身。
+    """
+    labels = np.asarray(y)
+    ids = np.asarray([str(item) for item in groups])
+    unique_groups = list(dict.fromkeys(ids.tolist()))
+    if len(unique_groups) < 2:
+        raise ValueError(f"Group split needs at least two groups, found {len(unique_groups)}")
+    np.random.default_rng(random_state).shuffle(unique_groups)
+    # 打乱后的次序是**唯一**的并列裁决依据：若改用组名做 tie-break，计数相同的组永远按名字
+    # 排，random_state 就变成了摆设（实测 9 组数据在 seed 0..5 下给出完全相同的划分）。
+    order = {name: position for position, name in enumerate(unique_groups)}
+    classes = [int(value) for value in np.unique(labels)]
+    sizes = {name: int((ids == name).sum()) for name in unique_groups}
+    counts = {
+        name: {value: int(((ids == name) & (labels == value)).sum()) for value in classes}
+        for name in unique_groups
+    }
+    total_windows = int(labels.size)
+    shares = {"train": 1.0 - test_size, "test": test_size}
+    assigned: dict[str, str] = {}
+    side_size = {"train": 0, "test": 0}
+    side_class = {side: dict.fromkeys(classes, 0) for side in ("train", "test")}
+
+    def place(name: str, side: str) -> None:
+        assigned[name] = side
+        side_size[side] += sizes[name]
+        for value, count in counts[name].items():
+            side_class[side][value] += count
+
+    def balance(per_side: dict[str, float], target: float) -> str:
+        """把"放进哪一侧"交给"相对目标份额更缺"的那边（目标的份额由 test_size 决定）。"""
+        ratio = {side: per_side[side] / max(shares[side] * target, 1e-9) for side in ("train", "test")}
+        return "train" if ratio["train"] <= ratio["test"] else "test"
+
+    # 2. 稀有类先落地：每一个类都尽量两边都有。
+    for value in sorted(classes, key=lambda item: (int((labels == item).sum()), item)):
+        total = int((labels == value).sum())
+        candidates = sorted(
+            (name for name in unique_groups if name not in assigned and counts[name][value] > 0),
+            key=lambda name: (-counts[name][value], -sizes[name], order[name]),
+        )
+        for name in candidates:
+            present = {side: side_class[side][value] for side in shares}
+            # "某一侧还没有这个类"优先于按比例平衡：这正是"测试集不能一个正类都没有"的保证。
+            # 两边都有（或都没有）之后才交给比例规则去照顾规模。
+            absent = [side for side in ("train", "test") if present[side] == 0]
+            side = (
+                absent[0]
+                if len(absent) == 1
+                else balance({s: present[s] + counts[name][value] for s in shares}, total)
+            )
+            place(name, side)
+    # 3. 其余组补规模。
+    for name in sorted(
+        (item for item in unique_groups if item not in assigned), key=lambda item: (-sizes[item], order[item])
+    ):
+        side = balance({s: side_size[s] + sizes[name] for s in shares}, total_windows)
+        place(name, side)
+
+    if not side_size["train"] or not side_size["test"]:
+        raise ValueError("Class-aware group split produced an empty side; adjust test_size or data")
+    train = np.array([position for position, name in enumerate(ids) if assigned[name] == "train"])
+    test = np.array([position for position, name in enumerate(ids) if assigned[name] == "test"])
+    return train, test
+
+
+def _class_aware_temporal_boundary(y: np.ndarray, test_size: float) -> tuple[int, str | None]:
+    """时间留出的切点允许在目标比例附近**小幅移动**，好让两侧都有故障样本。
+
+    时间切分必须保持"训练在前、测试在后"，不能像 :func:`_class_aware_group_split` 那样任意
+    挑组。但切点本身是可以挪的：故障往往集中在某几段，末段偏偏全是正常样本时，把切点往前
+    挪一点就能拿到一个"测得到故障"的留出集，而这正是评估的**前提**。
+
+    可移动范围限定在 ``test_size`` 的 ±50% 之内（即测试集占 ``[0.5, 1.5] × test_size``），
+    这样测试规模不会被挪到失去代表性的地步；超出这个范围宁可保留目标切点，让
+    :func:`_split_balance_findings` 去明说"测试集没有正类"。
+
+    返回 ``(切点, 说明或 None)``。说明只在**切点被移动**、或**挪了也凑不齐**时给出——
+    留出集不是"最后 25%"这件事必须留在指标里，否则报告里的数字解释不通。
+    """
+    labels = np.asarray(y)
+    size = int(labels.size)
+    target = int(size * (1 - test_size))
+    classes = np.unique(labels)
+    # ±50% 的窗口：下限对应"测试集最多 1.5×test_size"，上限对应"最少 0.5×test_size"。
+    low = max(1, int(np.floor(size * (1 - 1.5 * test_size))))
+    high = min(size - 1, int(np.ceil(size * (1 - 0.5 * test_size))))
+    best: int | None = None
+    for boundary in range(low, high + 1):
+        if len(np.unique(labels[:boundary])) != len(classes):
+            continue
+        if len(np.unique(labels[boundary:])) != len(classes):
+            continue
+        if best is None or abs(boundary - target) < abs(best - target):
+            best = boundary
+    if best is None:
+        note = (
+            f"Temporal split: no cut point inside [{low}, {high}] keeps every class on both sides "
+            f"(target boundary {target}); the holdout below may be missing a class, so read its "
+            "metrics with that in mind"
+        )
+        return target, note
+    if best == target:
+        return target, None
+    share = (size - best) / size
+    return best, (
+        f"Temporal split: boundary moved from {target} to {best} so both sides contain every class; "
+        f"the holdout is now {size - best}/{size} rows ({share:.1%}) instead of the requested "
+        f"{test_size:.1%}"
+    )
+
+
 def _split_balance_findings(
     train_counts: dict[str, int], test_counts: dict[str, int], positive_class: str | None
 ) -> list[str]:
@@ -302,12 +439,19 @@ def validate_model(
 ) -> dict[str, Any]:
     """训练并评估一个分类器；``algorithm`` 决定估计器，``split_method`` 决定划分方式。
 
-    ``split_method`` 四选一：
+     ``split_method`` 四选一：
 
-    * ``stratified``：随机分层切分，仅适用于行之间相互独立的数据；
-    * ``group``：按 ``group_column``（实例）整组留出；
-    * ``asset``：按资产整组留出，需要上游窗口组件设置了 ``asset_column``；
-    * ``temporal``：按现有行序取后段为测试，并剔除与测试窗口共享原始行的训练窗口（purge）。
+     * ``stratified``：随机分层切分，仅适用于行之间相互独立的数据；
+     * ``group``：按 ``group_column``（实例）整组留出；
+     * ``asset``：按资产整组留出，需要上游窗口组件设置了 ``asset_column``；
+     * ``temporal``：按现有行序取后段为测试，并剔除与测试窗口共享原始行的训练窗口（purge）。
+
+     三种"整组/整段留出"都**按类别分层**：故障样本必须同时落在训练集和测试集里，否则
+     测试集一个正类都没有，``accuracy``/``balanced_accuracy`` 会变成纯粹的假象（实测 HBM
+     原始日志：按服务器留出时测试集 155 个窗口里 0 个正类、accuracy=1.0）。``group``/``asset``
+     的做法见 :func:`_class_aware_group_split`，``temporal`` 的做法见
+     :func:`_class_aware_temporal_boundary`；真的做不到（例如只有一个实例发生过故障）时，
+     平台不会静默——指标里会出现明说这一点的 warning。
 
     估计器分支：``random_forest`` / ``decision_tree`` / ``svm``（标准化 + 可选概率校准）/
     ``xgboost``（按类别数自动选择 objective）/ ``reservoir_classifier``（标准化 + 储备池 + 逻辑回归）。
@@ -324,7 +468,8 @@ def validate_model(
         raise ValueError("The label column cannot also be a model feature")
     # provenance 一致 = 特征和标签来自同一批窗口（同一份 source_rows）。不一致说明接线错了。
     for key in ("source_rows", "source_rows_ranges", "assets", "source_path", "source_id"):
-        if features.attrs.get(key) != labels.attrs.get(key):
+        # 区间是 numpy 数组（为了躲开 pandas 深拷贝 attrs），比较必须走 values_equal。
+        if not values_equal(features.attrs.get(key), labels.attrs.get(key)):
             raise ValueError(f"Feature and label provenance differs: {key}")
     if labels.isna().any():
         raise ValueError("Labels contain missing values; filter or relabel before validating")
@@ -343,6 +488,8 @@ def validate_model(
     y = encoder.transform(labels)
     indices = np.arange(len(features))
     warnings = list(features.attrs.get("evaluation_warnings", []))
+    # 切分被调整过（时间切点移动）时在这里留一句话：指标里的数字得配得上"留出集其实不是最后 25%"
+    split_note: str | None = None
     # 有 provenance 才能做重叠行复查；老数据/手写特征表可能没有这些字段。
     has_coverage = "source_rows_ranges" in features.attrs or bool(features.attrs.get("source_rows"))
     if split_method == "group":
@@ -350,11 +497,8 @@ def validate_model(
         groups = features.attrs.get("groups")
         if not features.attrs.get("grouped") or groups is None or len(groups) != len(features):
             raise ValueError("Group split requires feature extraction with group_column")
-        train, test = next(
-            GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=random_state).split(
-                features, y, groups=groups
-            )
-        )
+        # 按类别分层地整组留出：保证故障样本落到两侧，而不是"随到随分"。
+        train, test = _class_aware_group_split(groups, y, test_size, random_state)
     elif split_method == "asset":
         # Whole assets (wells/machines) are held out, which is the honest question when a
         # deployment meets equipment it has never seen. Needs asset_column upstream.
@@ -367,13 +511,11 @@ def validate_model(
         distinct_assets = set(assets)
         if len(distinct_assets) < 2:
             raise ValueError(f"Asset split needs at least two assets, found {len(distinct_assets)}")
-        train, test = next(
-            GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=random_state).split(
-                features, y, groups=list(assets)
-            )
-        )
+        # 整座资产留出同样按类别分层：留出的数据中心一台故障都没有，等于没评估。
+        train, test = _class_aware_group_split(list(assets), y, test_size, random_state)
     elif split_method == "temporal":
-        boundary = int(len(features) * (1 - test_size))
+        # 切点可以在目标比例附近小幅移动，好让两侧都有故障样本；移动的事实写进 split_note。
+        boundary, split_note = _class_aware_temporal_boundary(y, test_size)
         train, test = indices[:boundary], indices[boundary:]
         if has_coverage:
             # Interval logic keeps streamed features from expanding every window's rows.
@@ -523,6 +665,8 @@ def validate_model(
         "positive_class": str(encoder.classes_[_positive_index(encoder, positive_class)]),
         "miss_rate": _miss_rate(y[test], predicted, encoder, positive_class),
         "split_method": split_method,
+        # 切分被调整过时的说明（目前只有 temporal 会移动切点），没调整就是 None。
+        "split_note": split_note,
         "train_count": len(train),
         "test_count": len(test),
         "random_state": random_state,

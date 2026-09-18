@@ -43,9 +43,13 @@ SUMMARY_KEYS = (
     "anomaly_rate",
     "test_count",
     "train_count",
+    "train_class_counts",
+    "test_class_counts",
     "train_class_rates",
     "test_class_rates",
     "split_method",
+    # 切分被调整过（时间切点移动）时的说明：不打印它，"留出集不是最后 25%" 就没人知道。
+    "split_note",
 )
 
 

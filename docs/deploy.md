@@ -36,11 +36,32 @@ powershell -ExecutionPolicy Bypass -File scripts\deploy.ps1
 | 参数 | 默认 | 说明 |
 | --- | --- | --- |
 | `-InstallDir` | `%LOCALAPPDATA%\fault-prediction-platform` | 安装目录（venv、脚本、默认数据目录、`start.ps1`） |
-| `-CodexHome` | `%USERPROFILE%\.codex` | skill 与 `config.toml` 的所在目录 |
+| `-Client` | `codex` | 给哪个客户端装：`codex` / `opencode` / `both`（两边都注册 MCP 与 skill） |
+| `-CodexHome` | `%USERPROFILE%\.codex` | Codex 的 skill 与 `config.toml` 所在目录 |
+| `-OpencodeHome` | `%USERPROFILE%\.config\opencode` | OpenCode 的 `opencode.json` 与 `skills\` 所在目录 |
 | `-Port` | 8765 | 写进 MCP 配置与启动脚本的端口 |
 | `-SkipSkill` / `-SkipMcp` / `-SkipVerify` | 关 | 只做其中一部分（例如只装服务、先不碰 Codex 配置） |
 
 安装脚本是幂等的：重复执行会复用已有 venv、覆盖同名 skill、并把 MCP 配置更新为最新路径（写入前自动备份 `config.toml.bak-<时间戳>`）。
+
+### 装给 OpenCode
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\deploy.ps1 -Client opencode
+```
+
+它做两件事（两边各自备份）：
+
+1. 把 `fault-prediction` 写进 `%USERPROFILE%\.config\opencode\opencode.json` 的 `mcp` 段
+   （`type: local` + `command` 数组——OpenCode 的格式与 Codex 的 TOML 完全不同）；
+2. 把 skill 复制到 `%USERPROFILE%\.config\opencode\skills\fault-prediction\`。
+
+只想装到某个项目里（不污染全局）：skill 用 `install_skill.py --client opencode --scope project`
+（写 `<项目>\.opencode\skills\`），配置用 `install_mcp_config.py --client opencode --config .\opencode.json`。
+另外 `--client agents` 会把 skill 装到 `~/.agents/skills/`——**Codex 与 OpenCode 都会读这个目录**，两边都用的话装一份就够。
+
+Uninstall：删掉 `opencode.json` 里的 `mcp.fault-prediction` 段与 `skills\fault-prediction\` 目录，
+或者用安装时留下的 `opencode.json.bak-<时间戳>` 还原。
 
 ## 3. 怎么测试（四层，从快到慢）
 

@@ -32,7 +32,6 @@ from typing import Any, Callable, Iterable, Iterator
 
 import numpy as np
 import pandas as pd
-from scipy import stats
 from sklearn.metrics import r2_score
 from sklearn.model_selection import KFold
 
@@ -100,6 +99,9 @@ MISSING_CATEGORY = "<missing>"
 
 #: Shorter windows cannot resolve a usable spectrum, so they are rejected outright.
 MIN_SPECTRAL_SAMPLES = 8
+#: 少于这么多行的窗口，统计量基本没有信息（1 行时 std/skew/kurtosis 恒为 0，mean 就是那一个值）。
+#: 稀疏数据上这种窗口很常见，所以要计数并提醒——但**默认不丢**，以免悄悄改变样本数。
+SPARSE_WINDOW_ROWS = 3
 
 #: 时长文本的单位换算（秒）。只接受"数字 + 单位"，纯数字按秒解释。
 DURATION_UNITS = {"s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0, "w": 604800.0}
@@ -373,68 +375,120 @@ def _half_delta(x: np.ndarray) -> float:
     return float(np.mean(x[middle:]) - np.mean(x[:middle]))
 
 
+def _biased_skewness(x: np.ndarray) -> float:
+    """偏度（有偏估计，与 ``scipy.stats.skew`` 默认参数一致）。
+
+    手写矩公式而不是调 scipy：`scipy.stats.skew` 对 60 个点的窗口要 **200µs**（大部分花在它自己的
+    参数校验与 nan 政策上），而这段 numpy 只花约 12µs，数值口径完全相同（有偏 = 不做样本量修正）。
+    常量窗口的偏度数学上无定义，调用方会先判 `ptp`。
+    """
+    centered = x - np.mean(x)
+    variance = float(np.mean(centered**2))
+    if variance <= 0:
+        return 0.0
+    return float(np.mean(centered**3) / variance**1.5)
+
+
+def _biased_kurtosis(x: np.ndarray) -> float:
+    """峰度（超额、有偏，与 ``scipy.stats.kurtosis`` 默认参数一致）。同样是为了避开 scipy 的固定开销。"""
+    centered = x - np.mean(x)
+    variance = float(np.mean(centered**2))
+    if variance <= 0:
+        return 0.0
+    return float(np.mean(centered**4) / variance**2 - 3.0)
+
+
+def _value_counts(x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """``np.unique`` 版的取值计数（值、次数），用来替掉 ``pd.Series(x).value_counts()``。
+
+    pandas 那条路每次调用都要建 Series、再走一遍完整的 value_counts 机制；在"每个窗口每列都要算
+    一次重复度"的场景里，它是仅次于 scipy 峰度/偏度的第二大头（合计约 21%）。
+    """
+    return np.unique(x, return_counts=True)
+
+
+def _repeated_value_ratio(x: np.ndarray) -> float:
+    """重复值占比：出现过不止一次的取值，共占多少行。"""
+    _, counts = _value_counts(x)
+    return float(counts[counts > 1].sum() / len(x))
+
+
+def _duplicate_sum(x: np.ndarray) -> float:
+    """重复带来的"多余数值之和"：每个重复取值按 ``值 × (次数-1)`` 累加。"""
+    values, counts = _value_counts(x)
+    excess = counts > 1
+    return float(np.sum(values[excess] * (counts[excess] - 1)))
+
+
+#: 统计量的实现表：**模块加载时建一次**。
+#:
+#: 这一层以前是每次调用现搭一张 30 个 lambda 的表，并且无条件先把 rms 算出来——于是哪怕只要
+#: `count`，每次也要付出"建 30 个闭包 + 一次 np.mean(x**2)"的固定开销。108k 行 / 10 个统计量的
+#: 实测里这笔固定开销是特征提取的大头（每个窗口每列 36µs，其中约 6µs 纯属白干）。改成查表之后，
+#: 只有真的被请求的统计量才会被算（`rms` 也只在 `rms`/`crest_factor` 里现算）。
+_STAT_FUNCTIONS: dict[str, Callable[[np.ndarray, float], float]] = {
+    "mean": lambda x, q: float(np.mean(x)),
+    "std": lambda x, q: float(np.std(x)),
+    "variance": lambda x, q: float(np.var(x)),
+    "min": lambda x, q: float(np.min(x)),
+    "max": lambda x, q: float(np.max(x)),
+    "median": lambda x, q: float(np.median(x)),
+    "rms": lambda x, q: float(np.sqrt(np.mean(x**2))),
+    # 常数列的偏度/峰度数学上无定义（分母为 0），按约定返回 0。
+    "skewness": lambda x, q: _biased_skewness(x) if np.ptp(x) else 0.0,
+    "kurtosis": lambda x, q: _biased_kurtosis(x) if np.ptp(x) else 0.0,
+    "quantile": lambda x, q: float(np.quantile(x, q)),
+    "range": lambda x, q: float(np.ptp(x)),
+    # 一次算两个分位：`np.quantile` 的固定开销比两次分别调用小一半。
+    "iqr": lambda x, q: float(np.subtract(*np.quantile(x, [0.75, 0.25]))),
+    "mad": lambda x, q: float(np.median(np.abs(x - np.median(x)))),
+    "peak": lambda x, q: float(np.max(np.abs(x))),
+    # RMS 为 0 时返回 0，而不是除零得到 inf。
+    "crest_factor": lambda x, q: float(np.max(np.abs(x)) / np.sqrt(np.mean(x**2))) if np.mean(x**2) else 0.0,
+    # ── 结构类特征：位置、计数、重复、变化 ──
+    "count": lambda x, q: float(len(x)),
+    # 窗口内**不同取值个数**。给"地址/编号/档位"这类标识列用：它们不该被求均值
+    # （地址是坐标，不是物理量），但"这一小段时间里错误落到多少个不同的 bank / col 上"
+    # 是真实的物理问题。等价于 `count × (1 - duplicate_point_ratio)`，单独给出来是因为
+    # 调用方要从枚举里直接选到它，而不是自己拼算术。
+    "distinct_count": lambda x, q: float(len(np.unique(x))),
+    # 位置按 0..1 归一化，跨窗口长度可比；首/末分别指该极值第一次与最后一次出现。
+    "argmax_first": lambda x, q: float(np.argmax(x)) / max(len(x) - 1, 1),
+    "argmax_last": lambda x, q: float(len(x) - 1 - np.argmax(x[::-1])) / max(len(x) - 1, 1),
+    "argmin_first": lambda x, q: float(np.argmin(x)) / max(len(x) - 1, 1),
+    "argmin_last": lambda x, q: float(len(x) - 1 - np.argmin(x[::-1])) / max(len(x) - 1, 1),
+    "count_above_mean": lambda x, q: float(np.sum(x > np.mean(x))),
+    "count_below_mean": lambda x, q: float(np.sum(x < np.mean(x))),
+    "longest_above_mean": lambda x, q: float(_longest_run(x > np.mean(x))),
+    "longest_below_mean": lambda x, q: float(_longest_run(x < np.mean(x))),
+    "mean_delta": lambda x, q: _half_delta(x),
+    "mean_abs_delta": lambda x, q: abs(_half_delta(x)),
+    "mean_second_derivative": lambda x, q: float(np.mean(np.diff(x, n=2))) if len(x) > 2 else 0.0,
+    "duplicate_point_ratio": lambda x, q: float(1.0 - len(np.unique(x)) / len(x)),
+    # 重复类特征共用一次取值计数：`np.unique` 比 `pd.Series(x).value_counts()` 快得多。
+    "repeated_value_ratio": lambda x, q: _repeated_value_ratio(x),
+    "duplicate_sum": lambda x, q: _duplicate_sum(x),
+    # 时间反转不对称：对 (x[t+2] - x[t])² 取均值，正/负向变化在这一统计量上不对称。
+    "time_reversal_asymmetry": lambda x, q: float(np.mean((x[2:] - x[:-2]) ** 2)) if len(x) > 2 else 0.0,
+    # 以下四个是清单里的"比较型"特征，按字面实现；它们是否对模型有用需要单独评估。
+    "std_gt_range": lambda x, q: float(np.std(x) > np.ptp(x)),
+    "variance_gt_std": lambda x, q: float(np.var(x) > np.std(x)),
+    "max_repeated": lambda x, q: float(np.sum(x == np.max(x)) > 1),
+    "min_repeated": lambda x, q: float(np.sum(x == np.min(x)) > 1),
+}
+
+
 def _stat(x: np.ndarray, name: str, quantile: float) -> float:
     """计算单个统计量；``quantile`` 只在 ``name="quantile"`` 时使用。
 
-    两处防御：常数列的偏度/峰度返回 0（数学上分母为 0，无定义）；
-    RMS 为 0 时波峰因数返回 0，而不是除零得到 inf。
+    常量列表见 :data:`_STAT_FUNCTIONS`——查表而不是现搭函数表，这是 108k 行数据上特征提取
+    最主要的加速点；名字不在表里时抛 ``ValueError`` 而不是 ``KeyError``，报错口径与别处一致。
     """
-    rms = float(np.sqrt(np.mean(x**2)))
-    funcs = {
-        "mean": lambda: np.mean(x),
-        "std": lambda: np.std(x),
-        "variance": lambda: np.var(x),
-        "min": lambda: np.min(x),
-        "max": lambda: np.max(x),
-        "median": lambda: np.median(x),
-        "rms": lambda: rms,
-        "skewness": lambda: stats.skew(x) if np.ptp(x) else 0.0,
-        "kurtosis": lambda: stats.kurtosis(x) if np.ptp(x) else 0.0,
-        "quantile": lambda: np.quantile(x, quantile),
-        "range": lambda: np.ptp(x),
-        "iqr": lambda: np.quantile(x, 0.75) - np.quantile(x, 0.25),
-        "mad": lambda: np.median(np.abs(x - np.median(x))),
-        "peak": lambda: np.max(np.abs(x)),
-        "crest_factor": lambda: np.max(np.abs(x)) / rms if rms else 0.0,
-        # ── 结构类特征：位置、计数、重复、变化 ──
-        "count": lambda: len(x),
-        # 窗口内**不同取值个数**。给"地址/编号/档位"这类标识列用：它们不该被求均值
-        # （地址是坐标，不是物理量），但"这一小段时间里错误落到多少个不同的 bank / col 上"
-        # 是真实的物理问题。等价于 `count × (1 - duplicate_point_ratio)`，单独给出来是因为
-        # 调用方要从枚举里直接选到它，而不是自己拼算术。
-        "distinct_count": lambda: float(len(np.unique(x))),
-        # 位置按 0..1 归一化，跨窗口长度可比；首/末分别指该极值第一次与最后一次出现。
-        "argmax_first": lambda: float(np.argmax(x)) / max(len(x) - 1, 1),
-        "argmax_last": lambda: float(len(x) - 1 - np.argmax(x[::-1])) / max(len(x) - 1, 1),
-        "argmin_first": lambda: float(np.argmin(x)) / max(len(x) - 1, 1),
-        "argmin_last": lambda: float(len(x) - 1 - np.argmin(x[::-1])) / max(len(x) - 1, 1),
-        "count_above_mean": lambda: float(np.sum(x > np.mean(x))),
-        "count_below_mean": lambda: float(np.sum(x < np.mean(x))),
-        "longest_above_mean": lambda: float(_longest_run(x > np.mean(x))),
-        "longest_below_mean": lambda: float(_longest_run(x < np.mean(x))),
-        "mean_delta": lambda: _half_delta(x),
-        "mean_abs_delta": lambda: abs(_half_delta(x)),
-        "mean_second_derivative": lambda: float(np.mean(np.diff(x, n=2))) if len(x) > 2 else 0.0,
-        "duplicate_point_ratio": lambda: float(1.0 - len(np.unique(x)) / len(x)),
-        "repeated_value_ratio": lambda: float(
-            sum(int(count) for count in pd.Series(x).value_counts() if count > 1) / len(x)
-        ),
-        "duplicate_sum": lambda: float(
-            sum(
-                float(value) * (int(count) - 1)
-                for value, count in pd.Series(x).value_counts().items()
-                if count > 1
-            )
-        ),
-        # 时间反转不对称：对 (x[t+2] - x[t])² 取均值，正/负向变化在这一统计量上不对称。
-        "time_reversal_asymmetry": lambda: float(np.mean((x[2:] - x[:-2]) ** 2)) if len(x) > 2 else 0.0,
-        # 以下四个是清单里的"比较型"特征，按字面实现；它们是否对模型有用需要单独评估。
-        "std_gt_range": lambda: float(np.std(x) > np.ptp(x)),
-        "variance_gt_std": lambda: float(np.var(x) > np.std(x)),
-        "max_repeated": lambda: float(np.sum(x == np.max(x)) > 1),
-        "min_repeated": lambda: float(np.sum(x == np.min(x)) > 1),
-    }
-    return float(funcs[name]())
+    try:
+        function = _STAT_FUNCTIONS[name]
+    except KeyError as exc:
+        raise ValueError(f"Unknown statistical feature: {name}") from exc
+    return float(function(x, quantile))
 
 
 def _window_label(chunk: pd.DataFrame, label_column: str, label_policy: str) -> Any:
@@ -457,6 +511,49 @@ def _window_label(chunk: pd.DataFrame, label_column: str, label_policy: str) -> 
     return y.mode().iloc[0] if label_policy == "mode" else y.iloc[-1]
 
 
+def column_target_plan(
+    columns: list[str],
+    default: list[str],
+    overrides: dict[str, Any] | None,
+    *,
+    valid: tuple[str, ...] | None = None,
+    label: str = "features",
+) -> dict[str, list[str]]:
+    """把"每列用哪些特征"解析成 ``{列: [名字, ...]}``；没被覆盖的列用全局默认。
+
+    为什么需要它：``features`` 是**全局**的，可真实数据里不同列该看的东西不一样——地址/编号列
+    （`stack`、`col`、`row`）只能取 `distinct_count`，把它们求均值等于把坐标当温度；物理量列才
+    该上均值/标准差。以前只能"建两三条分支再合并"，既费节点，又容易在 `feature.merge` 上撞到
+    "来源必须完全一致"。
+
+    取值可以是单个字符串（``{"stack": "distinct_count"}``）或字符串列表；空值直接报错，
+    因为"这一列什么都不算"应该通过把它从 ``columns`` 里去掉来表达，而不是留一个空清单让
+    人以为算过了。
+    """
+    plan: dict[str, list[str]] = {column: list(default) for column in columns}
+    for column, value in (overrides or {}).items():
+        if column not in columns:
+            raise ValueError(
+                f"column_features names {column!r}, which is not in columns; known columns: {list(columns)}"
+            )
+        names = [value] if isinstance(value, str) else list(value)
+        if not names:
+            raise ValueError(
+                f"column_features[{column!r}] is empty; drop the entry to use the global "
+                f"{label}, or remove the column from columns to skip it"
+            )
+        if not all(isinstance(name, str) for name in names):
+            raise ValueError(f"column_features[{column!r}] must contain {label} names as strings")
+        if valid is not None:
+            unknown = [name for name in names if name not in valid]
+            if unknown:
+                raise ValueError(
+                    f"column_features[{column!r}] has unknown {label} {unknown}; valid: {list(valid)}"
+                )
+        plan[column] = names
+    return plan
+
+
 def _feature_row(
     chunk: pd.DataFrame,
     cols: list[str],
@@ -466,12 +563,17 @@ def _feature_row(
     degree: int,
     fitting_method: str,
     time_column: str | None,
+    overrides: dict[str, list[str]] | None = None,
 ) -> dict[str, float]:
     """为一个窗口生成一行特征；批处理与流式共用，保证两条路径数值一致。
 
     ``kind="statistical"`` 时按 ``chosen`` 逐个算统计量；否则按 ``fitting_method``
     做拟合，时间轴取自 ``time_column``（数值列直接用，时间戳换算成相对首点的秒数，
     没有则用行号 0,1,2…）。
+
+    ``overrides`` 给出"这一列改用哪些特征"（``{列: [名字]}``）——真实数据里不同列该看的东西
+    不一样：地址/编号列只能取 ``distinct_count``，物理量列才该求均值与标准差。解析与校验在
+    :func:`column_target_plan` 里统一做，这里只负责查表。
 
     拟合输出：各阶系数 ``coef_*``、R²、趋势强度（``1 - 残差方差/原始方差``，负值截断为 0）、
     残差均值与标准差。指数拟合在对数域做多项式拟合，因此要求取值全为正。
@@ -480,7 +582,8 @@ def _feature_row(
     for col in cols:
         values = chunk[col].to_numpy(dtype=float)
         if kind == "statistical":
-            row.update({f"{col}__{name}": _stat(values, name, quantile) for name in chosen})
+            names = overrides.get(col, chosen) if overrides else chosen
+            row.update({f"{col}__{name}": _stat(values, name, quantile) for name in names})
             continue
         if time_column:
             raw_t = chunk[time_column]
@@ -518,6 +621,89 @@ def _feature_row(
             }
         )
     return row
+
+
+class CoverageRanges:
+    """窗口来源行的区间集合（每项是 ``[start, stop)``），装在 ``attrs["source_rows_ranges"]`` 里。
+
+    为什么不直接放 numpy 数组或"列表的列表"：
+
+    * pandas 在每次 ``__finalize__``（`select_dtypes`/`iloc`/`describe`… 都会触发）都会**深拷贝
+      attrs**。实测 3580 个窗口的行号列表一次要 3.1ms、numpy 数组只要 0.003ms，而
+      `visual.overview` 在特征表上一次就能触发四百多次——秒级差别。
+    * 但裸 numpy 数组会踩另一个坑：``pd.concat`` 会用 ``==`` 比较两侧 attrs，数组比较返回数组，
+      于是抛 "truth value of an array is ambiguous"（`feature.merge` 当场失败）。
+
+    这个类型同时满足两点：**不可变**（``__deepcopy__`` 直接返回自身，零拷贝）且 ``==`` 返回布尔值。
+    语义与"逐窗口行号列表"完全等价——下游的区间合并、时间切分 purge、交集判断都只依赖集合语义。
+    """
+
+    __slots__ = ("_ranges",)
+
+    def __init__(self, ranges: Any) -> None:
+        self._ranges = np.asarray(ranges, dtype=np.int64).reshape(-1, 2)
+
+    def __iter__(self) -> Iterator[tuple[int, int]]:
+        return iter([(int(start), int(stop)) for start, stop in self._ranges.tolist()])
+
+    def __len__(self) -> int:
+        return int(self._ranges.shape[0])
+
+    def __getitem__(self, position: Any) -> Any:
+        if isinstance(position, slice):
+            return CoverageRanges(self._ranges[position])
+        start, stop = self._ranges[position]
+        return (int(start), int(stop))
+
+    def __eq__(self, other: Any) -> bool:
+        if isinstance(other, CoverageRanges):
+            return bool(np.array_equal(self._ranges, other._ranges))
+        if isinstance(other, np.ndarray):
+            return bool(np.array_equal(self._ranges, np.asarray(other, dtype=np.int64).reshape(-1, 2)))
+        if isinstance(other, (list, tuple)):
+            try:
+                return [(int(start), int(stop)) for start, stop in other] == list(self)
+            except (TypeError, ValueError):
+                return False
+        return NotImplemented
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> "CoverageRanges":
+        """不可变，所以深拷贝就是自己——这是绕开 pandas 深拷贝 attrs 的关键。"""
+        return self
+
+    def __reduce__(self) -> tuple[Any, tuple[Any]]:
+        """为了 pickle（产物溢写、检查点、缓存都要过一遍序列化）。"""
+        return (CoverageRanges, (self._ranges,))
+
+    def __repr__(self) -> str:
+        return f"CoverageRanges({len(self)} windows, rows {int(self._ranges[:, 0].min())}..{int(self._ranges[:, 1].max())})"
+
+
+def _compress_coverage(coverage: list[list[Any]]) -> CoverageRanges | None:
+    """把"每个窗口用了哪些原始行"压成 ``[start, stop)`` 区间；有一个窗口压不了就返回 None。
+
+    判据是**精确**的：整数且互不相同的行号，若 ``max - min + 1 == 个数``，那么这些行号必然
+    正好构成 ``[min, max]`` 这个区间（鸽巢原理）——与它们是否排序无关。这样压缩前后作为
+    "*集合*"完全等价，而下游比较（区间合并、时间切分的 purge、交集判断）都只依赖集合语义。
+
+    返回的是 **numpy 数组**而不是"列表的列表"：pandas 每次 `__finalize__` 都会深拷贝 attrs，
+    而 `copy.deepcopy` 对 3580 个小列表要 3.1ms、对一个 (3580, 2) 的 int64 数组只要 0.003ms
+    ——`visual.overview` 在特征表上一次要触发四百多次 finalize，这一项就是秒级差别。
+    """
+    ranges: list[tuple[int, int]] = []
+    for rows in coverage:
+        if not rows:
+            return None
+        first, last = rows[0], rows[-1]
+        if isinstance(first, bool) or isinstance(last, bool):
+            return None
+        if not isinstance(first, (int, np.integer)) or not isinstance(last, (int, np.integer)):
+            return None
+        low, high = int(first), int(last)
+        if high < low or high - low + 1 != len(rows):
+            return None
+        ranges.append((low, high + 1))
+    return CoverageRanges(ranges)
 
 
 def _assemble(
@@ -565,12 +751,23 @@ def _assemble(
         if overlapping is not None
         else bool(window_size and step and step < window_size),
     }
-    # Streamed extraction records [start, stop) ranges; a full list of label objects
-    # per window would cost ~36 bytes per source row and dominate memory.
+    # 覆盖信息有两种写法：逐窗口行号列表，或逐窗口 `[start, stop)` 区间。
+    #
+    # 为什么优先用区间：pandas 在任何一次 `__finalize__`（`select_dtypes`、`iloc`、`merge`…
+    # 都会触发）里**深拷贝 attrs**。108k 行 / 3580 个窗口的行号列表是 21.4 万个 Python 对象，
+    # 一次深拷贝实测 2.1 秒，而且每个下游组件都要付一次（cProfile 里 `copy.deepcopy` 被调用
+    # 910 万次）。压成区间后 attrs 只有 3580 个小列表，同样的操作降到毫秒级。
+    #
+    # 只有"这一窗的行号正好是一段连续整数"时才能这么写；不满足就整表退回行号列表，
+    # 避免同一份 attrs 里两种表示混用（`coverage_subset` 只认其中一种）。
     if coverage_as_ranges:
-        result.attrs["source_rows_ranges"] = coverage
+        result.attrs["source_rows_ranges"] = CoverageRanges(coverage)
     else:
-        result.attrs["source_rows"] = coverage
+        compressed = _compress_coverage(coverage)
+        if compressed is None:
+            result.attrs["source_rows"] = coverage
+        else:
+            result.attrs["source_rows_ranges"] = compressed
     outputs: dict[str, Any] = {"features": result}
     if label_column:
         outputs["labels"] = pd.Series(labels, index=result.index, name=label_column)
@@ -589,17 +786,32 @@ def window_arguments(
     current_fault_policy: str,
     time_column: str | None,
     label_column: str | None,
-) -> tuple[float, float, float, float]:
-    """校验并解析窗口/预测参数，返回 ``(span, stride, horizon, gap)``（秒）。
+    min_window_rows: Any = 0,
+) -> tuple[float, float, float, float, int]:
+    """校验并解析窗口/预测参数，返回 ``(span, stride, horizon, gap, min_window_rows)``（前四个是秒）。
 
     三条实现（statistical/fitting、spectral、entropy）共用这一份校验：参数组合写错时报一样
     的错，也不会再出现"某个组件悄悄少支持一个参数"的漂移。
+
+    ``current_fault_policy`` 只在 ``label_policy=horizon``（预测任务）下有意义，因为只有那时
+    窗口自身已故障的样本才需要决定"丢还是标 1/0"。它的默认值是 ``positive``（**不丢弃**：
+    真实 ECC/退化数据里"窗口内已经出现故障"的样本往往占到可评估正类的大头，默认丢掉会让
+    测试集一个正样本都没有）。在非预测模式下这个参数不生效，但**不报错**——否则每个
+    检测型流水线都要被迫显式写一个与之无关的参数；取而代之的是把"你设了但它没生效"写进
+    ``attrs["current_fault_policy_ignored"]``，让这件事可被追问。取值本身任何时候都校验，
+    所以 ``current_fault_policy="positiv"`` 这类拼写错误仍然会报错。
     """
+    if isinstance(min_window_rows, bool) or not isinstance(min_window_rows, int):
+        raise ValueError("min_window_rows must be an integer")
+    if min_window_rows < 0:
+        raise ValueError("min_window_rows must be >= 0 (0 disables the filter)")
     span = parse_duration(window_span, name="window_span")
     stride = parse_duration(step_span, name="step_span")
     horizon = parse_duration(prediction_horizon, name="prediction_horizon")
     gap = parse_duration(prediction_gap, name="prediction_gap")
     horizon_mode = label_policy == "horizon"
+    if current_fault_policy not in {"drop", "positive", "negative"}:
+        raise ValueError("current_fault_policy must be drop, positive or negative")
     # 参数组合在这里一次说清楚：静默忽略一个写错的参数，比报错贵得多。
     if span and window_size:
         raise ValueError("window_span and window_size cannot both be set; pick one window definition")
@@ -607,8 +819,6 @@ def window_arguments(
         raise ValueError("step_span needs window_span")
     if not horizon_mode and (horizon or gap):
         raise ValueError("prediction_horizon/prediction_gap need label_policy=horizon")
-    if not horizon_mode and current_fault_policy != "drop":
-        raise ValueError("current_fault_policy needs label_policy=horizon")
     if horizon_mode:
         if not label_column:
             raise ValueError("label_policy=horizon needs label_column")
@@ -618,9 +828,7 @@ def window_arguments(
             raise ValueError("label_policy=horizon needs window_span, e.g. 7d")
         if not horizon:
             raise ValueError("label_policy=horizon needs prediction_horizon, e.g. 2d")
-        if current_fault_policy not in {"drop", "positive", "negative"}:
-            raise ValueError("current_fault_policy must be drop, positive or negative")
-    return span, stride, horizon, gap
+    return span, stride, horizon, gap, min_window_rows
 
 
 def prepared_windows(
@@ -638,15 +846,21 @@ def prepared_windows(
     current_fault_policy: str,
     normal_label: str,
     counters: dict[str, int],
+    min_window_rows: int = 0,
 ) -> Iterator[tuple[str, pd.DataFrame, str, list[Any], Any]]:
     """统一的窗口流：``(键, 窗口数据, 分组标签, 来源行, 现成标签或 None)``。
 
     ``None`` 表示标签由调用方按窗口内容聚合（``strict``/``mode``/``last``）；预测模式
     （``horizon``）直接给出 0/1。窗口定义（按行 / 按时间）与标签语义只在这里定义一次，
     三个组件实现共用——避免再出现"某个组件悄悄少支持一个参数"的漂移。
+
+    ``min_window_rows`` 是**过薄窗口**的护栏：疏密不均的数据上，按时间切窗会在稀疏期切出只含
+    一两行的窗口，那里的 std/skewness 没有信息。设了它就把这些窗口**丢弃并计数**
+    （``counters["thin"]``）；默认 0 表示不丢，但仍然统计"有多薄"（``counters["sparse"]``），
+    由 :func:`window_attrs` 变成警告。丢弃顺序：先用预测视野规则丢，再看行数。
     """
     if label_policy == "horizon":
-        yield from _horizon_windows(
+        stream = _horizon_windows(
             data,
             group_column,
             time_column,
@@ -660,13 +874,25 @@ def prepared_windows(
             counters,
         )
     elif span:
-        for key, chunk, group, source_rows, _, _ in time_windows(
-            data, group_column, time_column, span, stride or span
-        ):
-            yield key, chunk, group, source_rows, None
+        stream = (
+            (key, chunk, group, source_rows, None)
+            for key, chunk, group, source_rows, _, _ in time_windows(
+                data, group_column, time_column, span, stride or span
+            )
+        )
     else:
-        for key, chunk, group, source_rows in windows(data, group_column, window_size, step, time_column):
-            yield key, chunk, group, source_rows, None
+        stream = (
+            (key, chunk, group, source_rows, None)
+            for key, chunk, group, source_rows in windows(data, group_column, window_size, step, time_column)
+        )
+    for key, chunk, group, source_rows, ready_label in stream:
+        rows_here = len(chunk)
+        if min_window_rows and rows_here < min_window_rows:
+            counters["thin"] += 1
+            continue
+        if rows_here < SPARSE_WINDOW_ROWS:
+            counters["sparse"] += 1
+        yield key, chunk, group, source_rows, ready_label
 
 
 def window_shape(span: float, stride: float, window_size: int, step: int) -> tuple[int, int, bool | None]:
@@ -690,10 +916,17 @@ def window_attrs(
     gap: float,
     current_fault_policy: str,
     counters: dict[str, int],
+    min_window_rows: int = 0,
+    window_count: int = 0,
 ) -> dict[str, Any]:
     """把时间窗口/预测视野的元数据与丢弃计数写进 attrs（三条实现共用）。
 
     "丢了多少窗口、为什么丢"必须能汇报出去，否则样本为什么变少就没人知道。
+
+    疏密不均的数据还要交代第三件事：**有多少窗口太薄**。按时间切窗的锚点是真实采样，所以
+    窗口不会是空的；但稀疏期会切出只含一两行的窗口，那里的统计量没有信息（``std``/``skewness``
+    恒为 0，``mean`` 就是那一个采样）。这一条默认只计数 + 提醒，不改变样本数；
+    想真的丢掉就设 ``min_window_rows``。
     """
     attrs = dict(base)
     horizon_mode = label_policy == "horizon"
@@ -705,14 +938,24 @@ def window_attrs(
                 "prediction_horizon_seconds": horizon or None,
                 "prediction_gap_seconds": gap if horizon_mode else None,
                 "current_fault_policy": current_fault_policy if horizon_mode else None,
+                # 非预测模式下这个参数不生效：不报错（默认值就是 positive），但必须留痕，
+                # 否则"我设成 positive 了怎么没用"会变成一个查不出来的问题。
+                "current_fault_policy_ignored": (
+                    current_fault_policy if not horizon_mode and current_fault_policy != "drop" else None
+                ),
             }
         )
+    dropped_thin = counters.get("thin", 0)
+    thin_windows = counters.get("sparse", 0)
+    attrs["window_min_rows"] = min_window_rows or None
+    attrs["window_dropped_thin"] = dropped_thin
+    attrs["window_thin_windows"] = thin_windows
+    notices = list(attrs.get("warnings", []))
     if horizon_mode:
         dropped_current = counters["current_fault"]
         dropped_unknown = counters["unknown_future"]
         attrs["horizon_dropped_current_fault"] = dropped_current
         attrs["horizon_dropped_unknown_future"] = dropped_unknown
-        notices = list(attrs.get("warnings", []))
         if dropped_current:
             notices.append(
                 f"{dropped_current} 个窗口自身已经包含故障，按 current_fault_policy={current_fault_policy} 处理："
@@ -720,8 +963,16 @@ def window_attrs(
             )
         if dropped_unknown:
             notices.append(f"{dropped_unknown} 个窗口的预测视野超出了可用数据，已丢弃，而不是标成 0")
-        if notices:
-            attrs["warnings"] = notices
+    if dropped_thin:
+        notices.append(f"{dropped_thin} 个窗口的行数少于 min_window_rows={min_window_rows}，已丢弃并计数")
+    if thin_windows and window_count and thin_windows / window_count >= 0.1:
+        notices.append(
+            f"{thin_windows}/{window_count} 个窗口（{thin_windows / window_count:.0%}）只有不到 "
+            f"{SPARSE_WINDOW_ROWS} 行：这种窗口上 std/skewness 之类基本没有信息。疏密不均的数据"
+            "常这样——放大 window_span、设 min_window_rows 丢掉它们，或改用按行切窗（window_size）"
+        )
+    if notices:
+        attrs["warnings"] = notices
     return attrs
 
 
@@ -744,8 +995,10 @@ def extract_features(
     step_span: str | float = "",
     prediction_horizon: str | float = "",
     prediction_gap: str | float = "",
-    current_fault_policy: str = "drop",
+    current_fault_policy: str = "positive",
     normal_label: str = "0",
+    column_features: dict[str, Any] | None = None,
+    min_window_rows: int = 0,
 ) -> dict[str, Any]:
     """批处理入口：一次读完整表，输出窗口特征与对齐标签。
 
@@ -758,10 +1011,18 @@ def extract_features(
     标签有两种来源：窗口内聚合（``strict``/``mode``/``last``），或**未来视野**
     （``label_policy="horizon"``）：窗口结束加 ``prediction_gap`` 之后、``prediction_horizon``
     之内出现过故障就标 1。后者才是"预测未来会不会故障"，也是把检测任务变成预测任务的那一步。
-    窗口自身已经故障、或视野超出数据末尾的样本会被丢弃并计数，写进 attrs 与 warnings。
+    **窗口自身已经故障的样本默认保留并标 1**（``current_fault_policy="positive"``）——真实
+    ECC/退化数据里故障往往集中在少数设备上，默认丢掉会让切分后的测试集一个正样本都没有；
+    想按老口径把它们留给检测任务就显式传 ``current_fault_policy="drop"``。**视野超出数据末尾
+    的样本一律丢弃并计数**（"没看到故障"不等于"没有故障"）。丢弃与保留的数量都写进 attrs
+    与 warnings。
 
     返回 ``{"features": DataFrame, "labels": Series}``（没有标签列时只有 features），
     两者的 ``attrs`` 携带分组、窗口参数、来源行与预测视野，供合并与验证使用。
+
+    ``column_features`` 让**每列用不同的统计量**（``{"stack": "distinct_count"}``）；没列到的列
+    用全局 ``features``。``kind="fitting"`` 没有"特征清单"（输出由 ``fitting_method`` 决定），
+    因此给拟合分支传它会直接报错，而不是悄悄忽略。
     """
     cols = numeric_columns(data, columns)
     # 标签列与分组列不能同时当特征输入，否则等于把答案（或身份）喂给模型。
@@ -770,8 +1031,14 @@ def extract_features(
     if not np.isfinite(data[cols].to_numpy(dtype=float, copy=False)).all():
         raise ValueError("Feature extraction requires finite numeric values")
     chosen = features or ["mean", "std", "rms"]
+    if column_features and kind != "statistical":
+        raise ValueError(
+            "column_features selects statistical features; the fitting branch has no feature list "
+            "(its output comes from fitting_method)"
+        )
+    plan = column_target_plan(cols, chosen, column_features, valid=STATISTICS) if column_features else None
     asset_of = group_assets(data, group_column, asset_column) if asset_column and group_column else None
-    span, stride, horizon, gap = window_arguments(
+    span, stride, horizon, gap, min_rows = window_arguments(
         window_size=window_size,
         window_span=window_span,
         step_span=step_span,
@@ -781,8 +1048,9 @@ def extract_features(
         current_fault_policy=current_fault_policy,
         time_column=time_column,
         label_column=label_column,
+        min_window_rows=min_window_rows,
     )
-    counters = {"current_fault": 0, "unknown_future": 0}
+    counters = {"current_fault": 0, "unknown_future": 0, "thin": 0, "sparse": 0}
     rows, labels, keys, group_ids, coverage = [], [], [], [], []
     for key, chunk, group, source_rows, ready_label in prepared_windows(
         data,
@@ -799,8 +1067,11 @@ def extract_features(
         current_fault_policy,
         normal_label,
         counters,
+        min_rows,
     ):
-        rows.append(_feature_row(chunk, cols, kind, chosen, quantile, degree, fitting_method, time_column))
+        rows.append(
+            _feature_row(chunk, cols, kind, chosen, quantile, degree, fitting_method, time_column, plan)
+        )
         if label_column:
             label = (
                 ready_label if ready_label is not None else _window_label(chunk, label_column, label_policy)
@@ -820,6 +1091,8 @@ def extract_features(
         gap=gap,
         current_fault_policy=current_fault_policy,
         counters=counters,
+        min_window_rows=min_rows,
+        window_count=len(rows),
     )
     outputs = _assemble(
         rows,
@@ -892,7 +1165,8 @@ def _stream_windows(
     label_policy: str,
     attrs: dict[str, Any],
     asset_column: str | None = None,
-    min_window_rows: int = 1,
+    min_samples: int = 1,
+    min_window_rows: int = 0,
     on_progress: Callable[[int], None] | None = None,
 ) -> dict[str, Any]:
     """Window features over a chunk iterator without ever holding the whole input.
@@ -902,7 +1176,9 @@ def _stream_windows(
     (contiguous) and, when ``time_column`` is given, by time inside each group.
 
     ``build_row`` 返回 ``None`` 表示"跳过这个窗口"（频域组件的 ``flat_policy=skip`` 用它）；
-    ``min_window_rows`` 是每个窗口的最少样本数（频域要求至少 8 个点）。
+    ``min_samples`` 是**硬要求**：窗口样本数不足就报错（频域 FFT 至少要 8 个点）。
+    ``min_window_rows`` 是**软过滤**：样本数不足就丢弃并计数（与批处理同一套语义），
+    用于疏密不均的数据——流式只支持按行切窗，所以这条通常不触发，但口径必须一致。
     进度通过 ``on_progress(已处理行数)`` 回调上报，用于给用户显示执行进度。
     """
     rows: list[dict[str, float]] = []
@@ -913,11 +1189,16 @@ def _stream_windows(
     processed = 0
     cols: list[str] = []
     asset_of: dict[str, str] = {}
+    thin_dropped = 0
 
     def add_window(group_number: int, start: int, window: pd.DataFrame, group_label: str) -> None:
         """收下一个窗口：校验时间有序、调用 build_row、记录键/分组/来源区间/标签。"""
-        if len(window) < min_window_rows:
-            raise ValueError(f"Window needs at least {min_window_rows} samples")
+        nonlocal thin_dropped
+        if len(window) < min_samples:
+            raise ValueError(f"Window needs at least {min_samples} samples")
+        if min_window_rows and len(window) < min_window_rows:
+            thin_dropped += 1
+            return
         if time_column and not window[time_column].is_monotonic_increasing:
             # 流式只有一个方向：读到哪算到哪，事后无法重排，所以顺序错了必须立刻报错。
             raise ValueError(
@@ -1007,7 +1288,18 @@ def _stream_windows(
                 add_window(group_number, start, window, str(pending_group))
 
     # 标记这是流式结果：下游据此知道覆盖信息是区间形式，并用区间算法做重叠判断。
-    attrs = {**attrs, "streamed_rows": processed, "streaming": True}
+    attrs = {
+        **attrs,
+        "streamed_rows": processed,
+        "streaming": True,
+        "window_min_rows": min_window_rows or None,
+        "window_dropped_thin": thin_dropped,
+    }
+    if thin_dropped:
+        attrs["warnings"] = [
+            *attrs.get("warnings", []),
+            f"{thin_dropped} 个窗口的行数少于 min_window_rows={min_window_rows}，已丢弃并计数",
+        ]
     outputs = _assemble(
         rows,
         keys,
@@ -1117,6 +1409,23 @@ def rows_without_overlap(attrs: dict[str, Any], held_out: list[int], candidates:
     return kept
 
 
+def values_equal(left: Any, right: Any) -> bool:
+    """比较两个 attrs 取值是否相等，**兼容 numpy 数组**。
+
+    逐键比较 provenance 时不能直接用 ``!=``：区间覆盖已经是 numpy 数组（为了躲开 pandas 深拷贝
+    attrs 的开销），而数组的 ``!=`` 返回一个数组，`if` 到它上面就是
+    "truth value of an array is ambiguous"。这里统一抹平。
+    """
+    if left is None or right is None:
+        return left is None and right is None
+    if isinstance(left, np.ndarray) or isinstance(right, np.ndarray):
+        try:
+            return bool(np.array_equal(np.asarray(left), np.asarray(right)))
+        except (TypeError, ValueError):
+            return False
+    return left == right
+
+
 def provenance_matches(left: dict[str, Any], right: dict[str, Any]) -> bool:
     """比较两侧来源是否完全一致，兼容"批处理行列表"与"流式区间"两种表示。
 
@@ -1161,10 +1470,12 @@ def extract_features_stream(
     step_span: str | float = "",
     prediction_horizon: str | float = "",
     prediction_gap: str | float = "",
-    current_fault_policy: str = "drop",
+    current_fault_policy: str = "positive",
     normal_label: str = "0",
     attrs: dict[str, Any] | None = None,
     on_progress: Callable[[int], None] | None = None,
+    column_features: dict[str, Any] | None = None,
+    min_window_rows: int = 0,
 ) -> dict[str, Any]:
     """流式版 :func:`extract_features`，输出 schema 完全一致（统计/拟合分支）。
 
@@ -1172,6 +1483,13 @@ def extract_features_stream(
     并用 ``streaming``/``streamed_rows`` 标注来源。数值结果由测试逐位校验为相同。
     """
     chosen = features or ["mean", "std", "rms"]
+    if column_features and kind != "statistical":
+        raise ValueError(
+            "column_features selects statistical features; the fitting branch has no feature list "
+            "(its output comes from fitting_method)"
+        )
+    # 流式下真正的数值列要等第一块到达才知道，所以计划延后到第一个窗口再解析。
+    plan: dict[str, list[str]] | None = None
 
     # 时间窗口与未来视野标签都需要"整组 + 它的未来"，而流式是按块看的，看不到未来。
     # 与其给出一个看起来能跑、标签却是错的流式结果，不如在这里明确拒绝。
@@ -1186,7 +1504,10 @@ def extract_features_stream(
         raise ValueError("prediction_horizon/prediction_gap need label_policy=horizon")
 
     def build_row(window: pd.DataFrame, cols: list[str]) -> dict[str, float]:
-        return _feature_row(window, cols, kind, chosen, quantile, degree, fitting_method, time_column)
+        nonlocal plan
+        if column_features and plan is None:
+            plan = column_target_plan(cols, chosen, column_features, valid=STATISTICS)
+        return _feature_row(window, cols, kind, chosen, quantile, degree, fitting_method, time_column, plan)
 
     return _stream_windows(
         chunks,
@@ -1200,6 +1521,7 @@ def extract_features_stream(
         label_policy,
         attrs or {},
         asset_column=asset_column,
+        min_window_rows=min_window_rows,
         on_progress=on_progress,
     )
 
@@ -1222,6 +1544,8 @@ def spectral_stream(
     asset_column: str | None = None,
     attrs: dict[str, Any] | None = None,
     on_progress: Callable[[int], None] | None = None,
+    column_features: dict[str, Any] | None = None,
+    min_window_rows: int = 0,
 ) -> dict[str, Any]:
     """流式版 :func:`spectral`，输出 schema 完全一致。
 
@@ -1251,11 +1575,17 @@ def spectral_stream(
     flat_counts: dict[str, int] = {}
     # 用单元素列表当可变计数器：闭包内要改写，且需要在流结束后读取最终值。
     window_count = [0]
+    plan: dict[str, list[str]] = {}
 
     def build_row(window: pd.DataFrame, cols: list[str]) -> dict[str, float] | None:
         """按 flat_policy 决定是报错、跳过（返回 None）还是输出 NaN 行。"""
         window_count[0] += 1
         series = {col: window[col].to_numpy(dtype=float) for col in cols}
+        # 真正的数值列要等第一块到达才知道，所以"每列用哪些频域指标"延后到这里解析。
+        if column_features and not plan:
+            plan.update(
+                column_target_plan(cols, chosen, column_features, valid=SPECTRAL, label="spectral features")
+            )
         flat_here = _flat_columns(series, flat_threshold)
         if flat_here:
             for col in flat_here:
@@ -1271,15 +1601,16 @@ def spectral_stream(
         row: dict[str, float] = {}
         for col in cols:
             values = series[col]
+            picked = plan.get(col, chosen)
             if col in flat_here:
-                for name in _spectral_names(chosen, edges):
+                for name in _spectral_names(picked, edges):
                     row[f"{col}__{name}"] = float("nan")
                 continue
             row.update(
                 {
                     f"{col}__{name}": value
                     for name, value in _spectral_row(
-                        values, float(sampling_rate), chosen, edges, harmonic_tolerance
+                        values, float(sampling_rate), picked, edges, harmonic_tolerance
                     ).items()
                 }
             )
@@ -1296,7 +1627,8 @@ def spectral_stream(
         step,
         label_policy,
         attrs or {},
-        min_window_rows=MIN_SPECTRAL_SAMPLES,
+        min_samples=MIN_SPECTRAL_SAMPLES,
+        min_window_rows=min_window_rows,
         asset_column=asset_column,
         on_progress=on_progress,
     )
@@ -1443,8 +1775,10 @@ def spectral(
     step_span: str | float = "",
     prediction_horizon: str | float = "",
     prediction_gap: str | float = "",
-    current_fault_policy: str = "drop",
+    current_fault_policy: str = "positive",
     normal_label: str = "0",
+    column_features: dict[str, Any] | None = None,
+    min_window_rows: int = 0,
 ) -> dict[str, Any]:
     """频域特征提取：每个窗口做一次加窗 FFT，产出的标签与其它窗口组件同构。
 
@@ -1476,12 +1810,17 @@ def spectral(
     if unknown:
         raise ValueError(f"Unknown spectral features: {sorted(unknown)}")
     cols = numeric_columns(data, columns)
+    spectral_plan = (
+        column_target_plan(cols, chosen, column_features, valid=SPECTRAL, label="spectral features")
+        if column_features
+        else None
+    )
     asset_of = group_assets(data, group_column, asset_column) if asset_column and group_column else None
     if label_column in cols or group_column in cols:
         raise ValueError("Label/group columns cannot be feature inputs")
     if not np.isfinite(data[cols].to_numpy(dtype=float, copy=False)).all():
         raise ValueError("Spectral extraction requires finite numeric values")
-    span, stride, horizon, gap = window_arguments(
+    span, stride, horizon, gap, min_rows = window_arguments(
         window_size=window_size,
         window_span=window_span,
         step_span=step_span,
@@ -1491,8 +1830,9 @@ def spectral(
         current_fault_policy=current_fault_policy,
         time_column=time_column,
         label_column=label_column,
+        min_window_rows=min_window_rows,
     )
-    counters = {"current_fault": 0, "unknown_future": 0}
+    counters = {"current_fault": 0, "unknown_future": 0, "thin": 0, "sparse": 0}
     rows, labels, keys, group_ids, coverage = [], [], [], [], []
     flat_counts = {col: 0 for col in cols}
     window_count = 0
@@ -1511,6 +1851,7 @@ def spectral(
         current_fault_policy,
         normal_label,
         counters,
+        min_rows,
     ):
         if len(chunk) < MIN_SPECTRAL_SAMPLES:
             # 样本太少的窗口分辨不出有意义的频谱，直接拒绝而不是给出噪声结果。
@@ -1531,19 +1872,21 @@ def spectral(
         row: dict[str, float] = {}
         for col in cols:
             values = series[col]
+            # 这一列要算哪些频域指标：默认用全局 features，被 column_features 覆盖时用它的清单。
+            picked = spectral_plan[col] if spectral_plan else chosen
             if col in flat_here:
                 # NaN keeps row alignment with the other feature branches, so merge and
                 # validation still line up; a skipped row would silently break them.
                 # 中文注：这一点是刻意的设计——平窗口保留、值置 NaN，
                 # 让"哪些窗口没有频谱"以数据的形式可见，而不是消失无踪。
-                for name in _spectral_names(chosen, edges):
+                for name in _spectral_names(picked, edges):
                     row[f"{col}__{name}"] = float("nan")
                 continue
             row.update(
                 {
                     f"{col}__{name}": value
                     for name, value in _spectral_row(
-                        values, float(sampling_rate), chosen, edges, harmonic_tolerance
+                        values, float(sampling_rate), picked, edges, harmonic_tolerance
                     ).items()
                 }
             )
@@ -1565,6 +1908,8 @@ def spectral(
         gap=gap,
         current_fault_policy=current_fault_policy,
         counters=counters,
+        min_window_rows=min_rows,
+        window_count=len(rows),
     )
     attrs["warnings"] = _flat_warnings(flat_counts, window_count)
     outputs = _assemble(
@@ -1882,7 +2227,7 @@ def merge_features(left: pd.DataFrame, right: pd.DataFrame) -> pd.DataFrame:
     if not provenance_matches(left.attrs, right.attrs):
         raise ValueError("Feature provenance differs: source_rows")
     for key in ("groups", "assets", "source_path", "source_id"):
-        if left.attrs.get(key) != right.attrs.get(key):
+        if not values_equal(left.attrs.get(key), right.attrs.get(key)):
             raise ValueError(f"Feature provenance differs: {key}")
     if set(left.columns) & set(right.columns):
         raise ValueError("Feature names overlap; rename before merging")

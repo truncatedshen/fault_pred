@@ -858,6 +858,8 @@ function metricsView(m) {
     title + "</span><strong>" + (typeof m[k] === "number" ? (m[k] * 100).toFixed(1) + "%" : "—") +
     "</strong></div>").join("") + '</div><p class="metric-note">' + esc(m.algorithm) + " · " + esc(m.split_method) +
     " · 训练 " + m.train_count + " / 测试 " + m.test_count + "</p>" +
+    /* 切分被平台调整过（时间切点移动）时必须说出来：否则"留出集为什么不是最后 25%"无解。 */
+    (m.split_note ? '<p class="metric-note">' + esc(m.split_note) + "</p>" : "") +
     classBalance(m) +
     (m.warnings || []).map((w) => '<div class="warning">' + esc(w) + "</div>").join("") +
     (m.confusion_matrix ? table(m.confusion_matrix.map((row, i) =>

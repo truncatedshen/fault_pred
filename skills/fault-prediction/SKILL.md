@@ -149,7 +149,7 @@ description: 通过 MCP 驱动故障预测组件平台：侦察服务、准备�
 | 类别 | 例子 | 处置 |
 | --- | --- | --- |
 | 数值列（物理量） | 电压、电流、温度、振动、流量 | 进 `columns`，统计/拟合/频域都吃它 |
-| **标识列**（长得像数值，其实是地址/编号） | HBM 的 `stack`、`row`、`col`、`bank_group`；机号、通道号、批次号 | **不进 `columns`**（默认）。要对它取证，用窗口特征的 `distinct_count`——"这一窗里出现过几种" |
+| **标识列**（长得像数值，其实是地址/编号） | HBM 的 `stack`、`row`、`col`、`bank_group`；机号、通道号、批次号 | 进 `columns`，但用 `column_features` 单独给它一串清单（通常只有 `distinct_count`），别让它跟着物理量一起求均值 |
 | 类别列（字符串/枚举工况） | 工况、型号、告警类型 | 不进窗口统计；用 `feature.categorical` 编码，或先问清它是不是标签的一部分 |
 
 为什么标识列不能进 `columns`：窗口组件会对它算 `mean/std/max`，而它在窗口内常常**是恒定的**——实测 HBM 数据里 `pcid` 在 **98%** 的窗口内只有一个取值。于是这些列变成了"每台服务器的身份指纹"：全量上 `bank_group__max` 的单特征 AUC 就有 **0.849**，真正留出的时间切分只剩 **0.609**；那 0.24 的差值就是"认出是哪台机器"，不是"看出要坏"，而按实体留出时这套指纹直接失效。
@@ -200,6 +200,7 @@ description: 通过 MCP 驱动故障预测组件平台：侦察服务、准备�
 
  - `label_policy=strict`（默认）在**一个窗口内的标签发生变化时会让整次运行失败**——而真实故障数据里，变化点恰好就在故障起始处，也就是最有意思的地方。改用 `mode`（多数标签）或 `last`，并说明你选了哪个、为什么。
  - `window_size=0` 的含义是"整组当成一个窗口"：整段分类正确，起始点检测错误。`window_size`/`step` 要按真实采样率定，不要照抄示例。
+ - **数据疏密不均时，按时间切窗会切出"很薄"的窗口**（采样稀疏期一个窗口只覆盖一两条记录，那里的 `std`/`skewness` 没有信息）。锚点是**真实采样**，所以窗口不会是空的——病在"薄"，不在"空"。平台默认会把薄窗口的数量写进 `attrs.window_thin_windows` 并在超过 10% 时警告；要真的丢掉就设 `min_window_rows`（**丢弃并计数**，写进 `window_dropped_thin`）。另外注意：采样间隔大于 `step_span` 时，步长会被顶替成"下一条采样"，所以实际窗口间隔要按 `window_id` 里的锚点时间核对，别假设它等于你写的步长。
 
 **正类可行性预检 —— 这一步不过，后面的分数一个都不用看。** 窗口建好、接模型之前，先把这四个数报出来：
 
@@ -217,7 +218,7 @@ description: 通过 MCP 驱动故障预测组件平台：侦察服务、准备�
 | 自检 | 命中时 |
 | --- | --- |
 | 标签会在窗口内变化 | 用 `label_policy=mode`；真实数据上 `strict` 必然失败 |
-| 要回答"未来会不会故障"（预测，而不是检测） | 用 `window_span`（如 `7d`）+ `prediction_horizon`（如 `2d`）+ `label_policy=horizon`：窗口结束加 `prediction_gap` 之后、视野之内出现故障就标 1；窗口自身已故障的样本按 `current_fault_policy` 处理（默认丢掉并计数，它们属于检测任务） |
+| 要回答"未来会不会故障"（预测，而不是检测） | 用 `window_span`（如 `7d`）+ `prediction_horizon`（如 `2d`）+ `label_policy=horizon`：窗口结束加 `prediction_gap` 之后、视野之内出现故障就标 1；窗口自身已故障的样本按 `current_fault_policy` 处理——**默认 `positive`：保留并标 1**（真实数据里故障集中在少数设备上，丢掉它等于把正类丢掉），要交给检测任务就显式 `drop`（丢弃并计数） |
 | 要回答的是"退化从什么时候开始" | 用窗口末端标签配 `mode`，并预期正类稀少 |
 | 打算整体留出资产 | 现在就把资产列接上（`data.asset_key`，或窗口组件的 `asset_column`）；否则 `split_method=asset` 会拒绝运行 |
 | 某个组比一个窗口还短 | 缩短 `window_size`，或者回到阶段 2 丢掉这个组并说明 |
@@ -240,6 +241,7 @@ description: 通过 MCP 驱动故障预测组件平台：侦察服务、准备�
  - **`sampling_rate` 是必填**，没有默认值：没人知道就**问**，不要猜。
  - **`feature.score_select` 与 `feature.pca` 在全部行上拟合**，因此见过留出集：只能当探索用，且必须把泄漏警告写进汇报。
  - **要"窗口内各档位占多少"，用 `feature.categorical(keep_columns=[实体/时间/标签]) → feature.statistical`。** 四个窗口组件的输入同时接受 `FeatureDataset`，所以行级独热可以接进窗口；独热列的 `mean` 就是类别占比。不带 `keep_columns` 会直接报 `Missing columns`——编码输出里没有分组列。带过去的列不是模型输入，平台会警告并把它传到模型指标里。只问"有几类"时用 `distinct_count`，不要编码。
+ - **不同列可以要不同的特征：`column_features`。** `features` 是全局的，但地址/编号列只该数"有几类"、物理量列才该求均值。写 `{"stack": "distinct_count", "vibration": ["mean", "std"]}` 就能在一个节点里分开；没列到的列继续用全局 `features`。写错列名、空清单、枚举外的名字都会当场报错。这个参数在 `feature.spectral`/`entropy`/`rolling_statistics`/`temporal` 上含义相同（后两个一列只算一个方法）。
 
 **阶段自检 — 特征够不够？**
 
@@ -259,6 +261,8 @@ description: 通过 MCP 驱动故障预测组件平台：侦察服务、准备�
 **目标：** 一个真正回答用户问题的分数。
 
 分类器默认 `split_method=stratified`，它会拒绝重叠或重复的数据（`Overlapping windows require group or temporal split`）——这是护栏，不是障碍。切分方式要跟数据结构匹配：窗口 → `group`，整台设备 → `asset`（上游要有 `asset_column`），部署顺序 → `temporal`。`validation.linear_regression` 只有 `random`/`group`/`temporal`，**没有资产留出**，遇到这种情况要如实说明这个限制，而不是假装有。完整的方法表、资产留出配方与指标字典在 `references/stages.md` 的阶段 5。
+
+**整组/整段留出会按类别分层（`group`/`asset` 亦然），故障样本保证落在两侧**：平台不再"随机抽组"，而是先把含故障的组按"两边都要有"的原则分配、再按规模补齐其余组；`temporal` 不能重排行序，但切点会在 `test_size` 的 ±50% 内挪动，挪动量写进 `metrics.split_note`。所以**不要自己去拼切分索引**，也不要因为"测试集没有正类"就改成随机切分——先看 `train_class_rates` / `test_class_rates`。唯一的例外是**只有一个实体出现过故障**：那时它必须留在训练集（否则模型学不到这个类），测试集就是没有正类，平台会给 `Holdout split has no 1 rows` 与 `The test set contains no positive (1) rows`，照实汇报，别怪切分。
 
 两件事必须写进每个结论：
 

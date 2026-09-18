@@ -19,7 +19,14 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPTS = ("deploy.ps1", "verify_deploy.py", "mcp_smoke.py", "install_mcp_config.py", "browser_check.cjs")
+SCRIPTS = (
+    "deploy.ps1",
+    "verify_deploy.py",
+    "mcp_smoke.py",
+    "install_mcp_config.py",
+    "install_skill.py",
+    "browser_check.cjs",
+)
 DOCS = ("deploy.md", "mcp.md", "components.md", "design.md", "validation.md", "architecture.md")
 EXTRAS = ("README.md", "pyproject.toml", "requirements-win-py311.lock")
 

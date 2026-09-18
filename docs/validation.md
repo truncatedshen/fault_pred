@@ -453,12 +453,12 @@ Registry 从 29 个扩展到 54 个组件，补齐时间重采样、数据切分
 改了什么：
 
 1. **时间窗口**：新增 `window_span`/`step_span`（`"7d"`/`"12h"`/`"180s"`），与 `window_size` 互斥。按时间切窗，采样不规则时每个窗口的行数可以不同；时间列支持时间戳与数值（数值按秒解释），组内自动按时间稳定排序。窗口"完整"的判定改为"起点 + 跨度不超过组内最后一个采样时刻"，窗口内的行仍是半开区间 `[起点, 起点+跨度)` 里的全部采样。
-2. **未来视野标签**：`label_policy` 新增 `horizon`，配合 `prediction_horizon`/`prediction_gap`/`normal_label`：窗口结束加间隔之后、视野之内出现非正常标签就标 1。`current_fault_policy` 决定"窗口自身已故障"的样本怎么处理（默认 `drop`，它们属于检测任务）。
+2. **未来视野标签**：`label_policy` 新增 `horizon`，配合 `prediction_horizon`/`prediction_gap`/`normal_label`：窗口结束加间隔之后、视野之内出现非正常标签就标 1。`current_fault_policy` 决定"窗口自身已故障"的样本怎么处理（本轮默认 `drop`，即交给检测任务；**该默认值已在第三十三轮改为 `positive`，理由与实测见那一轮**）。
 3. **诚实丢弃**：视野超出可用数据、或视野内压根没有采样的窗口**不标 0**，而是丢弃并计数；连同"已故障窗口"的数量一起写进 `attrs` 与 warnings，汇报时必须带出来。
 4. **一份实现**：窗口定义与标签语义收敛到 `fault_core.features` 的 `window_arguments / prepared_windows / window_shape / window_attrs`，`feature.statistical`/`feature.fitting`、`feature.spectral`、`feature.entropy` 三条实现共用。这正是本轮踩到的漂移点：新参数最初只加进了一条实现，另外两个组件直接 `TypeError`——现在由共用函数兜住。
 5. **流式明确拒绝**：时间窗口与预测视野需要"整组 + 它的未来"，流式按块看不到未来，因此直接报错让用户关掉 `streaming` 或插 `data.materialize`，而不是给一个标签错了的结果。
 
-真实数据验证（3W：489,456 行 / 28 个实例；窗口 `180s`、步长 `60s`、视野 `1h`、`current_fault_policy=drop`）：**得到 3370 个窗口、正类 905 个（26.9%）**，同时丢弃 **4380 个"自身已故障"**与 **331 个"视野超出数据"**的窗口，特征提取用时 1.0 秒。
+真实数据验证（3W：489,456 行 / 28 个实例；窗口 `180s`、步长 `60s`、视野 `1h`、本轮口径 `current_fault_policy=drop`）：**得到 3370 个窗口、正类 905 个（26.9%）**，同时丢弃 **4380 个"自身已故障"**与 **331 个"视野超出数据"**的窗口，特征提取用时 1.0 秒。（换成现在的默认 `positive` 会保留那 4380 个并标 1，样本构成随之变化。）
 
 本轮验收：Python **160 passed, 1 skipped**（新增 `tests/test_prediction_windows.py` 7 项：视野标签、间隔带、未知未来丢弃、不规则采样与时间窗口、参数组合校验、字符串标签、端到端图跑通）；`ruff check` + `ruff format --check src tests scripts` 通过；skill 守卫 **23 项**通过；浏览器验收 **16/16**；`verify_deploy` **14/14**；`mcp_smoke` 成功。
 
@@ -846,6 +846,248 @@ data.input → feature.categorical(columns=["stack"], method="onehot",
 新增 `tests/test_categorical_windowing.py` **7 项**：四个窗口组件接受 `FeatureDataset` 而 `data.quality`/`feature.select` 不放宽、独热均值等于窗口内类别占比（含标签按窗口对齐）、`keep_columns` 的警告同时出现在节点与 attrs 里、整条链到模型仍不泄漏（窗口特征列全是 `__mean`/`__count`，没有 entity/time/label）、缺列与重名列各自报错、不带走列时报的是 `Missing columns` 而不是给出错的结果、空 `keep_columns` 是 no-op。
 
 全量 `pytest` **283 passed / 1 skipped**（端口放宽没有引起任何回归）；`ruff check` + `format --check` 通过；`docs/components.md` 与 `component-registry.json` 重生成（含 `keep_columns` 与新的 `accepted_types`）；skill 的 `SKILL.md`（403 行，上限 420）在阶段 4 的"被强制的规则"里加了这条配方，细节写进 `references/stages.md` 与 `references/components.md`。
+
+## 第二十九轮：安装器支持多客户端（先落地 OpenCode）（2026-09-18）
+
+触发原因：使用反馈"这个 skill 和 mcp 要支持不同平台的安装，先帮我在 OpenCode 上配好"。原先只有一个 Codex 专用安装器（写 `~/.codex/config.toml` 的 TOML 表），skill 也是部署脚本里硬编码复制到 `~/.codex/skills`。
+
+### 先把两边的约定查清楚（不凭记忆写）
+
+抓了 OpenCode 官方文档核对，两处关键差异：
+
+| | Codex | OpenCode |
+| --- | --- | --- |
+| 配置文件 | `~/.codex/config.toml`（TOML） | `~/.config/opencode/opencode.json`（JSON 或 JSONC） |
+| MCP 段 | `[mcp_servers.<name>]`，`command` + `args` 分开 | `mcp.<name>`，**`command` 是一个数组**（命令 + 参数），必须有 `type: "local"` |
+| skill 目录 | `~/.codex/skills/<name>/` | `~/.config/opencode/skills/<name>/`（全局）或 `<项目>/.opencode/skills/<name>/` |
+| skill 校验 | `SKILL.md` + frontmatter | 同上，且 `name` 必须匹配目录名、只含小写字母数字与单个连字符、`description` 1–1024 字符 |
+
+顺带发现一个**两边都认**的位置：`~/.agents/skills/`。装一份就能同时被 Codex 与 OpenCode 发现，所以 `install_skill.py --client agents` 是个省钱选项。
+
+### 改了什么
+
+| 文件 | 变化 |
+| --- | --- |
+| `scripts/install_mcp_config.py` | 新增 `--client codex\|opencode`；OpenCode 分支写 JSON（保留其余顶层键、写前备份、写后重新解析验证）；新增 `read_entry` / `bridge_command` / `default_config_path` / `default_skill_dir` 四个共用函数 |
+| `scripts/install_skill.py`（新） | 装 skill 到 Codex / OpenCode / agents 三个位置，支持 `--scope global\|project`、`--target`、`--dry-run`；**装之前先校验** frontmatter（按最严的 OpenCode 规则），不合格就拒绝 |
+| `scripts/verify_deploy.py` | 新增 `--client`，配置与 skill 路径按客户端取；端到端那步把 `--client` 透传给 `mcp_smoke.py` |
+| `scripts/mcp_smoke.py` | 新增 `--client`，两种格式的条目都归一成同一对 `(解释器, 参数)` |
+| `scripts/deploy.ps1` | 新增 `-Client codex\|opencode\|both` 与 `-OpencodeHome`；skill 与 MCP 注册改成按客户端循环，验收也逐个跑 |
+| `scripts/export_release.py` | 部署包多带一个 `install_skill.py` |
+
+两条刻意的取舍：**OpenCode 的 JSONC 一律拒绝改写**（带注释的文件没法在不破坏注释的前提下安全改，报错让人手工加，而不是猜着改）；**Codex 没有项目级 skill 目录**，所以 `--client codex --scope project` 直接报错，而不是编一个可能不生效的路径出来。
+
+### 实测
+
+这台机器上 OpenCode 已安装（`opencode.ps1`），已有 `~/.config/opencode/opencode.json`（纯 JSON，含 `provider` 段）。真实执行：
+
+```
+install_mcp_config.py --client opencode
+  action: created   backup: ~/.config/opencode/opencode.json.bak-20260918-100857
+  note  : JSON rewritten pretty-printed (2-space indent); kept top-level keys: ['$schema', 'provider']
+  entry : {"type": "local", "command": [...python.exe, -m, fault_platform, mcp, --url, http://127.0.0.1:8765], "enabled": true}
+install_skill.py --client opencode
+  target: ~/.config/opencode/skills/fault-prediction (5 files)
+verify_deploy.py --from-config --client opencode
+  14/14 checks passed  （含 mcp config entry readable / configured interpreter exists / MCP end-to-end pipeline: tools=39 status=SUCCESS）
+```
+
+也就是说 **OpenCode 的 `command` 数组被真实拉起来跑通了完整闭环**，不只是"配置写进去了"。二次执行是 `unchanged`，不再产生备份。
+
+### 验收
+
+新增 `tests/test_client_install.py` **11 项**：两种客户端的默认路径、OpenCode 条目形状（`command` 数组 + `type: local`）、写条目时**保留别人的 provider 段与其它 MCP 条目**、幂等、JSONC 与畸形结构各自报错、CLI 写文件 + 备份内容 + 无变化时不重复备份、非法 JSON 拒绝且不动原文件、`read_entry`/`bridge_command` 归一两种格式、skill 安装到显式目录并通过部署验收的 skill 检查、名字不匹配与 `codex --scope project` 各自拒绝、Codex 的 TOML 路径没被改坏。
+
+全量 `pytest` **294 passed / 1 skipped**；`ruff check` + `format --check` 通过。文档同步：README §6.2、`docs/mcp.md`（两个客户端的配置样例 + `opencode mcp list`）、`docs/deploy.md`（新增"装给 OpenCode"一节与卸载说明）。
+
+## 第三十轮：逐列特征配置 `column_features`（2026-09-18）
+
+触发原因：使用反馈"特征提取中 `feature` 是全局的，不能做到按照列采取不同的方案，这和我的初衷违背"。原话里的"初衷"就是第一轮反馈里那条——标识列（地址/编号）不能当真值统计量用；而平台的 `features` 是一个全局列表，所有列共用。
+
+### 以前的绕法为什么不够
+
+想"给 `vibration` 求均值/标准差，给 `stack` 只数有几类"，只能：建两条 `feature.statistical` 分支（各自的 `columns` + `features`）→ 再 `feature.merge`。代价是三重的：节点数翻倍；两条分支的窗口参数必须**完全一致**否则 `feature.merge` 直接拒绝；`feature.spectral`/`entropy`/`rolling_statistics` 这类组件根本没有"拆两半"的等价做法。
+
+### 改了什么
+
+新增参数 **`column_features`**：`{"<列>": "<名字>" 或 ["<名字>", ...]}`，覆盖到的列用这份清单，**没列到的列继续用全局 `features`/`method`**。
+
+| 组件 | 这个参数里的"名字"是 |
+| --- | --- |
+| `feature.statistical` | 统计量名（`mean`、`distinct_count`…） |
+| `feature.spectral` | 频域指标名 |
+| `feature.entropy` | 熵方法名 |
+| `feature.rolling_statistics` / `feature.temporal` | 方法名（这两个一列只算一个，多给会报错） |
+| `feature.fitting` | **没有**：它没有特征清单参数（输出由 `fitting_method` 决定），传了会明确报错而不是静默忽略 |
+
+解析与校验收敛在 `fault_core.features.column_target_plan`：列名不在 `columns` 里、清单为空、名字不在枚举里，三种情况都当场报错并**点名是哪一列、给了什么、可选值是什么**；空清单特意报错而不是"这一列不算特征"，因为后者应该通过把它从 `columns` 里去掉来表达，留个空清单只会让人以为算过了。单个字符串与单元素列表等价（`{"stack": "distinct_count"}` == `{"stack": ["distinct_count"]}`）。
+
+批处理与流式两条路径都接：流式下"真正的数值列"要等第一块到达才知道，所以计划延后到第一个窗口再解析（否则会拿调用方声明的列名去校验，与实际的数值列不一致）。
+
+### 用户原话里的场景，现在一个节点就够
+
+```
+data.input → feature.statistical(columns=["vibration", "stack", "col"],
+                                 features=["mean", "std"],
+                                 column_features={"stack": "distinct_count",
+                                                  "col": ["distinct_count", "max_repeated"]})
+```
+
+`vibration` 得到均值/标准差，`stack`/`col` 只得到"有几类"与"极值是否重复"——同一批窗口、同一个节点，不用合并，也不会有两支来源对不上的风险。
+
+### 验收
+
+新增 `tests/test_column_features.py` **10 项**：逐列生效且未列到的列沿用全局、字符串与单元素列表等价、**流式与批量逐位一致**、频域/熵/滚动/时域四个组件各自生效、未知列/空清单/未知名字三种报错、单方法组件拒绝多方法、拟合分支明确拒绝、五个组件的 schema 都暴露该参数（`object` 类型，前端按 JSON 文本框渲染，Agent 直接填 JSON）、走组件端到端跑一次。
+
+全量 `pytest` **304 passed / 1 skipped**；`ruff check` + `format --check` 通过；`docs/components.md` 与 `component-registry.json` 重生成（五个组件多出 `column_features`）。文档同步：skill `SKILL.md`（阶段 1 的"标识列"处置改成"进 `columns` 但用 `column_features` 单独给清单"、阶段 4 新增一条被强制的规则）、`references/stages.md` 阶段 4、`references/components.md`、README §3 窗口族说明。
+
+## 第三十一轮：10 万行就慢——把性能瓶颈挖到底（2026-09-18）
+
+触发原因：使用反馈"数据到 108k 行整体运行很慢，是不是生成特征切窗口的时候？"，随后补充"是 overview、xgb、impute、win 执行时间很长"。因为是在别的机器上跑的，我按用户要求在 `test_big_data/` 自造了同规模数据复现：20 台设备 × 5400 行 = **108,000 行 × 15 列**（10 个测点 + 2 个保持值通道 + 实体/时间/标签），60 行窗 / 步长 30 → **3580 个窗口**。
+
+### 结论先说：锅不在"切窗口"，在**每次调用的固定开销**和**pandas 深拷贝 attrs**
+
+三个独立的问题叠在一起，按贡献排序：
+
+| # | 现象 | 根因 | 证据 |
+| --- | --- | --- | --- |
+| 1 | `feature.statistical` 10 个统计量要 **24.7s**（4 个只要 2.3s，2.5 倍特征数 = 10.9 倍时间） | ① `_stat()` 每次调用**现搭一张 30 个 lambda 的函数表**；② 还**无条件先算 rms**（哪怕只要 `count`）；③ `skewness`/`kurtosis` 走 `scipy.stats`，60 点窗口每次 **200µs** | 143,200 次 `_stat` 调用；单特征计时：kurtosis 201µs、skewness 198µs、duplicate_sum 71µs、repeated_value_ratio 67µs |
+| 2 | `feature.imputation` 在 **3580 行**的特征表上要 **2.3s** | `numeric_columns()` 用了 `data.select_dtypes(...)`，它会构造新表并触发 pandas `__finalize__`，而 `__finalize__` **深拷贝 `attrs`**——窗口特征的 attrs 里是"每个窗口一份来源行号"（3580×60 个 Python 对象） | cProfile：`copy.deepcopy` 被调用 **910 万次 / 8.6s**，从 `pandas generic.__finalize__` 触发 |
+| 3 | `visual.overview` 在特征表上要 **2.0s**（在原始表上只要 0.08s） | 同一个 attrs 深拷贝：`describe(include="all")` 内部触发 **408 次** finalize，每次 3.1ms | cProfile：`describe_numeric_1d` → 408 次 `__finalize__` → deepcopy |
+
+`xgb`（0.36s）与 `rf`（1.08s）本身不是瓶颈——它们慢是被上游拖的（输入表被反复深拷贝），修完上游后各自降了约 30%。
+
+### 修了什么
+
+| 改动 | 做法 | 效果 |
+| --- | --- | --- |
+| `_stat` 查表化 | 30 个 lambda 移到**模块级** `_STAT_FUNCTIONS`，只算被请求的那一项（`rms` 也改成按需） | `count` 6.64µs → **0.26µs**；4 个统计量 36.25µs → **12.28µs** |
+| 偏度/峰度改手写矩公式 | 有偏估计与 `scipy.stats` 默认参数一致；IQ 降为 numpy 向量运算 | 201µs → **14.9µs**、198µs → **13.3µs** |
+| 重复类特征换 `np.unique` | 替掉 `pd.Series(x).value_counts()` | 71µs → **10.6µs**、67µs → **8.7µs** |
+| `iqr` 一次算两个分位 | `np.quantile(x, [0.75, 0.25])` | 46µs → **25.3µs** |
+| `numeric_columns` 不建表 | 改成扫 `data.dtypes`（并显式排除 bool，与 `select_dtypes("number")` 口径一致），不再触发 finalize | 2.14s → **0.21s** |
+| 覆盖信息压成区间 | 批处理结果也写 `source_rows_ranges`（以前只有流式写）；不可压时整表退回行号列表 | attrs 从 21.4 万个对象变成 3580 个区间 |
+| 区间用不可变类型 `CoverageRanges` | 深拷贝零成本（`__deepcopy__` 返回自身），`==` 返回布尔值 | 单次深拷贝 3.1ms → **0.0003ms** |
+
+最后一条为什么必须自定义类型而不是直接放 numpy 数组：**`pd.concat` 会用 `==` 比较两侧 attrs**，数组比较返回数组，于是 `feature.merge` 当场抛 `truth value of an array is ambiguous`（这是修复过程中真实踩到并被测试抓住的回归）。`CoverageRanges` 同时满足"深拷贝零成本"与"`==` 返回布尔值"，并且可以 pickle（产物溢写/检查点）。
+
+### 修完的实测（同一份 108k 行数据）
+
+| 节点 | 修复前 | 修复后 |
+| --- | --- | --- |
+| `feature.statistical`（4 个统计量） | 2.27s | **1.35s** |
+| `feature.statistical`（10 个统计量） | 24.70s | **4.95s** |
+| `feature.imputation`（特征表） | 2.31s | **0.03s** |
+| `visual.overview`（特征表） | 1.98s | **0.24s** |
+| `validation.random_forest`（200 棵，`n_jobs=1`） | 1.52s | **1.08s** |
+| `validation.xgboost`（默认） | — | 0.36s |
+| **整图端到端**（source → overview / stat → impute → xgb + rf） | ~33s（按各节点修复前之和估算） | **9.8s** |
+
+数值等价性单独验证过：偏度/峰度与 `scipy.stats` 默认参数在 9 位小数上一致；新旧的 `repeated_value_ratio`/`duplicate_sum`/`iqr` 在 **300 组随机数据（含大量重复与近常量）上逐位一致**（容差 1e-12，0 处不一致）。
+
+### 顺带的一条观测（未改）
+
+`RandomForestClassifier`/`XGBClassifier` 都写死 `n_jobs=1`（设计取舍：服务端并发由运行时的双线程池控制，模型内部再并行会让内存与 CPU 不可预测）。代价是单模型的墙钟时间。想要更快的话，把它做成组件参数（默认仍 1，显式给 `-1` 才放开）是下一步最省事的一档——但那是并发策略变更，需要先想清楚和线程池的叠加关系。
+
+### 验收
+
+新增 `tests/test_coverage_representation.py` **5 项**：覆盖信息是零拷贝的 `CoverageRanges`、能过 `pd.concat` 且 `==` 返回布尔值、`feature.merge` 的 provenance 校验仍然工作（含"区间 vs 行号列表"两种表示互比）、行号不连续时**必须**退回行号列表、`_stat` 抽查若干统计量仍是原来的数值。
+
+受影响的 5 个既有测试改成用 `expand_coverage` / `provenance_matches` 断言**语义**而不是表示形式（原来直接读 `attrs["source_rows"]`）。全量 `pytest` **309 passed / 1 skipped**；`ruff check` + `format --check` 通过。新增 `test_big_data/make_big_data.py`（造数）与 `.fault-platform/bench_nodes.py`、`bench_stages.py`、`profile_big.py`（计时与 cProfile）作为可复现的基准。
+
+## 第三十二轮：疏密不均的数据——窗口不会空，但会"很薄"（2026-09-18）
+
+触发原因：使用反馈"当前窗口采用时间来滑动，而我的数据疏密程度是不确定的，会导致很多窗口没有数据"。先复核实现，再用疏密不均的数据实测。
+
+### 先纠正一个前提：窗口**永远不会**是空的
+
+`windows_in_frame_by_time` 的锚点是**组内第 `start` 条真实采样**：
+
+```python
+begin = float(seconds[start])            # 锚点 = 一条真实采样
+end = begin + window_span
+stop = np.searchsorted(seconds, end, "left")
+chunk = frame.iloc[start:stop]           # [begin, end) 内的全部采样，至少含锚点自己
+```
+
+所以"空窗口"在这套实现里不存在——三份数据（稠密 4h、疏密不均、HBM 原始日志）实测的**空窗口数都是 0**。
+
+### 但同一个反馈指向的三个真问题，实测都在
+
+| 现象 | 实测（HBM 原始 ECC 日志，2h 窗 / 30m 步 / 2480 个窗口） |
+| --- | --- |
+| **薄窗口**：稀疏期一个窗口只覆盖一两条采样，`std`/`skewness` 没有信息（1 行时按约定全为 0，`mean` 就是那一个值） | **8.9% 的窗口只有 1 行**，16.8% < 3 行，**43.1% < 8 行**；把窗口放大到 7d/1d 后仍有 26.7% < 8 行 |
+| **步长被数据密度顶替**：`start` 跳到"第一条 ≥ 锚点+`step_span` 的采样"，采样比步长稀时每个采样都会成为锚点 | 只有 **42.7%** 的相邻锚点间隔等于请求的 30 分钟；p90 = 140 分钟，**最大 1099.8 小时（46 天）** |
+| **相邻窗口完全不重叠**：时间轴上断开的点被当成了一段历史 | **10.4%** 的相邻锚点间隔大于窗口跨度本身 |
+
+对照组——稠密数据（连续 4 小时、每秒 1 条）：4 个窗口、每个 7200 行、锚点间隔 **100%** 等于请求步长。也就是说：**步长是否被顶替，完全由数据密度决定，而不是由参数决定**。
+
+### 改了什么
+
+1. **`min_window_rows` 参数**（四个窗口组件共有）：行数不足的窗口**丢弃并计数**，写进 `attrs["window_dropped_thin"]` 与警告。默认 `0` = 不丢，**不改变任何现有样本数**。
+2. **薄窗口常驻记账 + 告警**：即使不丢，也会把 `< 3 行`的窗口数写进 `attrs["window_thin_windows"]`；占比 ≥10% 时给一条可执行的警告（放大 `window_span` / 设 `min_window_rows` / 改用按行切窗）。
+3. 参数校验与两条路径统一：批处理与流式（`extract_features_stream`、`spectral_stream`）都接受它；流式只支持按行切窗、通常不会出现薄窗口，但**口径一致**（同样的丢弃计数与警告）。顺带修掉一处命名撞车：`_stream_windows` 里原本也有一个 `min_window_rows`，语义却是"不足就**报错**"（频域要求 ≥8 点），已改名为 `min_samples`，避免两个同名参数含义相反。
+
+实测（同一份 HBM 数据）：
+
+```
+默认            → 2480 窗口，其中 351 个（14%）< 3 行 → 自动警告；样本数不变
+min_window_rows=3 → 2129 窗口（丢弃 351）
+min_window_rows=8 → 1457 窗口（丢弃 1023）
+```
+
+### 明确**没有**改的：不做"固定时间网格对齐"
+
+改成"每 `step_span` 一个锚点、空窗丢弃"能让时间轴均匀，但会**改变窗口语义与样本数**（稀疏区大量窗口直接消失），并且和现有的"锚点必须是真实采样、不许凭空造窗口"这条设计冲突。所以本轮只把**事实**摆出来（记账 + 警告 + 可选的薄窗口过滤），是否要做网格模式留待决定；想立刻要均匀时间轴，可以先在平台外或 `data.time_resample` 把数据重采样到规则网格。
+
+### 验收
+
+新增 `tests/test_sparse_windows.py` **8 项**：巨大空洞下窗口仍然非空且 `window_id` 带真实锚点、薄窗口默认被计数并告警且样本数不变、`min_window_rows` 改为丢弃并计数、稠密数据不告警且锚点间隔严格等于步长、参数校验（负数/浮点/bool 都拒绝）、四个组件的 schema 都暴露该参数、spectral/entropy 同样接受、流式接受同一参数且口径一致。
+
+全量 `pytest` **317 passed / 1 skipped**；`ruff check` + `format --check` 通过。文档同步：skill `SKILL.md` 阶段 3 新增一条、`references/stages.md` 阶段 3 新增「疏密不均的数据」小节（含实测与三条出路）、`references/troubleshooting.md` §4 新增三行症状、`references/components.md` 窗口组件段。新增 `.fault-platform/window_density_probe.py`（密度探针，可对任意数据复跑）。
+
+## 第三十三轮：切分必须让故障落在两侧，且窗口内已故障的样本默认不丢（2026-09-18）
+
+触发原因：使用反馈两条——"划分训练集和测试集的时候需要把故障的窗口划分到训练集和测试集，这样不会导致测试集没有故障样本"；"win 节点的 `current_fault_policy` 默认设置为 `positive` 不丢弃"。
+
+### 第一条：整组留出改成**按类别分层**
+
+原来的 `group`/`asset` 用 `GroupShuffleSplit` 纯随机抽组。这在故障稀疏的数据上是**结构性错误**，不是运气问题——HBM 原始 ECC 日志（20,391 行 / 50 台服务器 / 334 次 UER）里只有 9 台能切出合格窗口，41 个正类全部来自其中 2 台，于是按服务器留出时测试集 155 个窗口里 **0 个正类**，`accuracy=1.0`、`balanced_accuracy=1.0` 全是假象。
+
+新的 `_class_aware_group_split`（`fault_core.models`）做法：先按 `random_state` 打乱组序，然后**类越稀有越先安排**——对每个类，把含它的组逐个放进"这一类相对目标份额更缺"的一侧，某一侧还没有这个类时优先放过去（这才是"两边都要有"的保证），最后按规模补齐其余组。`temporal` 不能重排行序，但切点可以在 `test_size` 的 ±50% 之内挪动（`_class_aware_temporal_boundary`），挪动的事实写进 `metrics["split_note"]`。
+
+实测（同一份 HBM 数据，2h 窗 / 2h 步 / 7d 视野）：
+
+| `current_fault_policy` | 窗口数 | 正类 | `group` 训练/测试 | `asset` 训练/测试 | `temporal` 训练/测试 |
+| --- | --- | --- | --- | --- | --- |
+| `drop` | 911 | 41（4.5%） | 679 / 232，正类 28 / **13** | 784 / 127，正类 41 / **0** | 683 / 228，正类 28 / 13 |
+| `positive`（新默认） | 973 | 103（10.6%） | 729 / 244，正类 78 / 25 | 836 / 137，正类 93 / 10 | 729 / 244，正类 66 / 37 |
+
+`group` 一列就是这条反馈要的结果：以前测试集 0 个正类，现在 13 个（`drop`）或 25 个（`positive`）。`asset` 在 `drop` 下仍然是 0——41 个正类只落在 2 个数据中心里，两边各至少一个的时候凑不出 25% 的留出规模；这种情况平台**明说**而不是给个漂亮数字（`Holdout split has no 1 rows` + `The test set contains no positive (1) rows`）。
+
+代价必须写在明处：这样切出来的留出集**不是均匀随机抽组**，而是为了可评估性刻意分层的；只有一个组含某个类时无法两全，那个组必须留在训练集（否则模型学不到这个类）。另外顺手修掉一个把随机性抹平的问题：组排序原先用组名做并列裁决，计数相同的组永远按名字排，实测 seed 0..5 给出**完全相同**的划分，`random_state` 等于摆设；现在改用打乱后的次序，`tests/test_split_class_coverage.py` 里钉住"同种子可复现、换种子会变"。
+
+### 第二条：`current_fault_policy` 默认 `positive`
+
+窗口自身已经包含故障的样本，原先默认 `drop`（"留给检测任务"）。这条默认值在真实数据上会直接吃掉可评估性：HBM 那份数据里 62 个窗口被丢掉，正类从 103 掉到 41（10.6% → 4.5%），配合上面那条就是"测试集一个正类都没有"的成因之一。
+
+改法：四个窗口组件（`feature.statistical`/`feature.fitting`/`feature.spectral`/`feature.entropy`）与 `extract_features`/`extract_features_stream`/`spectral` 的默认值统一为 `positive`。**非预测模式（`label_policy` 不是 `horizon`）下这个参数不生效**：不报错（否则每条检测型流水线都要被迫写一个与之无关的参数），但会把"你设了它、它没生效"写进 `attrs["current_fault_policy_ignored"]`；取值本身任何时候都校验，`positiv` 这类拼写错误仍然报错。
+
+### 验收
+
+新增 `tests/test_split_class_coverage.py` **7 项**：整组留出两侧都有正类且组不重叠、测试规模贴近 `test_size`、同种子可复现且换种子会变、`asset` 同样分层、只有一个故障组时它留在训练集且给出明确警告、`temporal` 切点被挪动时 `split_note` 说明移动量、挪不动时保留目标切点并报警。另在 `tests/test_prediction_windows.py` 新增 2 项钉住新默认值（保留并标 1、非预测模式被忽略但留痕），并把原先依赖"默认 drop"的 4 项改成显式传 `current_fault_policy="drop"`。
+
+全量 `pytest` **326 passed / 1 skipped**；`ruff check` + `format --check` 通过；`scripts/export_catalog.py` 重新生成 `docs/components.md` 与 `docs/component-registry.json`（默认值随之变化）。顺手修掉 `tests/test_client_install.py` 在中文 Windows 上的编码失败（子进程按 cp936 写 stdout、父进程按 utf-8 读 → reader 线程炸掉后 `stdout` 变成 `None`）：给子进程设 `PYTHONIOENCODING=utf-8`。
+
+### 走 MCP 桥复核（Agent 看到的界面）
+
+上面的数字都是直接调 Python API 得到的（探针：`.fault-platform/split_probe.py`）。Agent 看到的是 MCP，所以另跑一遍 `scripts/mcp_split_check.py`（只走 MCP 工具：`get_component_schema` → `add_components` → `connect_many` → `validate_pipeline` → `execute_pipeline` → `wait_for_pipeline` → `get_pipeline_result`）：
+
+* `get_component_schema("feature.statistical")` 里 `current_fault_policy` 的 `default` 已经是 `"positive"`，`options` 为 `["drop", "positive", "negative"]`；
+* 同一份 HBM 数据经 `win` 节点（2h / 2h / 7d，不传 `current_fault_policy`）得到 **973 个窗口**；
+* `split_method=group` → 训练 729（正 78）/ 测试 244（正 25）；`asset` → 836（93）/ 137（10）；`temporal` → 729（66）/ 244（37）；三者 `split_note` 均为 `null`（切点没被挪动，因为每条路径本来就凑得齐两侧）。
+
+**这些数字不构成"模型变好了"的证据**：同一份数据上 ROC-AUC 在 0.394～0.948 之间随留出的服务器乱跳（见上表），`asset` 那行 `accuracy=0.993` 更是典型的"留出集太小 + 正类只有 10 个"的假象。本轮能确证的只有一件事：**测试集不再缺正类**，指标因此至少是"测到了故障类"的数字。
 
 ## 首版边界
 

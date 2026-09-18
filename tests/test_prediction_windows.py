@@ -3,7 +3,8 @@
 这一层是检测与预测的分界线：检测问"现在是不是故障"，预测问"接下来这段时间会不会坏"。
 因此标签必须来自窗口**之后**的数据，而且要有两个防泄漏的边界：
 
-* 窗口自身的区间里已经故障的样本不属于预测任务（默认丢弃并计数）；
+* 窗口自身的区间里已经故障的样本：默认**保留并标 1**（``current_fault_policy="positive"``），
+  想按老口径交给检测任务就显式传 ``drop``（丢弃必须计数）；
 * 视野超出可用数据的样本不能标 0（"没看到故障"不等于"没有故障"），一律丢弃并计数。
 """
 
@@ -54,7 +55,11 @@ def episodic(days: int = 60, onset_days: tuple[int, ...] = (20, 40, 55), hours: 
 
 
 def test_horizon_labels_mark_what_the_future_holds() -> None:
-    """2 天窗口 + 2 天视野：命中故障起始的那几个窗口标 1，自身已故障的窗口被丢弃。"""
+    """2 天窗口 + 2 天视野：命中故障起始的那几个窗口标 1。
+
+    这里显式用 ``current_fault_policy="drop"``，钉住"交给检测任务"这条老口径；
+    默认口径（保留并标 1）由 ``test_current_fault_windows_are_kept_by_default`` 钉。
+    """
     out = features.extract_features(
         synthetic(),
         ["v"],
@@ -65,6 +70,7 @@ def test_horizon_labels_mark_what_the_future_holds() -> None:
         step_span="1d",
         prediction_horizon="2d",
         label_policy="horizon",
+        current_fault_policy="drop",
     )
     features_frame, labels = out["features"], out["labels"]
     # 起点 0..5 天的六个窗口：6 天与 7 天起点落在故障区间内，按 drop 丢掉并计数。
@@ -86,6 +92,70 @@ def test_horizon_labels_mark_what_the_future_holds() -> None:
     assert any("current_fault_policy" in notice for notice in attrs["warnings"])
 
 
+def test_current_fault_windows_are_kept_by_default() -> None:
+    """默认 ``current_fault_policy="positive"``：窗口自身已故障的样本保留并标 1，不丢弃。
+
+    这条默认值的理由是**可评估性**：故障集中在少数设备上时，把"窗口内已故障"的样本丢掉，
+    很容易得到一个没有正类的留出集（实测 HBM：按服务器留出时测试集 0 个正类）。因此默认
+    保留；真要交给检测任务就显式传 ``drop``，两条口径的样本数必须对得上。
+    """
+    arguments = dict(
+        columns=["v"],
+        group_column="asset",
+        label_column="fault",
+        time_column="t",
+        window_span="2d",
+        step_span="1d",
+        prediction_horizon="2d",
+        label_policy="horizon",
+    )
+    kept = features.extract_features(synthetic(), **arguments)
+    dropped = features.extract_features(synthetic(), current_fault_policy="drop", **arguments)
+    dropped_count = dropped["features"].attrs["horizon_dropped_current_fault"]
+    assert dropped_count > 0
+    assert kept["features"].attrs["horizon_dropped_current_fault"] == 0
+    assert kept["features"].attrs["current_fault_policy"] == "positive"
+    # 两边的差就是那些"自身已故障"的窗口，而且它们全部被标成 1。
+    extra = [key for key in kept["features"].index if key not in set(dropped["features"].index)]
+    assert len(kept["features"]) == len(dropped["features"]) + dropped_count
+    assert len(extra) == dropped_count
+    assert kept["labels"].loc[extra].tolist() == [1] * len(extra)
+    # 视野之外的窗口仍然一律丢弃：保留默认值不会把"看不见未来"的样本一起捞回来。
+    assert (
+        kept["features"].attrs["horizon_dropped_unknown_future"]
+        == (dropped["features"].attrs["horizon_dropped_unknown_future"])
+    )
+
+
+def test_current_fault_policy_is_inert_outside_horizon_mode() -> None:
+    """非预测任务里这个参数不生效——不报错（否则每个检测型流水线都要写它），但要留痕。"""
+    out = features.extract_features(
+        synthetic(days=6, fault_start_hour=None),
+        ["v"],
+        group_column="asset",
+        label_column="fault",
+        time_column="t",
+        window_span="1d",
+        label_policy="mode",
+    )
+    attrs = out["features"].attrs
+    assert attrs["current_fault_policy"] is None
+    assert attrs["current_fault_policy_ignored"] == "positive"
+    # 取值本身仍然要校验：拼错的值不会被静默吞掉。
+    with pytest.raises(ValueError, match="current_fault_policy must be"):
+        features.extract_features(
+            synthetic(days=6, fault_start_hour=None),
+            ["v"],
+            group_column="asset",
+            label_column="fault",
+            time_column="t",
+            label_policy="horizon",
+            window_span="1d",
+            prediction_horizon="1d",
+            current_fault_policy="positiv",
+        )
+
+
 def test_prediction_gap_pushes_the_horizon_away() -> None:
     """间隔带把视野整体推后：贴着故障起始的那个窗口因此不再算"预测到"。"""
     out = features.extract_features(
@@ -99,6 +169,7 @@ def test_prediction_gap_pushes_the_horizon_away() -> None:
         prediction_horizon="2d",
         prediction_gap="1d",
         label_policy="horizon",
+        current_fault_policy="drop",
     )
     labels = out["labels"]
     attrs = out["features"].attrs
@@ -121,6 +192,7 @@ def test_unknown_future_is_dropped_not_labelled_zero() -> None:
         step_span="1d",
         prediction_horizon="7d",
         label_policy="horizon",
+        current_fault_policy="drop",
     )
     attrs = out["features"].attrs
     # 视野要 7 天：只有起点 0 天的窗口能完整看到未来，2..6 天起的五个窗口都缺未来数据。
@@ -159,7 +231,7 @@ def test_time_windows_work_without_prediction_labels() -> None:
         window_span="1d",
         label_policy="mode",
     )
-    counts = [len(rows) for rows in sparse["features"].attrs["source_rows"]]
+    counts = [len(rows) for rows in features.expand_coverage(sparse["features"].attrs)]
     assert len(set(counts)) == 1  # 每 3 小时一条时仍然是等间隔
     assert len(sparse["features"]) == 5
 
@@ -188,6 +260,8 @@ def test_prediction_pipeline_runs_end_to_end(tmp_path) -> None:
             "prediction_horizon": "2d",
             "label_policy": "horizon",
             "features": ["mean", "std", "rms"],
+            # 显式 drop：这条用例想跑的是"把已故障窗口交给检测任务"的老口径。
+            "current_fault_policy": "drop",
         },
     )
     # 时间窗口步长小于跨度 → 窗口重叠，验证器因此只接受 group/asset/temporal 切分。

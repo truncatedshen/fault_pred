@@ -236,7 +236,7 @@ add_components({"pipeline_id": "p_…", "components": [
                   "prediction_horizon": "2d",       // 往后看 2 天
                   "prediction_gap": "1h",           // 先隔 1 小时，避免贴着起始点
                   "label_policy": "horizon",        // 标签来自未来视野
-                  "current_fault_policy": "drop",   // 已故障的窗口交给检测任务
+                  "current_fault_policy": "positive", // 已故障的窗口保留并标 1（默认；想交给检测任务就写 drop）
                   "normal_label": "0",
                   "features": ["mean", "std", "rms"]}},
   {"component_type": "validation.random_forest", "node_id": "forest",

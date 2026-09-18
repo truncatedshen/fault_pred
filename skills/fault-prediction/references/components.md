@@ -174,12 +174,17 @@
 
 ### 窗口生产者（原始 `Dataset` → `FeatureDataset` + `LabelVector`）
 
-四个组件共享 `columns`、`group_column`、`asset_column`、`label_column`、`time_column`、`window_size`、`step`、`label_policy`。**要合并它们的输出，就必须在这些参数上完全一致。** 另外还有时间窗口与预测参数：`window_span`/`step_span`（按时间切窗，如 `7d`/`12h`）与 `prediction_horizon`/`prediction_gap`/`current_fault_policy`/`normal_label`（配合 `label_policy=horizon` 做"预测未来会不会故障"）。
+四个组件共享 `columns`、`group_column`、`asset_column`、`label_column`、`time_column`、`window_size`、`step`、`label_policy`、`min_window_rows`。**要合并它们的输出，就必须在这些参数上完全一致。** 另外还有时间窗口与预测参数：`window_span`/`step_span`（按时间切窗，如 `7d`/`12h`）与 `prediction_horizon`/`prediction_gap`/`current_fault_policy`/`normal_label`（配合 `label_policy=horizon` 做"预测未来会不会故障"）。
+
+`current_fault_policy` 的默认值是 **`positive`**（窗口自身已故障的样本保留并标 1，不丢弃）；`drop` 表示交给检测任务（丢弃并计数），`negative` 标 0。它只在 `label_policy=horizon` 下生效——其它模式下不会报错，但会被忽略并记录在 `attrs["current_fault_policy_ignored"]`。
 
 **feature.statistical** — 统计
 
 四个窗口组件（`feature.statistical` / `fitting` / `spectral` / `entropy`）的输入端口**同时接受 `Dataset` 与 `FeatureDataset`**：前者是常规用法；后者用于聚合**行级编码出来的列**（`feature.categorical` + `keep_columns`，见上文「先编码、再按窗口聚合」）。
+四个窗口组件还共享 `min_window_rows`：**丢弃并计数**行数不足的窗口（默认 0 = 不丢）。疏密不均的数据上按时间切窗会切出只含一两行的窗口，那里的统计量没有信息——不设它就只是记账 + 警告（`attrs.window_thin_windows` / `window_dropped_thin`），设了才真的丢。
 `features`：水平/形状类 `mean`、`std`、`variance`、`min`、`max`、`median`、`rms`、`skewness`、`kurtosis`、`quantile`（配 `quantile`）、`range`、`iqr`、`mad`、`peak`、`crest_factor`；结构类 `count`、`distinct_count`、`argmax_first`/`argmax_last`、`argmin_first`/`argmin_last`（位置按 0..1 归一化，跨窗口长度可比）、`count_above_mean`/`count_below_mean`、`longest_above_mean`/`longest_below_mean`、`mean_delta`/`mean_abs_delta`、`mean_second_derivative`、`duplicate_point_ratio`、`repeated_value_ratio`、`duplicate_sum`、`time_reversal_asymmetry`，以及四个字面比较项 `std_gt_range`、`variance_gt_std`、`max_repeated`、`min_repeated`（0/1）。水平/形状类特征默认就从这里开始；**标识列（地址/编号）不要用它们求均值，只用 `distinct_count`**——那是"这一窗里出现过几种"，对连续列则恒等于 `count`（等于没信息）。结构类里 `repeated_value_ratio`、`duplicate_sum` 对"保持值/卡死"通道特别有用，但比较项是否对模型有用需要单独评估。
+
+**`column_features`：逐列换特征清单。** `features` 是全局的，而真实数据里不同列该看的东西不一样——地址/编号列只能数"有几类"，物理量列才该求均值。用 `{"stack": "distinct_count", "vibration": ["mean", "std"]}` 在一个节点里同时表达；没列到的列继续用全局 `features`。取值可以是单个字符串或字符串列表；列名不在 `columns` 里、清单为空、名字不在枚举里都会直接报错并点名。同一个参数在 `feature.spectral`（频域指标）、`feature.entropy`（熵方法）、`feature.rolling_statistics` / `feature.temporal`（这两个一列只算一个方法，多给会报错）上含义相同。`feature.fitting` 没有特征清单参数（输出由 `fitting_method` 决定），因此它没有这个参数。
 
 **feature.fitting** — 拟合
 `fitting_method`：`linear`、`polynomial`（配 `degree`）、`exponential`。输出趋势斜率、残差与 R² 类特征。退化/起始点任务的主力。

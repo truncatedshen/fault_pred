@@ -51,7 +51,7 @@ def test_spectral_features_recover_a_known_tone():
     assert bands.shape[1] == 3
     np.testing.assert_allclose(bands.sum(axis=1), 1.0)
     assert frame.index.equals(result["labels"].index)
-    assert frame.attrs["source_rows"][0] == list(range(256))
+    assert features.expand_coverage(frame.attrs)[0] == list(range(256))
     assert frame.attrs["grouped"] and frame.attrs["window_size"] == 256
 
 
@@ -173,7 +173,9 @@ def test_score_select_keeps_provenance_and_can_feed_a_model(registry, dataset, c
         {"features": extracted["features"], "labels": extracted["labels"]}, context
     ).outputs
     assert len(outputs["features"].columns) == 4
-    for key in ("source_rows", "groups", "source_path", "source_id"):
+    # 覆盖信息未必是逐行号列表（大表上会压成区间），所以按语义比而不是按表示比。
+    assert features.provenance_matches(outputs["features"].attrs, extracted["features"].attrs)
+    for key in ("groups", "source_path", "source_id"):
         assert outputs["features"].attrs.get(key) == extracted["features"].attrs.get(key)
     assert any("leakage" in warning for warning in outputs["features"].attrs["evaluation_warnings"])
     model = registry.create(
@@ -197,7 +199,7 @@ def test_pca_projection_preserves_rows_and_merges(registry, dataset, context):
     projected = outputs["features"]
     assert list(projected.columns) == ["pc_1", "pc_2"]
     assert projected.index.equals(extracted["features"].index)
-    assert projected.attrs["source_rows"] == extracted["features"].attrs["source_rows"]
+    assert features.provenance_matches(projected.attrs, extracted["features"].attrs)
     rows = outputs["variance"]["rows"]
     assert rows[-1]["cumulative"] == pytest.approx(sum(projected.attrs["pca_explained_variance_ratio"]))
     assert 0 < rows[-1]["cumulative"] <= 1

@@ -27,7 +27,18 @@ def numeric_columns(data: pd.DataFrame, columns: list[str] | None = None) -> lis
     ``columns=None`` 表示"自动取所有数值列"——这是多数组件的默认行为；
     显式传入时则按调用者给的顺序返回，保证列顺序可预测。
     """
-    selected = columns or list(data.select_dtypes(include="number").columns)
+    # 刻意用 `dtypes` 扫描而不是 `data.select_dtypes(...)`：后者会构造一个新表并触发 pandas 的
+    # `__finalize__`，而它会**深拷贝 `attrs`**。窗口特征的 `attrs` 里带着逐窗口的来源行，
+    # 一次深拷贝在 108k 行 / 3580 个窗口上是 2 秒级的开销（cProfile 里 deepcopy 被调用 910 万次）。
+    # 纯看 dtype 不建表，结果完全一样：`number` 不含 bool，所以这里显式排除布尔列。
+    if columns:
+        selected = list(columns)
+    else:
+        selected = [
+            name
+            for name, dtype in data.dtypes.items()
+            if pd.api.types.is_numeric_dtype(dtype) and not pd.api.types.is_bool_dtype(dtype)
+        ]
     # 空列表或重复列名都说明调用方参数写错了，继续算下去只会得到误导性结果。
     if not selected or len(set(selected)) != len(selected):
         raise ValueError("Select at least one unique numeric column")

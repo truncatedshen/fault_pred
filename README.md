@@ -293,6 +293,8 @@ GET /api/node-data/csv?pipeline_id=...&node_id=stat&direction=input&max_rows=0
 | `feature.pca` | 主成分分析 | features : FeatureDataset → features : FeatureDataset, variance : StatisticsResult |
 窗口族（`feature.statistical` / `feature.fitting` / `feature.spectral` / `feature.entropy`）共享同一套窗口与预测参数：按行 `window_size`/`step`，或按时间 `window_span`/`step_span`（如 `7d`/`1d`）；`label_policy=horizon` 配合 `prediction_horizon`/`prediction_gap` 就能从"检测"切到"预测"。用法见 §4.4，参数细节见 §5。
 
+**逐列选特征**：`feature.statistical`、`feature.spectral`、`feature.entropy`、`feature.rolling_statistics`、`feature.temporal` 都有 `column_features` 参数——`{"stack": "distinct_count", "vibration": ["mean", "std"]}` 让标识列与物理量列在**同一个节点**里用不同的特征清单，没列到的列继续用全局 `features`/`method`。以前这种需求只能"建两三条分支再 `feature.merge`"，既费节点又会在"来源必须完全一致"上翻车。列名不在 `columns` 里、清单为空、名字不在枚举里都会报错并点名。`feature.fitting` 没有特征清单参数（输出由 `fitting_method` 决定），因此没有它。
+
 ### 算法验证 Algorithm Validation（27）
 
 | type | 名称 | 输入 → 输出 |
@@ -377,7 +379,7 @@ data.input → feature.statistical(window_span="7d", step_span="1d",
   "prediction_horizon": "2d",               // 往后看 2 天
   "prediction_gap": "1h",                   // 先隔 1 小时，避免贴着故障起始
   "label_policy": "horizon",                // 标签来自未来视野
-  "current_fault_policy": "drop",           // 已经坏了的窗口交给检测任务
+  "current_fault_policy": "positive",       // 窗口内已故障的样本保留并标 1（默认口径）
   "normal_label": "0"}}
 ```
 
@@ -386,6 +388,13 @@ data.input → feature.statistical(window_span="7d", step_span="1d",
 最后一条由平台自己说：某一边缺类别时，`metrics.warnings` 里会直接出现
 `Holdout split has no 1 rows: train {…}, test {…}` 与 `The test set contains no positive (1) rows`。
 这不是提示音，而是"这个 accuracy 不能当成绩读"的结论——汇报时原样带上。
+
+**切分本身按类别分层**：`group`/`asset` 的整组留出不再"随机抽组"，而是先把含故障的组按
+"两边都要有"的原则分配，再按规模补齐其余组（`temporal` 则在 `test_size` 的 ±50% 之内挪动切点，
+挪动的事实写进 `metrics.split_note`）。动机是实测出来的：HBM 原始 ECC 日志里 334 次 UER 只落在
+9 台服务器上，按服务器随机留出时测试集 155 个窗口里 **0 个正类**，`accuracy=1.0` 完全是假象。
+只有一台设备发生过故障时无法两全——它必须留在训练集，此时测试集没有正类，平台会明说而不是
+给你一个漂亮数字。
 
 实测参考（3W 真实数据：489,456 行 / 28 个实例，窗口 `180s`、步长 `60s`、视野 `1h`）：得到 **3370 个窗口、正类 26.9%**，丢弃 4380 个"自身已故障"与 331 个"视野超出数据"的窗口，特征提取 1.0 秒。注意**特征行数只由窗口与步长决定，与输入行数无关**。
 
@@ -396,7 +405,7 @@ data.input → feature.statistical(window_span="7d", step_span="1d",
 | 主题 | 说明 |
 | --- | --- |
 | 标签对齐 | 必须使用窗口组件的 `labels` 输出；混标签窗口默认拒绝（`label_policy=strict`），可选 `last` 或 `mode` |
-| 划分方式 | `split_method=stratified` 分层随机、`group` 按设备分组、`temporal` 按特征行顺序的时间划分 |
+| 划分方式 | `split_method=stratified` 分层随机、`group` 按设备分组、`temporal` 按特征行顺序的时间划分；后两者（含 `asset`）都**按类别分层**，故障样本保证落在两侧 |
 | 资产级留出 | `data.asset_key` 从实例名派生资产 → 窗口组件填 `asset_column` → 验证器用 `split_method=asset`，真正留出整口井/整台设备；`metrics.coverage` 报告未见资产数 |
 | 重叠窗口 | 重叠窗口不能随机划分，必须用 `group` 或 `temporal` |
 | 泄漏检查 | Runtime 会检查训练与测试窗口是否共享原始数据行，发现即报错 |
@@ -431,7 +440,7 @@ equipment,time,label,vibration,temperature,pressure
 | `step_span` | 时间步长，如 `1d`；留空表示不重叠 |
 | `prediction_horizon` | **预测视野**，如 `2d`：配合 `label_policy=horizon`，窗口结束之后这么久内出现故障就标 1 |
 | `prediction_gap` | 预测间隔（禁入带），把视野整体推后，避免贴着故障起始的样本过易 |
-| `current_fault_policy` | 窗口自身已故障时：`drop`（默认，属于检测任务）/`positive`/`negative`；丢弃数量会写进 `attrs` 与警告 |
+| `current_fault_policy` | 窗口自身已故障时：`positive`（**默认**，保留并标 1）/`negative`（标 0）/`drop`（留给检测任务，丢弃并计数）；数量写进 `attrs` 与警告。只在 `label_policy=horizon` 下生效，其它模式会被忽略但记录在 `attrs["current_fault_policy_ignored"]` |
 | `normal_label` | 哪个标签值算正常（默认 `0`），其它取值都算故障 |
 | `label_policy` | 混标签窗口的处理：`strict` 拒绝、`last` 取最后一个、`mode` 取众数；`horizon` 表示**预测**——标签取自窗口之后的未来视野 |
 | `sampling_rate` | 仅频域特征：原始样本采样率（Hz），必填，窗口至少 8 个样本 |
@@ -456,22 +465,46 @@ MCP bridge 只是转发到本地 HTTP 控制 API，所以**必须先启动服务
 
 ### 6.2 配置 MCP 客户端
 
-推荐用工程自带的脚本写配置——它**幂等**、只改 `[mcp_servers.fault-prediction]` 这一段、写入前备份，
-并且会先校验原文件仍是合法 TOML 再动它：
+推荐用工程自带的脚本写配置——它**幂等**、只改自己那一段、写入前备份，并且会先校验原文件仍然合法再动它：
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\install_mcp_config.py
-# 换路径 / 端口：--python <解释器> --url http://127.0.0.1:8766
-# 只想看会写什么：--dry-run
+.\.venv\Scripts\python.exe scripts\install_mcp_config.py                     # Codex（默认）
+.\.venv\Scripts\python.exe scripts\install_mcp_config.py --client opencode   # OpenCode
+.\.venv\Scripts\python.exe scripts\install_skill.py --client opencode        # 装 skill 到 OpenCode
+# 换路径 / 端口：--python <解释器> --url http://127.0.0.1:8766；只想看会写什么：--dry-run
 ```
 
-手工配置也可以。Codex 用的是 **TOML**（`~/.codex/config.toml`）：
+两个客户端的格式、路径都不一样（都按各自官方文档来）：
+
+| 客户端 | 配置文件 | skill 目录 |
+| --- | --- | --- |
+| Codex | `~/.codex/config.toml`（TOML） | `~/.codex/skills/fault-prediction/` |
+| OpenCode | `~/.config/opencode/opencode.json`（JSON/JSONC） | `~/.config/opencode/skills/fault-prediction/`（全局）或 `<项目>/.opencode/skills/fault-prediction/` |
+| 两者都读 | —— | `~/.agents/skills/fault-prediction/`（`--client agents`） |
+
+手工配置也可以。Codex 用的是 **TOML**：
 
 ```toml
 [mcp_servers.fault-prediction]
 command = 'D:/codespace/python/fault_pred/.venv/Scripts/python.exe'
 args = ["-m", "fault_platform", "mcp", "--url", "http://127.0.0.1:8765"]
 startup_timeout_sec = 60
+```
+
+OpenCode 用的是 JSON（注意 `command` 是**数组**，`type` 必须是 `local`）：
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "fault-prediction": {
+      "type": "local",
+      "command": ["D:/codespace/python/fault_pred/.venv/Scripts/python.exe",
+                  "-m", "fault_platform", "mcp", "--url", "http://127.0.0.1:8765"],
+      "enabled": true
+    }
+  }
+}
 ```
 
 其它客户端用 JSON（字段名是 `mcpServers`，写法与内容一样）：
@@ -495,7 +528,7 @@ startup_timeout_sec = 60
 .\.venv\Scripts\python.exe scripts\mcp_smoke.py --from-config
 ```
 
-`--from-config` 直接读取 `~/.codex/config.toml` 的 `[mcp_servers.fault-prediction]`；去掉该参数则用当前解释器和 `--url` 启动，方便 CI 或其它客户端复用。**配置里没有这个条目时 `--from-config` 会直接失败**，先跑一次 `install_mcp_config.py` 再试。
+`--from-config` 直接读客户端配置里的条目（默认 Codex；`--client opencode` 读 OpenCode 那份），把它**原样**当作启动命令；去掉该参数则用当前解释器和 `--url` 启动，方便 CI 或其它客户端复用。**配置里没有这个条目时 `--from-config` 会直接失败**，先跑一次 `install_mcp_config.py` 再试。同样的 `--client` 开关在 `verify_deploy.py` 与 `install_skill.py` 上都有。
 
 ### 6.3 工具清单（39 个高层操作）
 
@@ -732,10 +765,10 @@ src/fault_platform/
 skills/fault-prediction/  Agent 技能（SKILL.md + 4 份参考）
 examples/                 合成数据、示例 XML、Python API 示例、HBM 多源示例
 docs/                     架构、设计、组件参考、MCP、部署、验证记录
-tests/                    26 个 pytest 文件 + DOM 集成测试
+tests/                    32 个 pytest 文件 + DOM 集成测试
 scripts/                  部署与验收（deploy / verify_deploy / export_release / install_mcp_config /
                           mcp_smoke / browser_check）与工具脚本（export_catalog / memory_bench /
-                          prepare_hbm_raw / mcp_wait_probe）
+                          prepare_hbm_raw / mcp_wait_probe / mcp_split_check）
 ```
 
 源码注释约定：模块与函数的 docstring 保留英文摘要（与既有代码风格一致），
@@ -748,13 +781,14 @@ scripts/                  部署与验收（deploy / verify_deploy / export_rele
 ## 12. 验证
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest -q                 # 283 项通过（1 项按可选依赖跳过）
+.\.venv\Scripts\python.exe -m pytest -q                 # 326 项通过（1 项按可选依赖跳过）
 .\.venv\Scripts\python.exe -m ruff check src tests scripts
 .\.venv\Scripts\python.exe -m pip check
 node --check src/fault_platform/web/app.js
 npm ci; npm test                                        # 8 项 DOM 集成测试（jsdom）
 npm run browser-check                                   # Chrome headless 真实浏览器验收
 .\.venv\Scripts\python.exe scripts\mcp_smoke.py --from-config   # MCP 闭环（先启动服务）
+.\.venv\Scripts\python.exe scripts\mcp_split_check.py           # 窗口默认口径 + 三种切分的正类覆盖（先启动服务）
 .\.venv\Scripts\python.exe scripts\memory_bench.py --rows 1000000   # 大文件内存基准
 .\.venv\Scripts\python.exe scripts\verify_deploy.py --from-config   # 部署验收（14 项，含 MCP 端到端）
 .\.venv\Scripts\python.exe scripts\export_release.py --build        # 打可交付的部署包

@@ -748,11 +748,13 @@ Grouped/windowed statistics with aligned labels; window_span/step_span cut windo
 | step_span | string | "" | 否 |  |
 | prediction_horizon | string | "" | 否 |  |
 | prediction_gap | string | "" | 否 |  |
-| current_fault_policy | enum | "drop" | 否 | drop, positive, negative |
+| current_fault_policy | enum | "positive" | 否 | drop, positive, negative |
 | normal_label | string | "0" | 否 |  |
 | label_policy | enum | "strict" | 否 | strict, last, mode, horizon |
+| min_window_rows | integer | 0 | 否 |  min=0, max=None |
 | features | feature_list | ["mean", "std", "rms"] | 是 | mean, std, variance, min, max, median, rms, skewness, kurtosis, quantile, range, iqr, mad, peak, crest_factor, count, distinct_count, argmax_first, argmax_last, argmin_first, argmin_last, count_above_mean, count_below_mean, longest_above_mean, longest_below_mean, mean_delta, mean_abs_delta, mean_second_derivative, duplicate_point_ratio, repeated_value_ratio, duplicate_sum, time_reversal_asymmetry, std_gt_range, variance_gt_std, max_repeated, min_repeated |
 | quantile | float | 0.75 | 否 |  min=0, max=1 |
+| column_features | object | {} | 否 |  |
 
 ## feature.fitting · 拟合特征
 
@@ -775,9 +777,10 @@ Linear, polynomial or exponential trends with residual and R² features; the deg
 | step_span | string | "" | 否 |  |
 | prediction_horizon | string | "" | 否 |  |
 | prediction_gap | string | "" | 否 |  |
-| current_fault_policy | enum | "drop" | 否 | drop, positive, negative |
+| current_fault_policy | enum | "positive" | 否 | drop, positive, negative |
 | normal_label | string | "0" | 否 |  |
 | label_policy | enum | "strict" | 否 | strict, last, mode, horizon |
+| min_window_rows | integer | 0 | 否 |  min=0, max=None |
 | fitting_method | enum | "linear" | 否 | linear, polynomial, exponential |
 | degree | integer | 2 | 否 |  min=1, max=5 |
 
@@ -796,6 +799,7 @@ Rolling mean, standard deviation, median or repeated-maximum flags
 | window | integer | 5 | 否 |  min=2, max=100000 |
 | group_column | column | null | 否 |  |
 | time_column | column | null | 否 |  |
+| column_features | object | {} | 否 |  |
 
 ## feature.temporal · 差分与自相关特征
 
@@ -814,6 +818,7 @@ Row-aligned first/second differences or rolling autocorrelation
 | prominence | float | 0.0 | 否 |  min=0, max=None |
 | group_column | column | null | 否 |  |
 | time_column | column | null | 否 |  |
+| column_features | object | {} | 否 |  |
 
 ## feature.wavelet · 小波特征
 
@@ -853,13 +858,15 @@ Windowed approximate entropy and histogram-based information entropy; with windo
 | step_span | string | "" | 否 |  |
 | prediction_horizon | string | "" | 否 |  |
 | prediction_gap | string | "" | 否 |  |
-| current_fault_policy | enum | "drop" | 否 | drop, positive, negative |
+| current_fault_policy | enum | "positive" | 否 | drop, positive, negative |
 | normal_label | string | "0" | 否 |  |
 | label_policy | enum | "strict" | 否 | strict, last, mode, horizon |
+| min_window_rows | integer | 0 | 否 |  min=0, max=None |
 | methods | feature_list | ["approximate_entropy", "information_entropy"] | 是 | approximate_entropy, information_entropy, binned_entropy |
 | bins | integer | 16 | 否 |  min=2, max=200 |
 | embedding_dimension | integer | 2 | 否 |  min=1, max=5 |
 | tolerance_ratio | float | 0.2 | 否 |  min=0, max=None |
+| column_features | object | {} | 否 |  |
 
 ## feature.categorical · 分类特征
 
@@ -911,15 +918,17 @@ FFT amplitude features per window: dominant frequency, centroid, entropy, band a
 | step_span | string | "" | 否 |  |
 | prediction_horizon | string | "" | 否 |  |
 | prediction_gap | string | "" | 否 |  |
-| current_fault_policy | enum | "drop" | 否 | drop, positive, negative |
+| current_fault_policy | enum | "positive" | 否 | drop, positive, negative |
 | normal_label | string | "0" | 否 |  |
 | label_policy | enum | "strict" | 否 | strict, last, mode, horizon |
+| min_window_rows | integer | 0 | 否 |  min=0, max=None |
 | sampling_rate | float | null | 是 |  |
 | features | feature_list | ["dominant_frequency", "spectral_centroid", "spectral_entropy", "band_energy_ratio"] | 是 | dominant_frequency, dominant_amplitude, spectral_centroid, spectral_spread, spectral_entropy, spectral_rms, high_frequency_ratio, harmonic_ratio, band_energy_ratio |
 | band_edges | list | [0.25, 0.5] | 否 |  |
 | harmonic_tolerance | float | 0.02 | 否 |  min=0, max=0.5 |
 | flat_policy | enum | "nan" | 否 | nan, skip, error |
 | flat_threshold | float | 0.0 | 否 |  min=0, max=None |
+| column_features | object | {} | 否 |  |
 
 ## feature.score_select · 特征评分选择
 

@@ -432,7 +432,7 @@ ComponentRegistry ────────────────────�
 - 组件是**薄适配层**：`execute` 只做参数整理 + 调用 `fault_core`，把返回值包装成 `ComponentResult`。
 - 需要外部资源的组件（数据输入）覆盖 `preflight`（提前发现缺文件）与 `external_fingerprint`（文件内容 sha256，用于失效判断）。
 - 窗口类组件统一复用 `fault_core.features.windows`，因此窗口索引（`g{i}_w{start}`）、来源覆盖（`source_rows`）、分组信息（`groups`）在所有特征分支中语义一致，这是 `feature.merge` 能安全合并的前提。
-- **窗口可以按时间切，也可以做预测**：`window_span`/`step_span`（如 `7d`/`1d`）把"用最近 7 天的数据"直接写进参数，采样不规则时每个窗口行数可以不同（`attrs["window_span_seconds"]` 记录跨度，`window_size` 记 0）；`label_policy=horizon` 配合 `prediction_horizon`/`prediction_gap` 让标签取自窗口**之后**的视野，`current_fault_policy` 决定"窗口自身已故障"的样本是丢弃还是标 1/0，丢弃数量写入 `attrs` 与 warnings。窗口定义与标签语义集中在 `fault_core.features` 的 `window_arguments / prepared_windows / window_shape / window_attrs`，统计、频域、熵三个组件共用同一份实现，避免各自漂移。 无论哪种切法，**特征行数 = 窗口数**（每组约"组内时长 / 步长"），与输入行数无关：48.9 万行原始数据配 `180s`/`60s` 得到 8081 行特征，步长换成 `180s` 只剩 2700 行。
+- **窗口可以按时间切，也可以做预测**：`window_span`/`step_span`（如 `7d`/`1d`）把"用最近 7 天的数据"直接写进参数，采样不规则时每个窗口行数可以不同（`attrs["window_span_seconds"]` 记录跨度，`window_size` 记 0）；`label_policy=horizon` 配合 `prediction_horizon`/`prediction_gap` 让标签取自窗口**之后**的视野，`current_fault_policy` 决定"窗口自身已故障"的样本是标 1（默认 `positive`，保留）还是标 0/丢弃（`drop`），各项数量写入 `attrs` 与 warnings；该参数只在这一模式下生效，其它模式会忽略但记录在 `attrs["current_fault_policy_ignored"]`。窗口定义与标签语义集中在 `fault_core.features` 的 `window_arguments / prepared_windows / window_shape / window_attrs`，统计、频域、熵三个组件共用同一份实现，避免各自漂移。 无论哪种切法，**特征行数 = 窗口数**（每组约"组内时长 / 步长"），与输入行数无关：48.9 万行原始数据配 `180s`/`60s` 得到 8081 行特征，步长换成 `180s` 只剩 2700 行。
 - 组件返回值中的 `warnings` 会写入 Workspace 警告与节点警告；数据属性里的 `evaluation_warnings` 会随 DataFrame 传播到模型指标。
 
 ### 5.3 注册期校验
@@ -459,7 +459,9 @@ ComponentRegistry ────────────────────�
 
 **标签有两种来源。** `strict` / `mode` / `last` 从窗口内部的标签聚合；`horizon` 从**未来视野**取：窗口 `[t, t+span)` 是手上的证据，正类条件是 `(t+span+gap, t+span+gap+horizon]` 内出现过非 `normal_label` 的样本。因此"检测"与"预测"共用同一张图、同一套组件，只差一个参数——这也让标签语义、来源覆盖与泄漏检查（`source_rows` / `windows_share_rows`）对两种任务同时成立。
 
-四道刻意的取舍：**间隔带 `prediction_gap`** 把视野整体推后，避免贴着故障起始的窗口因边界贴合而变得过易；**看不见未来不标 0**——视野超出数据末尾的窗口丢弃并计数（"没看到故障"不等于"没有故障"）；**窗口自身已故障的样本另行处理**——`current_fault_policy=drop`（默认）把它们留给检测任务，也可选 `positive`/`negative`；**丢弃必须计数**——`attrs["horizon_dropped_current_fault"]`、`attrs["horizon_dropped_unknown_future"]` 与 warnings 让"样本为什么变少"可被追问。真实 3W 数据配 `180s`/`60s`/`1h` 得到 3,370 个窗口、正类 26.9%，同时丢弃 4,380 + 331 个窗口。
+四道刻意的取舍：**间隔带 `prediction_gap`** 把视野整体推后，避免贴着故障起始的窗口因边界贴合而变得过易；**看不见未来不标 0**——视野超出数据末尾的窗口丢弃并计数（"没看到故障"不等于"没有故障"）；**窗口自身已故障的样本默认保留**——`current_fault_policy=positive` 把它们标 1（真实 ECC/退化数据里故障集中在少数设备上，丢掉就等于把正类丢掉，HBM 那份数据正类会从 103 掉到 41），想交给检测任务就显式选 `drop`，也可以选 `negative`；**丢弃必须计数**——`attrs["horizon_dropped_current_fault"]`、`attrs["horizon_dropped_unknown_future"]` 与 warnings 让"样本为什么变少"可被追问。真实 3W 数据配 `180s`/`60s`/`1h` 得到 3,370 个窗口、正类 26.9%，同时丢弃 4,380 + 331 个窗口。
+
+**切分按类别分层，而不是随机抽组。** `group`/`asset` 的整组留出用 `_class_aware_group_split`：先按 `random_state` 打乱组序，再"稀有类优先、某侧缺这个类就放过去"，最后按规模补齐；`temporal` 不能重排行序，但 `_class_aware_temporal_boundary` 允许切点在 `test_size` 的 ±50% 内移动，移动量写进 `metrics["split_note"]`。理由与实测见 `docs/validation.md` 第三十三轮：HBM 数据按服务器随机留出时测试集 0 个正类、`accuracy=1.0`；分层之后同一份切分（`drop`）测试集有 13 个正类。代价是留出集**不是**均匀随机抽组，且"只有一个组含某个类"时无法两全——那个组留在训练集，平台明说测试集没有正类。
 
 **流式不支持预测模式。** 按块消费看不到未来，所以 `window_span` 与 `label_policy=horizon` 在流式路径上直接报错（提示关掉 `streaming` 或插 `data.materialize`），而不是给一份标签错了的结果——这条与 `data.quality` 的处理保持一致。
 

@@ -16,12 +16,15 @@ import argparse
 import asyncio
 import json
 import sys
-import tomllib
 from pathlib import Path
 from typing import Any
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from install_mcp_config import bridge_command, default_config_path, read_entry  # noqa: E402
 
 SPECTRAL_WINDOW = {
     "columns": ["vibration"],
@@ -54,14 +57,19 @@ async def poll(session: ClientSession, pipeline_id: str, report: dict[str, Any],
     raise AssertionError(f"pipeline {pipeline_id} did not finish; report={report}")
 
 
-def configured_parameters(config: Path, server: str, base_url: str) -> tuple[StdioServerParameters, str]:
-    """Read the stdio server exactly as a Codex client would launch it."""
-    entry = tomllib.loads(config.read_text(encoding="utf-8"))["mcp_servers"][server]
-    arguments = [
-        base_url if argument == "http://127.0.0.1:8765" else argument for argument in entry.get("args", [])
-    ]
-    parameters = StdioServerParameters(command=entry["command"], args=arguments, env=entry.get("env") or None)
-    return parameters, f"{config}::{server}"
+def configured_parameters(
+    config: Path, server: str, base_url: str, client: str = "codex"
+) -> tuple[StdioServerParameters, str]:
+    """Read the stdio server exactly as the configured client would launch it.
+
+    Codex 用 `command` + `args`（TOML），OpenCode 用 `command` 数组（JSON）——
+    两种格式在这里归一，其他步骤完全一样。
+    """
+    entry = read_entry(config, client, server)
+    command, args = bridge_command(entry, client)
+    arguments = [base_url if item == "http://127.0.0.1:8765" else item for item in args]
+    parameters = StdioServerParameters(command=command, args=arguments, env=entry.get("env") or None)
+    return parameters, f"{config}::{server} ({client})"
 
 
 async def run(base_url: str, parameters: StdioServerParameters, source: str) -> dict[str, Any]:
@@ -251,13 +259,17 @@ def main() -> None:
     parser.add_argument(
         "--from-config",
         action="store_true",
-        help="Launch the stdio bridge exactly as the Codex MCP configuration does",
+        help="Launch the stdio bridge exactly as the configured client does",
     )
-    parser.add_argument("--config", default=str(Path.home() / ".codex" / "config.toml"))
+    parser.add_argument("--client", choices=("codex", "opencode"), default="codex")
+    parser.add_argument("--config", default="", help="Config file; empty uses the client default")
     parser.add_argument("--server", default="fault-prediction")
     arguments = parser.parse_args()
     if arguments.from_config:
-        parameters, source = configured_parameters(Path(arguments.config), arguments.server, arguments.url)
+        config = (
+            Path(arguments.config).expanduser() if arguments.config else default_config_path(arguments.client)
+        )
+        parameters, source = configured_parameters(config, arguments.server, arguments.url, arguments.client)
     else:
         parameters = StdioServerParameters(
             command=sys.executable, args=["-m", "fault_platform", "mcp", "--url", arguments.url]

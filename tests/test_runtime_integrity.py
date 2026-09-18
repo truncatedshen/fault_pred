@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from fault_core.features import extract_features, merge_features
+from fault_core.features import expand_coverage, extract_features, merge_features
 from fault_core.models import validate_model
 from fault_core.preprocessing import scale
 from fault_platform.runtime import ExecutionEngine
@@ -32,7 +32,9 @@ def test_temporal_split_purges_raw_window_overlap():
     outputs = validate_model(**extracted, split_method="temporal", n_estimators=5)
     metrics = outputs["metrics"]
     frame = extracted["features"]
-    coverage = dict(zip(frame.index, frame.attrs["source_rows"]))
+    # 覆盖信息现在是区间表示（`source_rows_ranges`）：pandas 每次 finalize 都会深拷贝 attrs，
+    # 逐行号列表在大表上是秒级开销。语义完全一样，用官方访问器取回逐窗口行号。
+    coverage = dict(zip(frame.index, expand_coverage(frame.attrs)))
     train = {r for key in metrics["train_indices"] for r in coverage[key]}
     test = {r for key in metrics["test_indices"] for r in coverage[key]}
     assert not train.intersection(test)

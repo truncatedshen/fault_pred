@@ -94,7 +94,8 @@ def test_feature_merge_and_window_label_alignment(registry, dataset, context):
     a = features.extract_features(dataset, **kwargs)
     b = features.extract_features(dataset, kind="fitting", **kwargs)
     assert a["features"].index.equals(a["labels"].index)
-    assert a["features"].attrs["source_rows"] == b["features"].attrs["source_rows"]
+    # 覆盖信息可能是区间表示（大表上的性能优化），语义比较要走 expand_coverage。
+    assert features.expand_coverage(a["features"].attrs) == features.expand_coverage(b["features"].attrs)
     merged = registry.create("feature.merge").execute(
         {"left": a["features"], "right": b["features"]}, context
     )

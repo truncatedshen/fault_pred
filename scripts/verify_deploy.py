@@ -2,7 +2,8 @@
 
 Run it on the target machine after installing:
 
-    python scripts/verify_deploy.py --from-config
+    python scripts/verify_deploy.py --from-config                    # Codex (~/.codex/config.toml)
+    python scripts/verify_deploy.py --from-config --client opencode  # OpenCode (~/.config/opencode)
 
 It checks the environment, the installed skill, the HTTP service (UI + SSE), and drives
 a complete pipeline through MCP using the *configured* bridge command. Exit code 0 means
@@ -22,6 +23,15 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from install_mcp_config import (  # noqa: E402
+    bridge_command,
+    default_config_path,
+    default_skill_dir,
+    read_entry,
+)
 
 CHECKS: list[dict[str, Any]] = []
 
@@ -87,17 +97,19 @@ def check_skill(skill_dir: Path) -> bool:
     )
 
 
-def check_config(config_path: Path, server: str) -> tuple[bool, dict[str, Any] | None]:
+def check_config(config_path: Path, server: str, client: str) -> tuple[bool, dict[str, Any] | None]:
+    """读配置里的 MCP 条目，并把解释器与参数归一化出来（两种客户端格式都支持）。"""
     if not config_path.exists():
         return record("mcp config present", False, str(config_path)), None
     try:
-        entry = tomllib.loads(config_path.read_text(encoding="utf-8-sig"))["mcp_servers"][server]
-    except Exception as exc:
+        entry = read_entry(config_path, client, server)
+        python, args = bridge_command(entry, client)
+    except (ValueError, KeyError, tomllib.TOMLDecodeError) as exc:
         return record("mcp config entry readable", False, str(exc)), None
-    command = Path(entry["command"])
+    command = Path(python)
     ok = record("mcp config entry readable", True, json.dumps(entry, ensure_ascii=False))
     ok &= record("configured interpreter exists", command.exists(), str(command))
-    return ok, entry
+    return ok, {"command": python, "args": args, "client": client}
 
 
 def start_service(python: Path, data_root: Path, storage_root: Path):
@@ -156,13 +168,15 @@ def check_service(base: str) -> bool:
     return ok
 
 
-def check_mcp(scripts: Path, python: Path, url: str, from_config: bool) -> bool:
+def check_mcp(
+    scripts: Path, python: Path, url: str, from_config: bool, client: str, config_path: Path
+) -> bool:
     smoke = scripts / "mcp_smoke.py"
     if not smoke.exists():
         return record("MCP end-to-end smoke available", False, str(smoke))
-    command = [str(python), str(smoke), "--url", url]
+    command = [str(python), str(smoke), "--url", url, "--client", client]
     if from_config:
-        command.append("--from-config")
+        command += ["--from-config", "--config", str(config_path)]
     started = time.perf_counter()
     completed = subprocess.run(command, capture_output=True, text=True, encoding="utf-8")
     output = completed.stdout.strip()
@@ -183,18 +197,21 @@ def main() -> int:
     parser.add_argument(
         "--from-config", action="store_true", help="Use the interpreter and URL from config.toml"
     )
-    parser.add_argument("--config", default=str(Path.home() / ".codex" / "config.toml"))
+    parser.add_argument("--client", choices=("codex", "opencode", "agents"), default="codex")
+    parser.add_argument("--config", default="", help="Config file; empty uses the client default")
     parser.add_argument("--server", default="fault-prediction")
     parser.add_argument("--skill-dir", default="")
     parser.add_argument("--work-dir", default="", help="Scratch directory for the verification run")
     parser.add_argument("--json-report", default="")
     arguments = parser.parse_args()
 
-    config_path = Path(arguments.config).expanduser()
+    config_path = (
+        Path(arguments.config).expanduser() if arguments.config else default_config_path(arguments.client)
+    )
     skill_dir = (
         Path(arguments.skill_dir).expanduser()
         if arguments.skill_dir
-        else config_path.parent / "skills" / arguments.server
+        else default_skill_dir(arguments.client, arguments.server)
     )
     work = (
         Path(arguments.work_dir).expanduser()
@@ -210,7 +227,7 @@ def main() -> int:
     ok = check_environment()
     ok &= check_skill(skill_dir)
     if arguments.from_config:
-        config_ok, entry = check_config(config_path, arguments.server)
+        config_ok, entry = check_config(config_path, arguments.server, arguments.client)
         ok &= config_ok
         if entry:
             python = Path(entry["command"])
@@ -221,7 +238,12 @@ def main() -> int:
         try:
             ok &= check_service(f"http://127.0.0.1:{port}")
             ok &= check_mcp(
-                Path(__file__).resolve().parent, python, f"http://127.0.0.1:{port}", arguments.from_config
+                Path(__file__).resolve().parent,
+                python,
+                f"http://127.0.0.1:{port}",
+                arguments.from_config,
+                arguments.client,
+                config_path,
             )
         finally:
             stop_service(process)

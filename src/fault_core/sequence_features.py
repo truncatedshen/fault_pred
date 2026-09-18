@@ -23,6 +23,7 @@ from fault_core.features import (
     _assemble,
     _window_label,
     attach_assets,
+    column_target_plan,
     group_assets,
     prepared_windows,
     window_arguments,
@@ -33,6 +34,32 @@ from fault_core.features import (
 #: 熵特征的全部方法名。``binned_entropy`` 与 ``information_entropy`` 是同一实现的两个叫法
 #: （组件清单里两个名字都出现过），对外都产出 ``<列名>__information_entropy``。
 ENTROPY_METHODS = ("approximate_entropy", "information_entropy", "binned_entropy")
+#: 滚动统计的方法（单列只算一种，输出列名带窗口长度）。
+ROLLING_METHODS = ("mean", "std", "variance", "median", "max", "min", "max_repeat")
+#: 时域特征的方法（同样单列只算一种）。
+TEMPORAL_METHODS = (
+    "first_difference",
+    "second_difference",
+    "autocorrelation",
+    "sum_abs_change",
+    "peak_count",
+)
+
+
+def _single_method_plan(
+    columns: list[str], default: str, column_methods: dict[str, Any] | None, valid: tuple[str, ...]
+) -> dict[str, str]:
+    """把"每列用哪个方法"解析成 ``{列: 方法}``；这些组件一列只算一个方法，多给就报错。"""
+    if not column_methods:
+        return {column: default for column in columns}
+    plan = column_target_plan(columns, [default], column_methods, valid=valid, label="methods")
+    for column, names in plan.items():
+        if len(names) != 1:
+            raise ValueError(
+                f"column_features[{column!r}] must name exactly one method ({names}); "
+                "this component computes one method per column"
+            )
+    return {column: names[0] for column, names in plan.items()}
 
 
 def _ordered(data: pd.DataFrame, group_column: str | None, time_column: str | None) -> pd.DataFrame:
@@ -54,6 +81,7 @@ def rolling_statistics(
     window: int = 5,
     group_column: str | None = None,
     time_column: str | None = None,
+    column_features: dict[str, Any] | None = None,
 ) -> pd.DataFrame:
     """逐行输出滚动统计量，列名形如 ``vibration__rolling_mean_5``。
 
@@ -65,33 +93,36 @@ def rolling_statistics(
     cols = numeric_columns(data, columns)
     ordered = _ordered(data, group_column, time_column)
     result = pd.DataFrame(index=ordered.index)
+    plan = _single_method_plan(cols, method, column_features, ROLLING_METHODS)
     for column in cols:
+        # 这一列用哪个滚动方法：默认取全局 method，column_features 可以逐列覆盖。
+        chosen_method = plan[column]
         grouped = (
             ordered[column].groupby(ordered[group_column], sort=False, dropna=False) if group_column else None
         )
 
         def calculate(series: pd.Series) -> pd.Series:
             rolling = series.rolling(window, min_periods=1)
-            if method == "mean":
+            if chosen_method == "mean":
                 return rolling.mean()
-            if method == "std":
+            if chosen_method == "std":
                 return rolling.std(ddof=0)
-            if method == "median":
+            if chosen_method == "median":
                 return rolling.median()
-            if method == "variance":
+            if chosen_method == "variance":
                 # 与 std 保持同一口径（ddof=0，总体方差），这样 variance == std ** 2。
                 return rolling.var(ddof=0)
-            if method == "max":
+            if chosen_method == "max":
                 return rolling.max()
-            if method == "min":
+            if chosen_method == "min":
                 return rolling.min()
-            if method == "max_repeat":
+            if chosen_method == "max_repeat":
                 # raw=True 直接传 ndarray，比默认的 Series 快很多；判据是窗口内极值重复出现。
                 return rolling.apply(lambda values: float(np.sum(values == np.max(values)) > 1), raw=True)
-            raise ValueError(f"Unknown rolling feature method: {method}")
+            raise ValueError(f"Unknown rolling feature method: {chosen_method}")
 
         values = grouped.transform(calculate) if grouped is not None else calculate(ordered[column])
-        result[f"{column}__rolling_{method}_{window}"] = values
+        result[f"{column}__rolling_{chosen_method}_{window}"] = values
     result = result.loc[data.index]
     # grouped/groups 记录分组是否生效与每组标签，供下游判断"这些特征行是否可分组划分"。
     result.attrs = {
@@ -111,6 +142,7 @@ def temporal_features(
     prominence: float = 0.0,
     group_column: str | None = None,
     time_column: str | None = None,
+    column_features: dict[str, Any] | None = None,
 ) -> pd.DataFrame:
     """逐行输出差分或滚动自相关，列名形如 ``vibration__first_difference``。
 
@@ -126,22 +158,24 @@ def temporal_features(
     cols = numeric_columns(data, columns)
     ordered = _ordered(data, group_column, time_column)
     result = pd.DataFrame(index=ordered.index)
+    plan = _single_method_plan(cols, method, column_features, TEMPORAL_METHODS)
     for column in cols:
+        chosen_method = plan[column]
         # 分组取列：后面所有 diff()/rolling() 都在组内进行，绝不跨设备。
         grouped = (
             ordered[column].groupby(ordered[group_column], sort=False, dropna=False) if group_column else None
         )
-        if method in {"first_difference", "second_difference"}:
+        if chosen_method in {"first_difference", "second_difference"}:
             if grouped is not None:
                 values = grouped.diff()
-                if method == "second_difference":
+                if chosen_method == "second_difference":
                     values = values.groupby(ordered[group_column], sort=False, dropna=False).diff()
             else:
                 values = ordered[column].diff()
-                if method == "second_difference":
+                if chosen_method == "second_difference":
                     values = values.diff()
             values = values.fillna(0.0)
-        elif method == "autocorrelation":
+        elif chosen_method == "autocorrelation":
 
             def autocorrelation(series: pd.Series) -> pd.Series:
                 # raw=False：autocorr 需要 Series，逐窗口构造一次属于必要开销。
@@ -155,7 +189,7 @@ def temporal_features(
                 else autocorrelation(ordered[column])
             )
             values = values.fillna(0.0)
-        elif method == "sum_abs_change":
+        elif chosen_method == "sum_abs_change":
 
             def sum_abs_change(series: pd.Series) -> pd.Series:
                 # min_periods=2：单个点之间没有"变化"可言，只能用 0 表示。
@@ -167,7 +201,7 @@ def temporal_features(
                 grouped.transform(sum_abs_change) if grouped is not None else sum_abs_change(ordered[column])
             )
             values = values.fillna(0.0)
-        elif method == "peak_count":
+        elif chosen_method == "peak_count":
 
             def peak_count(series: pd.Series) -> pd.Series:
                 def count(chunk: np.ndarray) -> float:
@@ -180,8 +214,8 @@ def temporal_features(
             values = grouped.transform(peak_count) if grouped is not None else peak_count(ordered[column])
             values = values.fillna(0.0)
         else:
-            raise ValueError(f"Unknown temporal feature method: {method}")
-        result[f"{column}__{method}"] = values
+            raise ValueError(f"Unknown temporal feature method: {chosen_method}")
+        result[f"{column}__{chosen_method}"] = values
     result = result.loc[data.index]
     result.attrs = {
         **data.attrs,
@@ -244,8 +278,10 @@ def entropy_features(
     step_span: str | float = "",
     prediction_horizon: str | float = "",
     prediction_gap: str | float = "",
-    current_fault_policy: str = "drop",
+    current_fault_policy: str = "positive",
     normal_label: str = "0",
+    column_features: dict[str, Any] | None = None,
+    min_window_rows: int = 0,
 ) -> dict[str, Any]:
     """按窗口计算熵特征，返回与统计/频域特征同构的输出字典。
 
@@ -265,10 +301,14 @@ def entropy_features(
     selected = methods or ["approximate_entropy", "information_entropy"]
     if any(method not in ENTROPY_METHODS for method in selected):
         raise ValueError("Unknown entropy feature method")
+    plan = (
+        column_target_plan(cols, selected, column_features, valid=ENTROPY_METHODS, label="entropy methods")
+        if column_features
+        else None
+    )
     # 箱值熵与信息熵是同一套"按箱统计的香农熵"（同一段代码、同一个 bins 参数），
     # 保留两个名字是为了对齐组件清单里的叫法：叫 binned_entropy 也要能算出来。
-    binned = "binned_entropy" in selected
-    span, stride, horizon, gap = window_arguments(
+    span, stride, horizon, gap, min_rows = window_arguments(
         window_size=window_size,
         window_span=window_span,
         step_span=step_span,
@@ -278,8 +318,9 @@ def entropy_features(
         current_fault_policy=current_fault_policy,
         time_column=time_column,
         label_column=label_column,
+        min_window_rows=min_window_rows,
     )
-    counters = {"current_fault": 0, "unknown_future": 0}
+    counters = {"current_fault": 0, "unknown_future": 0, "thin": 0, "sparse": 0}
     rows: list[dict[str, float]] = []
     labels: list[Any] = []
     keys: list[str] = []
@@ -300,18 +341,21 @@ def entropy_features(
         current_fault_policy,
         normal_label,
         counters,
+        min_rows,
     ):
         row = {}
         for column in cols:
             values = chunk[column].to_numpy(dtype=float)
             if not np.isfinite(values).all():
                 raise ValueError("Entropy features require finite numeric values")
+            # 这一列要算哪些熵：默认用全局 methods，column_features 可以逐列覆盖。
+            picked = plan[column] if plan else selected
             # 近似熵是二次复杂度，这里显式设上限，避免用户忘记设窗口时把服务拖垮。
-            if "approximate_entropy" in selected and len(values) > 2000:
+            if "approximate_entropy" in picked and len(values) > 2000:
                 raise ValueError("Approximate entropy windows are limited to 2000 rows; set window_size")
-            if "information_entropy" in selected or binned:
+            if "information_entropy" in picked or "binned_entropy" in picked:
                 row[f"{column}__information_entropy"] = _information_entropy(values, bins)
-            if "approximate_entropy" in selected:
+            if "approximate_entropy" in picked:
                 tolerance = tolerance_ratio * float(np.std(values))
                 row[f"{column}__approximate_entropy"] = _approximate_entropy(
                     values, embedding_dimension, tolerance
@@ -334,6 +378,8 @@ def entropy_features(
         gap=gap,
         current_fault_policy=current_fault_policy,
         counters=counters,
+        min_window_rows=min_rows,
+        window_count=len(rows),
     )
     outputs = _assemble(
         rows,
